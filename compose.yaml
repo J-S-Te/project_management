@@ -1,0 +1,15 @@
+services:
+  project-api:
+    build: .
+    environment:
+      PM_HTTP_ADDR: :8082
+      PM_DATA_FILE: /var/lib/project-management/data.json
+      PM_REQUIRE_IDENTITY_HEADERS: "false"
+    ports:
+      - "8082:8082"
+    volumes:
+      - project-data:/var/lib/project-management
+    restart: unless-stopped
+
+volumes:
+  project-data:
