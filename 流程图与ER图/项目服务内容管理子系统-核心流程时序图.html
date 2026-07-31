@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>项目服务内容管理子系统 · 核心流程时序图</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --card: #ffffff;
+    --line: #e9e3d6;
+    --line-soft: #f0ebde;
+    --ink: #14171e;
+    --ink-2: #3a4256;
+    --muted: #7c7a72;
+    --primary: #2f6f5e;
+    --primary-soft: rgba(47,111,94,0.08);
+    --accent: #c97b3f;
+    --warn: #b06367;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font-family: 'Outfit', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    background:
+      radial-gradient(circle at 0% 0%, rgba(47,111,94,0.04) 0%, transparent 40%),
+      radial-gradient(circle at 100% 100%, rgba(201,123,63,0.04) 0%, transparent 40%),
+      var(--bg);
+    min-height: 100dvh;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 56px 32px 96px; }
+  @media (max-width: 768px) { .wrap { padding: 32px 20px 64px; } }
+
+  /* Hero */
+  .hero { margin-bottom: 48px; }
+  .eyebrow {
+    font-size: 12px; font-weight: 500; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--primary);
+    margin-bottom: 16px;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .eyebrow::before {
+    content: ""; width: 24px; height: 1px; background: var(--primary);
+  }
+  h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 34px; font-weight: 400; line-height: 1.2;
+    margin: 0 0 16px; letter-spacing: -0.005em;
+  }
+  .hero p.lede { color: var(--ink-2); font-size: 15px; margin: 0; max-width: 720px; }
+
+  /* Section */
+  section { margin-top: 64px; }
+  .section-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 24px; }
+  .section-tag {
+    flex: 0 0 auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 500;
+    color: var(--primary); background: var(--primary-soft);
+    padding: 4px 10px; border-radius: 6px; letter-spacing: 0.04em;
+  }
+  h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 24px; font-weight: 400; margin: 0; line-height: 1.3;
+  }
+  .section-sub { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
+
+  /* Card */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 28px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  }
+
+  /* Mermaid container */
+  .mermaid {
+    background: var(--card);
+    text-align: center;
+    font-size: 13px;
+  }
+
+  /* Notes grid */
+  .notes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 20px;
+  }
+  @media (max-width: 720px) { .notes { grid-template-columns: 1fr; } }
+  .note {
+    background: var(--bg);
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .note-label {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 6px;
+  }
+  .note-text { font-size: 13px; color: var(--ink-2); margin: 0; }
+  .note ul { margin: 6px 0 0; padding-left: 16px; }
+  .note li { margin: 2px 0; }
+
+  /* Interface tags */
+  .iface {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    background: var(--primary-soft);
+    color: var(--primary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin: 2px;
+  }
+
+  /* Footer */
+  footer {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 12px;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  }
+
+  /* Mermaid overrides */
+  .mermaid svg { max-width: 100%; height: auto !important; }
+  .mermaid .actor { fill: #fafaf6 !important; stroke: var(--line) !important; }
+  .mermaid .actor-line { stroke: var(--muted) !important; }
+  .mermaid .messageLine0, .mermaid .messageLine1 { stroke: var(--ink-2) !important; stroke-width: 1px !important; }
+  .mermaid .label { color: var(--ink) !important; font-family: 'Outfit', sans-serif !important; }
+  .mermaid .loopLine { stroke: var(--accent) !important; }
+  .mermaid .activation0 { fill: var(--primary) !important; }
+  .mermaid .note { fill: var(--primary-soft) !important; stroke: var(--primary) !important; }
+  .mermaid .noteText { fill: var(--ink) !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">Mavis · 核心流程时序图</div>
+    <h1>项目服务内容管理子系统<br/>两个关键业务流的端到端验证视图</h1>
+    <p class="lede">用于 SIT/UAT 评审与跨团队对齐。基于《需求规格说明书 V1.0》+《跨系统接口清单 V0.1》编制，覆盖状态机主链路与异常闭环两条最具代表性的流程。</p>
+  </header>
+
+  <!-- ================== 流程 A ================== -->
+  <section>
+    <div class="section-head">
+      <div class="section-tag">流程 A</div>
+      <div>
+        <h2>合同 → 报告编制 全链路状态机</h2>
+        <p class="section-sub">合同生效 → 拆解 → 分配 → 实施 → 现场实施完成 → 报告编制 → 整改回路 → 下游主导（审核/归档）</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="mermaid">
+sequenceDiagram
+    autonumber
+    actor 业务管理员 as 业务管理员
+    actor 项目经理 as 项目经理
+    participant 本系统 as 本系统(SUT)
+    participant CRM as 合同管理
+    participant 报告 as 报告管理
+
+    Note over CRM,本系统: 触发: 合同生效事件
+    CRM->>本系统: IS-CRM-001 项目立项同步<br/>(contract_id + service_items)
+    本系统->>本系统: 按 批次×检测类别 拆解为 N 个服务项<br/>状态=待确认（不入待分配）
+    本系统-->>CRM: IS-CRM-002 项目编号回写<br/>(project_id + status=待确认)
+
+    业务管理员->>本系统: 核对拆解结果并确认
+    本系统->>本系统: 状态: 待确认 → 待分配
+    业务管理员->>本系统: 分配给团队负责人
+    Note right of 本系统: 团队负责人指派项目经理/实施工程师<br/>填写计划日期 → 状态: 待实施
+    项目经理->>本系统: 制定实施计划 / 发起现场实施
+    本系统->>本系统: 状态: 待实施 → 实施中
+
+    项目经理->>本系统: 汇总确认现场实施完成<br/>(实施记录齐备)
+    本系统->>本系统: 状态: 实施中 → 现场实施完成
+    本系统-->>本系统: 维护本系统状态字段 field_现场实施完成=true
+
+    Note over 本系统,报告: 关键技术同步（5 分钟缓存失效）
+    本系统->>报告: IS-REPORT-004 项目状态变更 push<br/>(new_status=报告编制/已终止)
+    报告->>报告: 清本地缓存（cache_invalidate_token）
+
+    本系统->>本系统: 状态: 现场实施完成 → 报告编制
+    报告->>本系统: IS-REPORT-001 报告发起时拉取项目信息<br/>(含证据文件长期签名 URL)
+    本系统-->>报告: project_id + service_items + 证据 URL(7y)
+
+    loop 整改回路（本系统维护）
+        项目经理->>本系统: 报告编制 → 整改中<br/>(必须填变更原因)
+        本系统->>本系统: 独立字段记录, 留痕
+        项目经理->>本系统: 原因解决 → 整改中 → 报告编制
+    end
+
+    项目经理->>本系统: 发起报告审核
+    Note right of 本系统: 自此下游主导, 本系统只落地独立字段
+    报告->>报告: 报告编制 → 报告编制已完成
+    报告->>本系统: IS-REPORT-002 状态回写<br/>(独立字段 field_报告编制已完成, 不覆盖上游)
+    报告->>报告: 报告编制已完成 → 审核已通过
+    报告->>本系统: IS-REPORT-002 状态回写<br/>(独立字段 field_审核已通过)
+    报告->>报告: 审核已通过 → 已归档
+    报告->>本系统: IS-REPORT-002 状态回写<br/>(独立字段 field_已归档)
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <div class="note-label">覆盖接口</div>
+        <div>
+          <span class="iface">IS-CRM-001</span>
+          <span class="iface">IS-CRM-002</span>
+          <span class="iface">IS-REPORT-001</span>
+          <span class="iface">IS-REPORT-002</span>
+          <span class="iface">IS-REPORT-004</span>
+        </div>
+      </div>
+      <div class="note">
+        <div class="note-label">测试要点</div>
+        <ul class="note-text" style="list-style:none;padding:0">
+          <li>· 合同生效后服务项必须先入「待确认」（非「待分配」）</li>
+          <li>· IS-CRM-001 幂等性: 重复请求不重复创建</li>
+          <li>· IS-REPORT-004 fire-and-forget, 失败不影响主流程</li>
+          <li>· IS-REPORT-002 多状态字段独立落地, 互不覆盖</li>
+          <li>· 整改回路变更原因必填, 留痕</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================== 流程 B ================== -->
+  <section>
+    <div class="section-head">
+      <div class="section-tag">流程 B</div>
+      <div>
+        <h2>异常闭环：实施中 → 上报 → 评审 → 终止 → 合同联动</h2>
+        <p class="section-sub">合规关键链路：放行/重测/终止三类评审结论，终止触发合同补充协议与结算联动</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="mermaid">
+sequenceDiagram
+    autonumber
+    actor 实施工程师 as 实施工程师
+    actor 项目经理 as 项目经理
+    actor 团队负责人 as 团队负责人/技术总监
+    participant 本系统 as 本系统(SUT)
+    participant HR as 人力/资质
+    participant 资产 as 资产/设备
+    participant 合同 as 合同管理
+
+    Note over 实施工程师,本系统: 状态: 实施中
+    实施工程师->>本系统: 上报异常(偏离)<br/>(类型/描述/证据)
+    本系统->>本系统: 服务项进入"异常评审中"<br/>填报入口关闭
+    本系统-->>团队负责人: 待办触达 (IS-AUTH-003)
+
+    团队负责人->>本系统: 查看异常详情 + 证据
+    团队负责人->>HR: IS-HR-001 人员资质查询
+    HR-->>团队负责人: 资质快照
+    团队负责人->>资产: IS-ASSET-001 设备检定状态
+    资产-->>团队负责人: 设备状态快照
+
+    alt 评审结论=放行
+        团队负责人->>本系统: 放行 + 备注
+        本系统->>本系统: 状态: 异常评审中 → 实施中<br/>(继续执行)
+    else 评审结论=重测
+        团队负责人->>本系统: 重测 + 备注
+        本系统->>本系统: 状态: 异常评审中 → 实施中<br/>(重新执行相关记录)
+    else 评审结论=终止
+        团队负责人->>本系统: 终止 + 终止原因(必填)
+        本系统->>本系统: 状态: 实施中 → 已终止
+        本系统-->>本系统: 释放设备预占 (IS-ASSET-002 release)
+        本系统->>本系统: 释放人员冲突占位
+
+        Note over 本系统,合同: 业务联动: 范围变化 → 补充协议
+        本系统->>合同: 触发补充协议流程<br/>(contract_id + 范围变更摘要)
+        合同-->>本系统: 补充协议结果回写
+
+        本系统->>本系统: 进度回传 (IS-REPORT-004)<br/>new_status=已终止
+        本系统->>本系统: 结算联动待办
+    end
+
+    Note over 本系统: 评审全程留痕: 操作人/时间/前后值<br/>异常闭环 SLA: median ≤ 1 工作日
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <div class="note-label">覆盖接口</div>
+        <div>
+          <span class="iface">IS-AUTH-003</span>
+          <span class="iface">IS-HR-001</span>
+          <span class="iface">IS-ASSET-001</span>
+          <span class="iface">IS-ASSET-002</span>
+          <span class="iface">IS-REPORT-004</span>
+        </div>
+      </div>
+      <div class="note">
+        <div class="note-label">测试要点</div>
+        <ul class="note-text" style="list-style:none;padding:0">
+          <li>· 评审期间填报入口必须关闭, 不可绕过</li>
+          <li>· 三类结论状态机路径必须分别验证</li>
+          <li>· 终止必须释放设备预占, 触发合同补充协议</li>
+          <li>· 异常闭环 SLA: median ≤ 1 工作日</li>
+          <li>· 异常评审超时看板告警, PMO 跟进</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>基于《项目服务内容管理子系统 需求规格说明书 V1.0》+《跨系统接口清单 V0.1》编制</div>
+    <div>2026-07-31 · Mavis</div>
+  </footer>
+
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'loose',
+    themeVariables: {
+      fontFamily: "'Outfit','PingFang SC','Microsoft YaHei',sans-serif",
+      fontSize: '13px',
+      primaryColor: '#ffffff',
+      primaryTextColor: '#14171e',
+      primaryBorderColor: '#e9e3d6',
+      lineColor: '#3a4256',
+      secondaryColor: '#fafaf6',
+      tertiaryColor: '#f7f5f0',
+      actorBkg: '#fafaf6',
+      actorBorder: '#e9e3d6',
+      actorTextColor: '#14171e',
+      actorLineColor: '#7c7a72',
+      signalColor: '#3a4256',
+      signalTextColor: '#14171e',
+      labelBoxBkgColor: '#fafaf6',
+      labelBoxBorderColor: '#e9e3d6',
+      labelTextColor: '#14171e',
+      loopTextColor: '#c97b3f',
+      noteBkgColor: 'rgba(47,111,94,0.08)',
+      noteBorderColor: '#2f6f5e',
+      noteTextColor: '#14171e',
+      activationBorderColor: '#2f6f5e',
+      activationBkgColor: 'rgba(47,111,94,0.2)',
+      sequenceNumberColor: '#ffffff'
+    },
+    sequence: {
+      diagramMarginX: 30,
+      diagramMarginY: 20,
+      actorMargin: 60,
+      width: 150,
+      height: 50,
+      boxMargin: 12,
+      boxTextMargin: 6,
+      noteMargin: 12,
+      messageMargin: 36,
+      mirrorActors: true,
+      bottomMarginAdj: 4,
+      useMaxWidth: true,
+      rightAngles: false,
+      showSequenceNumbers: true,
+      wrap: true,
+      wrapPadding: 12
+    }
+  });
+</script>
+</body>
+</html>
