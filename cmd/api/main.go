@@ -1,30 +1,69 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/bootstrap"
+	"github.com/j-s-te/project-management/internal/config"
 	"github.com/j-s-te/project-management/internal/httpapi"
-	"github.com/j-s-te/project-management/internal/store"
+	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"github.com/j-s-te/project-management/internal/platform"
+	"github.com/j-s-te/project-management/internal/workflows"
+	"go.temporal.io/sdk/worker"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	s, err := store.Open(os.Getenv("PM_DATA_FILE"))
+	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("open store", "error", err)
+		logger.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	address := strings.TrimSpace(os.Getenv("PM_HTTP_ADDR"))
-	if address == "" {
-		address = ":8082"
+	ctx := context.Background()
+	db, err := bootstrap.OpenDatabase(ctx, cfg.MySQLDSN)
+	if err != nil {
+		logger.Error("database failed", "error", err)
+		os.Exit(1)
 	}
-	requireIdentity := strings.EqualFold(os.Getenv("PM_REQUIRE_IDENTITY_HEADERS"), "true")
-	server := &http.Server{Addr: address, Handler: httpapi.New(s, logger, requireIdentity), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
-	logger.Info("project management api started", "address", address, "identity_headers_required", requireIdentity)
+	defer bootstrap.CloseDatabase(db)
+	temporalClient, err := bootstrap.OpenTemporal(ctx, cfg)
+	if err != nil {
+		logger.Error("temporal failed", "error", err)
+		os.Exit(1)
+	}
+	defer temporalClient.Close()
+	repository := store.NewRepository(db)
+	var embeddedWorker worker.Worker
+	if cfg.RunWorkerWithAPI {
+		embeddedWorker = worker.New(temporalClient, cfg.TemporalTaskQueue, worker.Options{DisableRegistrationAliasing: true})
+		workflows.Register(embeddedWorker, &workflows.Activities{Store: repository})
+		if err := embeddedWorker.Start(); err != nil {
+			logger.Error("start embedded workflow worker", "error", err)
+			os.Exit(1)
+		}
+		defer embeddedWorker.Stop()
+	}
+	startupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	identity, err := platform.NewOIDCAuthenticator(startupCtx, platform.OIDCOptions{Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, RedirectURI: cfg.OIDCRedirectURI, PostLogoutRedirectURI: cfg.OIDCPostLogoutRedirectURI, TenantID: cfg.OIDCTenantID, SessionCookieName: cfg.OIDCSessionCookieName, SessionTTL: cfg.OIDCSessionTTL, AuthorizationRefreshInterval: cfg.OIDCAuthorizationRefresh, SessionSecure: cfg.OIDCSessionSecure, PathPrefix: cfg.AppPathPrefix})
+	if err != nil {
+		logger.Error("initialize platform OIDC", "error", err)
+		os.Exit(1)
+	}
+	if err := platform.SyncAuthorizationCatalog(startupCtx, platform.CatalogSyncOptions{Enabled: cfg.PlatformCatalogSync, BaseURL: cfg.PlatformBaseURL, ApplicationID: cfg.PlatformApplicationID, ClientID: cfg.PlatformCatalogClientID, ClientSecret: cfg.PlatformCatalogClientSecret}); err != nil {
+		logger.Error("sync platform authorization catalog", "error", err)
+		os.Exit(1)
+	}
+	audit := platform.NewAuditReporter(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
+	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue}
+	router := httpapi.NewRouter(service, identity, audit, logger)
+	server := &http.Server{Addr: cfg.HTTPAddress, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second}
+	logger.Info("project management API started", "address", cfg.HTTPAddress, "task_queue", cfg.TemporalTaskQueue, "embedded_worker", cfg.RunWorkerWithAPI)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)

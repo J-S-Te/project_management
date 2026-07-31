@@ -3,6 +3,7 @@ package domain
 import "time"
 
 type Project struct {
+	TenantID  string    `json:"-"`
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Customer  string    `json:"customer"`
@@ -20,6 +21,7 @@ type Project struct {
 }
 
 type ServiceItem struct {
+	TenantID    string `json:"-"`
 	ID          string `json:"id"`
 	ProjectID   string `json:"project_id"`
 	Batch       string `json:"batch"`
@@ -32,13 +34,14 @@ type ServiceItem struct {
 }
 
 type Rule struct {
-	ID      int64  `json:"id"`
-	Kind    string `json:"kind"`
-	Name    string `json:"name"`
-	Scope   string `json:"scope"`
-	Trigger string `json:"trigger"`
-	Enabled bool   `json:"enabled"`
-	Updated string `json:"updated"`
+	TenantID string `json:"-"`
+	ID       int64  `json:"id"`
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	Scope    string `json:"scope"`
+	Trigger  string `json:"trigger"`
+	Enabled  bool   `json:"enabled"`
+	Updated  string `json:"updated"`
 }
 
 type Snapshot struct {

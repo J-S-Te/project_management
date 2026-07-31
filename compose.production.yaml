@@ -1,0 +1,40 @@
+x-project-runtime: &project-runtime
+  image: ${PROJECT_IMAGE_REF:?PROJECT_IMAGE_REF is required}
+  env_file:
+    - ${PROJECT_RUNTIME_ENV_FILE:-.env.local}
+  environment:
+    PM_HTTP_ADDR: :8082
+    PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}
+
+services:
+  migrate:
+    <<: *project-runtime
+    entrypoint: ["/usr/local/bin/project-migrate"]
+    restart: "no"
+
+  project-api:
+    <<: *project-runtime
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      platform:
+        aliases: [project-api]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    profiles: ["split-runtime"]
+    <<: *project-runtime
+    entrypoint: ["/usr/local/bin/project-worker"]
+    restart: unless-stopped
+
+networks:
+  platform:
+    name: ${PLATFORM_DOCKER_NETWORK:-basic-platform-local_default}
+    external: true

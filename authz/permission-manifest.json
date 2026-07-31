@@ -1,0 +1,16 @@
+{
+  "catalog_version": "1",
+  "permissions": [
+    {"code":"project.read","name":"查看项目与执行数据","action":"read","resource_code":"project","resource_name":"项目","risk_level":"LOW"},
+    {"code":"project.create","name":"创建项目","action":"create","resource_code":"project","resource_name":"项目","risk_level":"MEDIUM"},
+    {"code":"service_item.confirm","name":"确认服务项拆解","action":"confirm","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"},
+    {"code":"project_rule.manage","name":"管理项目规则","action":"manage","resource_code":"project_rule","resource_name":"项目规则","risk_level":"HIGH"}
+  ],
+  "roles": [
+    {"code":"admin","name":"项目系统管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage"]},
+    {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage"]},
+    {"code":"project_manager","name":"项目经理","permissions":["project.read","service_item.confirm"]},
+    {"code":"engineer","name":"实施工程师","permissions":["project.read"]},
+    {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage"]}
+  ]
+}

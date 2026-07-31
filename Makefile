@@ -1,10 +1,16 @@
-.PHONY: run test build
+.PHONY: run worker migrate test build
 
 run:
-	PM_DATA_FILE=./data/project-management.json go run ./cmd/api
+	go run ./cmd/api
+
+worker:
+	go run ./cmd/worker
+
+migrate:
+	go run ./cmd/migrate
 
 test:
 	go test ./...
 
 build:
-	go build ./cmd/api
+	go build ./cmd/api ./cmd/worker ./cmd/migrate

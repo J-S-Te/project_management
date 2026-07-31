@@ -1,200 +1,279 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
-	"github.com/j-s-te/project-management/internal/store"
+	"github.com/j-s-te/project-management/internal/platform"
+	"github.com/oklog/ulid/v2"
 )
 
-type API struct {
-	store           *store.Store
-	logger          *slog.Logger
-	requireIdentity bool
+type Identity interface {
+	Authenticate(context.Context, *http.Request) (platform.Principal, error)
+}
+type OIDCFlow interface {
+	Login(http.ResponseWriter, *http.Request)
+	Callback(http.ResponseWriter, *http.Request)
+	Logout(http.ResponseWriter, *http.Request)
+	LogoutLocal(http.ResponseWriter, *http.Request)
 }
 
-func New(s *store.Store, logger *slog.Logger, requireIdentity bool) http.Handler {
-	api := &API{store: s, logger: logger, requireIdentity: requireIdentity}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", api.health)
-	mux.HandleFunc("GET /api/v1/dashboard", api.auth(api.dashboard))
-	mux.HandleFunc("GET /api/v1/projects", api.auth(api.listProjects))
-	mux.HandleFunc("POST /api/v1/projects", api.auth(api.createProject))
-	mux.HandleFunc("GET /api/v1/projects/{id}", api.auth(api.getProject))
-	mux.HandleFunc("GET /api/v1/service-items", api.auth(api.listServiceItems))
-	mux.HandleFunc("POST /api/v1/service-items/confirm", api.auth(api.confirmServiceItems))
-	mux.HandleFunc("GET /api/v1/rules", api.auth(api.listRules))
-	mux.HandleFunc("POST /api/v1/rules", api.auth(api.createRule))
-	mux.HandleFunc("PATCH /api/v1/rules/{id}", api.auth(api.updateRule))
-	return api.middleware(mux)
+type Handler struct {
+	service  *application.Service
+	identity Identity
+	audit    platform.AuditReporter
+	logger   *slog.Logger
 }
 
-func (a *API) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		started := time.Now()
-		next.ServeHTTP(w, r)
-		a.logger.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(started).Milliseconds())
-	})
+func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger) *gin.Engine {
+	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
+	router := gin.New()
+	router.Use(gin.Recovery(), requestID(), securityHeaders())
+	router.GET("/healthz", func(c *gin.Context) { writeData(c, http.StatusOK, map[string]string{"status": "ok"}) })
+	if flow, ok := identity.(OIDCFlow); ok {
+		router.GET("/auth/login", func(c *gin.Context) { flow.Login(c.Writer, c.Request) })
+		router.GET("/auth/callback", func(c *gin.Context) { flow.Callback(c.Writer, c.Request) })
+		router.GET("/auth/logout", func(c *gin.Context) { flow.Logout(c.Writer, c.Request) })
+		router.POST("/auth/local-logout", func(c *gin.Context) { flow.LogoutLocal(c.Writer, c.Request) })
+	}
+	api := router.Group("/api/v1")
+	api.Use(h.authenticate(), h.auditWrites())
+	api.GET("/auth/me", h.me)
+	api.GET("/dashboard", require("project.read"), h.dashboard)
+	api.GET("/projects", require("project.read"), h.listProjects)
+	api.POST("/projects", require("project.create"), h.createProject)
+	api.GET("/projects/:id", require("project.read"), h.getProject)
+	api.GET("/service-items", require("project.read"), h.listServiceItems)
+	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
+	api.GET("/rules", require("project.read"), h.listRules)
+	api.POST("/rules", require("project_rule.manage"), h.createRule)
+	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
+	return router
 }
 
-func (a *API) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if a.requireIdentity && strings.TrimSpace(r.Header.Get("X-Authenticated-User")) == "" {
-			writeError(w, http.StatusUnauthorized, "PM_UNAUTHENTICATED", "缺少可信网关注入的用户身份")
+func requestID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+		if id == "" {
+			id = ulid.Make().String()
+		}
+		c.Request.Header.Set("X-Request-ID", id)
+		c.Header("X-Request-ID", id)
+		c.Next()
+	}
+}
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Cache-Control", "no-store")
+		c.Next()
+	}
+}
+func (h *Handler) authenticate() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.identity == nil {
+			writeError(c, http.StatusServiceUnavailable, "PM_IDENTITY_UNAVAILABLE", "身份服务未配置")
+			c.Abort()
 			return
 		}
-		next(w, r)
+		p, err := h.identity.Authenticate(c.Request.Context(), c.Request)
+		if err != nil {
+			if errors.Is(err, platform.ErrUnauthenticated) {
+				writeError(c, http.StatusUnauthorized, "PM_UNAUTHENTICATED", "项目系统登录状态已失效")
+			} else {
+				h.logger.Error("authenticate request", "error", err)
+				writeError(c, http.StatusServiceUnavailable, "PM_IDENTITY_UNAVAILABLE", "身份服务暂不可用")
+			}
+			c.Abort()
+			return
+		}
+		c.Set("principal", p)
+		c.Next()
 	}
 }
-
-func (a *API) health(w http.ResponseWriter, _ *http.Request) {
-	writeData(w, http.StatusOK, map[string]string{"status": "ok"})
+func require(permission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !principal(c).Has(permission) {
+			writeError(c, http.StatusForbidden, "PM_FORBIDDEN", "当前用户没有执行此操作的权限")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
-func (a *API) dashboard(w http.ResponseWriter, _ *http.Request) {
-	writeData(w, http.StatusOK, a.store.Dashboard())
+func principal(c *gin.Context) platform.Principal {
+	value, _ := c.Get("principal")
+	p, _ := value.(platform.Principal)
+	return p
 }
 
-func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
-	writeData(w, http.StatusOK, a.store.ListProjects(r.URL.Query().Get("q"), r.URL.Query().Get("status")))
+func (h *Handler) auditWrites() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		if h.audit == nil || c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+			return
+		}
+		p := principal(c)
+		result := "SUCCESS"
+		if c.Writer.Status() >= 400 {
+			result = "FAILURE"
+		}
+		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: c.GetHeader("X-Request-ID"), Result: result, ReasonCode: strconv.Itoa(c.Writer.Status())}
+		if err := h.audit.Report(c.Request.Context(), event); err != nil {
+			h.logger.Error("report platform audit", "error", err)
+		}
+	}
+}
+func auditResource(path string) string {
+	if strings.Contains(path, "service-items") {
+		return "SERVICE_ITEM"
+	}
+	if strings.Contains(path, "rules") {
+		return "PROJECT_RULE"
+	}
+	return "PROJECT"
 }
 
-func (a *API) getProject(w http.ResponseWriter, r *http.Request) {
-	project, err := a.store.GetProject(r.PathValue("id"))
+func (h *Handler) me(c *gin.Context) {
+	p := principal(c)
+	permissions := []string{}
+	for code, granted := range p.Permissions {
+		if granted {
+			permissions = append(permissions, code)
+		}
+	}
+	sort.Strings(permissions)
+	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "role_config_hash": p.RoleConfigHash, "authz_revision": p.AuthzRevision})
+}
+func (h *Handler) dashboard(c *gin.Context) {
+	item, err := h.service.Dashboard(c.Request.Context(), principal(c))
 	if err != nil {
-		a.storeError(w, err)
+		writeServiceError(c, err)
 		return
 	}
-	writeData(w, http.StatusOK, project)
+	writeData(c, http.StatusOK, item)
 }
-
-func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) listProjects(c *gin.Context) {
+	items, err := h.service.ListProjects(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) getProject(c *gin.Context) {
+	item, err := h.service.GetProject(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+func (h *Handler) createProject(c *gin.Context) {
 	var input domain.Project
-	if !decode(w, r, &input) {
+	if !decode(c, &input) {
 		return
 	}
-	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Customer) == "" || strings.TrimSpace(input.Contract) == "" {
-		writeError(w, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "项目名称、客户和合同编号为必填项")
-		return
-	}
-	created, err := a.store.CreateProject(input)
+	item, err := h.service.CreateProject(c.Request.Context(), principal(c), input)
 	if err != nil {
-		a.storeError(w, err)
+		writeServiceError(c, err)
 		return
 	}
-	a.audit(r, "project.create", created.ID)
-	writeData(w, http.StatusCreated, created)
+	writeData(c, http.StatusCreated, item)
 }
-
-func (a *API) listServiceItems(w http.ResponseWriter, r *http.Request) {
-	writeData(w, http.StatusOK, a.store.ListServiceItems(r.URL.Query().Get("project_id")))
+func (h *Handler) listServiceItems(c *gin.Context) {
+	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
 }
-
-func (a *API) confirmServiceItems(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) confirmServiceItems(c *gin.Context) {
 	var input struct {
 		IDs []string `json:"ids"`
 	}
-	if !decode(w, r, &input) {
+	if !decode(c, &input) {
 		return
 	}
-	if len(input.IDs) == 0 {
-		writeError(w, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "至少选择一个服务项")
-		return
-	}
-	items, err := a.store.ConfirmServiceItems(input.IDs)
+	items, err := h.service.ConfirmServiceItems(c.Request.Context(), principal(c), input.IDs)
 	if err != nil {
-		a.storeError(w, err)
+		writeServiceError(c, err)
 		return
 	}
-	a.audit(r, "service_items.confirm", strings.Join(input.IDs, ","))
-	writeData(w, http.StatusOK, items)
+	writeData(c, http.StatusOK, items)
 }
-
-func (a *API) listRules(w http.ResponseWriter, r *http.Request) {
-	writeData(w, http.StatusOK, a.store.ListRules(r.URL.Query().Get("kind")))
+func (h *Handler) listRules(c *gin.Context) {
+	items, err := h.service.ListRules(c.Request.Context(), principal(c), c.Query("kind"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
 }
-
-func (a *API) createRule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) createRule(c *gin.Context) {
 	var input domain.Rule
-	if !decode(w, r, &input) {
+	if !decode(c, &input) {
 		return
 	}
-	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Scope) == "" {
-		writeError(w, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "规则名称和适用范围为必填项")
-		return
-	}
-	created, err := a.store.CreateRule(input)
+	item, err := h.service.CreateRule(c.Request.Context(), principal(c), input)
 	if err != nil {
-		a.storeError(w, err)
+		writeServiceError(c, err)
 		return
 	}
-	a.audit(r, "rule.create", strconv.FormatInt(created.ID, 10))
-	writeData(w, http.StatusCreated, created)
+	writeData(c, http.StatusCreated, item)
 }
-
-func (a *API) updateRule(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+func (h *Handler) updateRule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "PM_INVALID_ID", "规则编号不合法")
+		writeError(c, http.StatusBadRequest, "PM_INVALID_ID", "规则编号不合法")
 		return
 	}
 	var input struct {
 		Enabled *bool `json:"enabled"`
 	}
-	if !decode(w, r, &input) {
+	if !decode(c, &input) {
 		return
 	}
 	if input.Enabled == nil {
-		writeError(w, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "enabled 为必填项")
+		writeServiceError(c, application.ErrValidation)
 		return
 	}
-	updated, err := a.store.SetRuleEnabled(id, *input.Enabled)
+	item, err := h.service.SetRuleEnabled(c.Request.Context(), principal(c), id, *input.Enabled)
 	if err != nil {
-		a.storeError(w, err)
+		writeServiceError(c, err)
 		return
 	}
-	a.audit(r, "rule.update", strconv.FormatInt(id, 10))
-	writeData(w, http.StatusOK, updated)
+	writeData(c, http.StatusOK, item)
 }
 
-func (a *API) audit(r *http.Request, action, resource string) {
-	a.logger.Info("audit", "action", action, "resource", resource, "actor", r.Header.Get("X-Authenticated-User"), "request_id", r.Header.Get("X-Request-ID"))
-}
-
-func (a *API) storeError(w http.ResponseWriter, err error) {
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "PM_NOT_FOUND", "资源不存在")
-		return
-	}
-	a.logger.Error("store operation failed", "error", err)
-	writeError(w, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
-}
-
-func decode(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeError(w, http.StatusBadRequest, "PM_INVALID_JSON", fmt.Sprintf("请求内容不合法：%v", err))
+func decode(c *gin.Context, target any) bool {
+	decoder := c.ShouldBindJSON(target)
+	if decoder != nil {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_JSON", "请求内容不合法")
 		return false
 	}
 	return true
 }
-
-func writeData(w http.ResponseWriter, status int, data any) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+func writeServiceError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, application.ErrNotFound):
+		writeError(c, http.StatusNotFound, "PM_NOT_FOUND", "资源不存在")
+	case errors.Is(err, application.ErrValidation):
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "请求参数不合法")
+	default:
+		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
+	}
 }
-
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "message": message})
+func writeData(c *gin.Context, status int, data any) { c.JSON(status, gin.H{"data": data}) }
+func writeError(c *gin.Context, status int, code, message string) {
+	c.JSON(status, gin.H{"code": code, "message": message})
 }
