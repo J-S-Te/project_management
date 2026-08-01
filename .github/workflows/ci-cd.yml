@@ -85,7 +85,7 @@ jobs:
           DEPLOY_PORT: ${{ secrets.PROJECT_DEPLOY_PORT || '22' }}
           DEPLOY_SSH_KEY: ${{ secrets.PROJECT_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.PROJECT_DEPLOY_KNOWN_HOSTS }}
-          DEPLOY_PATH: ${{ vars.PROJECT_DEPLOY_PATH || '/opt/project-management' }}
+          DEPLOY_PATH: ${{ vars.PROJECT_DEPLOY_PATH || '/opt/basic-platform' }}
           IMAGE_REF: ${{ needs.image.outputs.image_ref }}
         run: |
           set -Eeuo pipefail
