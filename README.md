@@ -14,7 +14,7 @@
 
 ## 本地运行
 
-项目系统独立构建、独立 Compose、独立 CI/CD，不由 `platform` 仓库的 Compose 或部署脚本管理。首次接入时只需通过平台管理 API/控制台登记 `project_management` Application、Environment、Login Target 和 OAuth Client，并把浏览器客户端及机器客户端凭据安全写入项目部署机的 `.env.local`。不要在 `platform` 仓库添加项目容器或修改平台工作流。
+本地开发使用项目自己的 Compose 和 `.env.local`。生产发布与其他子系统一致：本仓库独立构建不可变镜像，服务器端由 `platform/deploy/production` 的统一 Compose 和 `bin/deploy-service.sh` 管理数据库备份、迁移、服务更新、健康检查及失败回滚。首次接入时需要通过平台管理 API/控制台登记 `project_management` Application、Environment、Login Target 和独立 OAuth Client，并把受控凭据写入服务器 `/opt/basic-platform/.env`。
 
 直接在宿主机运行后端时加载项目自己的环境文件：
 
@@ -29,7 +29,7 @@ make run
 docker compose --env-file .env.local up -d --build
 ```
 
-生产环境使用 `compose.production.yaml`，镜像由本仓库 `.github/workflows/ci-cd.yml` 独立构建并按 digest 发布。
+生产镜像由本仓库 `.github/workflows/ci-cd.yml` 构建并按 digest 发布，远端统一调用 `/opt/basic-platform/bin/deploy-service.sh project`。
 
 服务默认监听 `:8082`，依赖 MySQL 与 Temporal。另一个终端在 `frontend/` 运行：
 
