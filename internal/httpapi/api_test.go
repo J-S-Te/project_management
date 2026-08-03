@@ -15,6 +15,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/oklog/ulid/v2"
 )
 
 type identity struct {
@@ -159,5 +161,28 @@ func TestUnauthenticated(t *testing.T) {
 	response := perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestRequestIDReplacesInvalidClientValue(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("X-Request-ID", "untrusted request id")
+	response := httptest.NewRecorder()
+	httpapi.NewRouter(nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).ServeHTTP(response, request)
+
+	if _, err := ulid.ParseStrict(response.Header().Get("X-Request-ID")); err != nil {
+		t.Fatalf("generated X-Request-ID is not a ULID: %v", err)
+	}
+}
+
+func TestRequestIDPreservesValidClientULID(t *testing.T) {
+	id := ulid.Make().String()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("X-Request-ID", id)
+	response := httptest.NewRecorder()
+	httpapi.NewRouter(nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).ServeHTTP(response, request)
+
+	if got := response.Header().Get("X-Request-ID"); got != id {
+		t.Fatalf("X-Request-ID = %q, want %q", got, id)
 	}
 }

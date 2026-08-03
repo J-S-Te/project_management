@@ -78,6 +78,9 @@ func Load() (Config, error) {
 }
 
 func (c Config) validate() error {
+	if strings.TrimSpace(c.HTTPAddress) == "" {
+		return fmt.Errorf("PM_HTTP_ADDR must not be empty")
+	}
 	if strings.TrimSpace(c.MySQLDSN) == "" {
 		return fmt.Errorf("MYSQL_DSN is required")
 	}
@@ -89,17 +92,29 @@ func (c Config) validate() error {
 			return fmt.Errorf("%s is required", name)
 		}
 	}
-	for name, value := range map[string]string{"PLATFORM_BASE_URL": c.PlatformBaseURL, "OIDC_ISSUER": c.OIDCIssuer, "OIDC_REDIRECT_URI": c.OIDCRedirectURI} {
-		parsed, err := url.ParseRequestURI(value)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return fmt.Errorf("%s must be a valid HTTP(S) URL", name)
-		}
+	if !validHTTPOrigin(c.PlatformBaseURL) {
+		return fmt.Errorf("PLATFORM_BASE_URL must be an HTTP(S) origin")
+	}
+	if !validHTTPURL(c.OIDCIssuer) {
+		return fmt.Errorf("OIDC_ISSUER must be a valid HTTP(S) URL")
+	}
+	if c.OIDCBackchannelBaseURL != "" && !validHTTPOrigin(c.OIDCBackchannelBaseURL) {
+		return fmt.Errorf("OIDC_BACKCHANNEL_BASE_URL must be an HTTP(S) origin")
+	}
+	if !validRedirectURL(c.OIDCRedirectURI) {
+		return fmt.Errorf("OIDC_REDIRECT_URI must be a valid HTTP(S) redirect URL")
+	}
+	if c.OIDCPostLogoutRedirectURI != "" && !validRedirectURL(c.OIDCPostLogoutRedirectURI) {
+		return fmt.Errorf("OIDC_POST_LOGOUT_REDIRECT_URI must be a valid HTTP(S) redirect URL")
 	}
 	if c.OIDCSessionTTL <= 0 || c.OIDCAuthorizationRefresh <= 0 || c.OIDCAuthorizationRefresh >= c.OIDCSessionTTL {
 		return fmt.Errorf("OIDC refresh interval must be positive and shorter than session TTL")
 	}
 	if c.AppPathPrefix == "/" || !strings.HasPrefix(c.AppPathPrefix, "/") || strings.HasSuffix(c.AppPathPrefix, "/") {
 		return fmt.Errorf("APP_PATH_PREFIX must be a non-root absolute path without trailing slash")
+	}
+	if !validCookieName(c.OIDCSessionCookieName) {
+		return fmt.Errorf("OIDC_SESSION_COOKIE_NAME must be a valid cookie name")
 	}
 	if (c.PlatformAuditClientID == "") != (c.PlatformAuditClientSecret == "") {
 		return fmt.Errorf("platform audit client ID and secret must be configured together")
@@ -108,6 +123,35 @@ func (c Config) validate() error {
 		return fmt.Errorf("catalog sync requires application ID, client ID and secret")
 	}
 	return nil
+}
+
+func validHTTPURL(value string) bool {
+	parsed, err := url.ParseRequestURI(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
+}
+
+func validHTTPOrigin(value string) bool {
+	if !validHTTPURL(value) {
+		return false
+	}
+	parsed, _ := url.ParseRequestURI(value)
+	return parsed.RawQuery == "" && (parsed.Path == "" || parsed.Path == "/")
+}
+
+func validRedirectURL(value string) bool {
+	return validHTTPURL(value)
+}
+
+func validCookieName(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	for _, character := range value {
+		if character <= 0x20 || character >= 0x7f || strings.ContainsRune("()<>@,;:\\\"/[]?={}", character) {
+			return false
+		}
+	}
+	return true
 }
 
 func env(key, fallback string) string {

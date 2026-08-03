@@ -43,6 +43,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		router.GET("/auth/callback", func(c *gin.Context) { flow.Callback(c.Writer, c.Request) })
 		router.GET("/auth/logout", func(c *gin.Context) { flow.Logout(c.Writer, c.Request) })
 		router.POST("/auth/local-logout", func(c *gin.Context) { flow.LogoutLocal(c.Writer, c.Request) })
+		router.GET("/logged-out", loggedOut)
 	}
 	api := router.Group("/api/v1")
 	api.Use(h.authenticate(), h.auditWrites())
@@ -61,14 +62,24 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 
 func requestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := strings.TrimSpace(c.GetHeader("X-Request-ID"))
-		if id == "" {
+		id := strings.ToUpper(strings.TrimSpace(c.GetHeader("X-Request-ID")))
+		if _, err := ulid.ParseStrict(id); err != nil {
 			id = ulid.Make().String()
 		}
 		c.Request.Header.Set("X-Request-ID", id)
 		c.Header("X-Request-ID", id)
 		c.Next()
 	}
+}
+
+func loggedOut(c *gin.Context) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	c.String(http.StatusOK, `<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>已退出 · 项目管理系统</title>
+<style>body{display:grid;place-items:center;min-height:100vh;margin:0;font:16px system-ui;background:#f4f7fb;color:#172033}main{padding:40px;border:1px solid #dbe3ef;border-radius:16px;background:white;text-align:center;box-shadow:0 12px 32px #0f172a12}a{color:#2563eb}</style>
+<main><h1>已安全退出</h1><p>项目管理系统本地会话已清除。</p><a href="./">重新进入项目管理系统</a></main></html>`)
 }
 func securityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {

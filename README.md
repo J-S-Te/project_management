@@ -49,6 +49,7 @@ npm run dev
 | `PROJECT_RUN_WORKER_WITH_API` | `true` | API 是否内嵌 Temporal Worker；拆分部署时关闭并启动 `cmd/worker` |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | 无 | 平台签发的项目系统浏览器客户端 |
 | `OIDC_REDIRECT_URI` / `OIDC_TENANT_ID` | 无 | 回调地址和固定租户边界 |
+| `PROJECT_PLATFORM_BACKCHANNEL_BASE_URL` | `http://platform-api:8080` | Compose 容器访问平台 API 与 OIDC 后通道的内部地址；与浏览器使用的公开 `OIDC_ISSUER` 分离 |
 | `PLATFORM_AUDIT_CLIENT_*` | 空 | 具备 `audit.ingest` 的机器客户端；配置后上报写操作审计 |
 | `PLATFORM_AUTHORIZATION_CATALOG_*` | 空 | 具备 `authorization.catalog.sync` 的机器客户端 |
 

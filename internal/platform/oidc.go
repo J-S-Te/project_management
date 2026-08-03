@@ -19,6 +19,8 @@ import (
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+const authorizationRefreshRetryInterval = 5 * time.Second
+
 type OIDCOptions struct {
 	Issuer, BackchannelBaseURL, ClientID, ClientSecret, RedirectURI, PostLogoutRedirectURI string
 	TenantID, SessionCookieName, PathPrefix                                                string
@@ -41,11 +43,12 @@ type transaction struct {
 	ExpiresAt       time.Time
 }
 type session struct {
-	mu                                     sync.Mutex
-	Principal                              Principal
-	IDToken                                string
-	Token                                  *oauth2.Token
-	RefreshedAt, TokenExpiresAt, ExpiresAt time.Time
+	mu                          sync.Mutex
+	Principal                   Principal
+	IDToken                     string
+	Token                       *oauth2.Token
+	RefreshedAt, RefreshRetryAt time.Time
+	TokenExpiresAt, ExpiresAt   time.Time
 }
 
 type OIDCAuthenticator struct {
@@ -58,6 +61,7 @@ type OIDCAuthenticator struct {
 	transactions map[string]transaction
 	sessions     map[string]*session
 	now          func() time.Time
+	refresh      func(context.Context, *session, time.Time) error
 }
 
 func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions) (*OIDCAuthenticator, error) {
@@ -104,15 +108,24 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 		a.deleteSession(cookie.Value, current)
 		return Principal{}, ErrUnauthenticated
 	}
-	if !current.TokenExpiresAt.After(now) || now.Sub(current.RefreshedAt) >= a.options.AuthorizationRefreshInterval {
-		if err := a.refresh(ctx, current, now); err != nil {
-			if !current.TokenExpiresAt.After(now) || refreshWasRejected(err) {
+	tokenExpired := !current.TokenExpiresAt.After(now)
+	refreshDue := tokenExpired || now.Sub(current.RefreshedAt) >= a.options.AuthorizationRefreshInterval
+	refreshAllowed := tokenExpired || !current.RefreshRetryAt.After(now)
+	if refreshDue && refreshAllowed {
+		refresh := a.refresh
+		if refresh == nil {
+			refresh = a.refreshSession
+		}
+		if err := refresh(ctx, current, now); err != nil {
+			if tokenExpired || refreshWasRejected(err) {
 				a.deleteSession(cookie.Value, current)
 				return Principal{}, ErrUnauthenticated
 			}
 			// 平台短暂不可用时保留尚未过期的已验证主体；令牌过期或被撤销仍失败关闭。
+			current.RefreshRetryAt = now.Add(authorizationRefreshRetryInterval)
 			return current.Principal, nil
 		}
+		current.RefreshRetryAt = time.Time{}
 	}
 	return current.Principal, nil
 }
@@ -210,7 +223,7 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, a.PublicPath("/"), http.StatusFound)
 }
 
-func (a *OIDCAuthenticator) refresh(ctx context.Context, current *session, now time.Time) error {
+func (a *OIDCAuthenticator) refreshSession(ctx context.Context, current *session, now time.Time) error {
 	if current.Token == nil || current.Token.RefreshToken == "" {
 		return errors.New("refresh token missing")
 	}

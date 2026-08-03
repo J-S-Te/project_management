@@ -18,7 +18,10 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-type AuditEvent struct{ ActorID, ActorName, Action, ResourceType, ResourceID, RequestID, Result, ReasonCode string }
+type AuditEvent struct {
+	ActorID, ActorName, Action, ResourceType, ResourceID string
+	RequestID, CorrelationID, Result, ReasonCode         string
+}
 type AuditReporter interface {
 	Report(context.Context, AuditEvent) error
 }
@@ -82,7 +85,7 @@ type auditClient struct {
 }
 
 func NewAuditReporter(baseURL, clientID, clientSecret, applicationCode, environmentCode string) AuditReporter {
-	if clientID == "" || clientSecret == "" {
+	if clientID == "" || clientSecret == "" || applicationCode == "" || environmentCode == "" {
 		return nil
 	}
 	return &auditClient{newServiceClient(baseURL, clientID, clientSecret), applicationCode, environmentCode}
@@ -100,7 +103,15 @@ func (c *auditClient) Report(ctx context.Context, event AuditEvent) error {
 	if _, err := rand.Read(parent); err != nil {
 		return err
 	}
-	payload := map[string]any{"event_id": ulid.Make().String(), "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "application_code": c.applicationCode, "environment_code": c.environmentCode, "actor_type": "USER", "actor_id": event.ActorID, "actor_name": event.ActorName, "action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID, "request_id": event.RequestID, "trace_id": hex.EncodeToString(trace), "correlation_id": event.RequestID, "result": event.Result, "risk_level": "LOW", "reason_code": event.ReasonCode}
+	requestID := strings.TrimSpace(event.RequestID)
+	if requestID == "" {
+		requestID = ulid.Make().String()
+	}
+	correlationID := strings.TrimSpace(event.CorrelationID)
+	if correlationID == "" {
+		correlationID = requestID
+	}
+	payload := map[string]any{"event_id": ulid.Make().String(), "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "application_code": c.applicationCode, "environment_code": c.environmentCode, "actor_type": "USER", "actor_id": event.ActorID, "actor_name": event.ActorName, "action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID, "request_id": requestID, "trace_id": hex.EncodeToString(trace), "correlation_id": correlationID, "result": event.Result, "risk_level": "LOW", "reason_code": event.ReasonCode}
 	body, _ := json.Marshal(payload)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.service.baseURL+"/api/v1/audit/events", bytes.NewReader(body))
 	if err != nil {
@@ -108,7 +119,9 @@ func (c *auditClient) Report(ctx context.Context, event AuditEvent) error {
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Request-ID", event.RequestID)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Request-ID", requestID)
+	request.Header.Set("X-Correlation-ID", correlationID)
 	request.Header.Set("traceparent", "00-"+hex.EncodeToString(trace)+"-"+hex.EncodeToString(parent)+"-01")
 	response, err := c.service.client.Do(request)
 	if err != nil {
