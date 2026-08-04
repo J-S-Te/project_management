@@ -16,6 +16,8 @@
 
 本地开发使用项目自己的 Compose 和 `.env.local`。生产发布与其他子系统一致：本仓库独立构建不可变镜像，服务器端由 `platform/deploy/production` 的统一 Compose 和 `bin/deploy-service.sh` 管理数据库备份、迁移、服务更新、健康检查及失败回滚。首次接入时需要通过平台管理 API/控制台登记 `project_management` Application、Environment、Login Target 和独立 OAuth Client，并把受控凭据写入服务器 `/opt/basic-platform/.env`。
 
+生产接入前必须先发布不可变镜像：本仓库 `main` 分支的 CI/CD 会把镜像推送到 ACR，并调用服务器端 `deploy-service.sh project <镜像@sha256:digest>` 把 `PROJECT_IMAGE` 写入 `/opt/basic-platform/.release.env`。若服务器上 `.release.env` 缺少 `PROJECT_IMAGE` 或仍是可变 tag，平台接入预检会以“镜像必须是不可变 digest”拒绝；重新运行本仓库 CI（或再次推送 main）即可完成镜像发布。
+
 直接在宿主机运行后端时加载项目自己的环境文件：
 
 ```bash
