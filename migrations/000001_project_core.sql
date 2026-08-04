@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS pm_service_item (
   site VARCHAR(255) NOT NULL DEFAULT '',
   category VARCHAR(255) NOT NULL DEFAULT '',
   requirement TEXT NOT NULL,
-  system VARCHAR(128) NOT NULL DEFAULT '',
+  `system` VARCHAR(128) NOT NULL DEFAULT '',
   special VARCHAR(16) NOT NULL DEFAULT '否',
   status VARCHAR(32) NOT NULL,
   created_at DATETIME(3) NOT NULL,
