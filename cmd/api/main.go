@@ -61,7 +61,7 @@ func main() {
 	}
 	audit := platform.NewAuditReporter(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
 	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue}
-	router := httpapi.NewRouter(service, identity, audit, logger)
+	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.ContractIntegrationOptions{Enabled: cfg.ContractIntegrationEnabled})
 	server := &http.Server{Addr: cfg.HTTPAddress, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second}
 	logger.Info("project management API started", "address", cfg.HTTPAddress, "task_queue", cfg.TemporalTaskQueue, "embedded_worker", cfg.RunWorkerWithAPI)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -54,6 +54,7 @@ npm run dev
 | `PROJECT_PLATFORM_BACKCHANNEL_BASE_URL` | `http://platform-api:8080` | Compose 容器访问平台 API 与 OIDC 后通道的内部地址；与浏览器使用的公开 `OIDC_ISSUER` 分离 |
 | `PLATFORM_AUDIT_CLIENT_*` | 空 | 具备 `audit.ingest` 的机器客户端；配置后上报写操作审计 |
 | `PLATFORM_AUTHORIZATION_CATALOG_*` | 空 | 具备 `authorization.catalog.sync` 的机器客户端 |
+| `CONTRACT_INTEGRATION_ENABLED` | `false` | 是否启用合同系统内部接收接口 |
 
 OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行时 Secret 注入，不得提交到仓库或写入前端环境变量。前端按钮权限只影响展示，服务端权限校验才是安全边界。MySQL 与 Temporal 均应使用独立持久卷或托管服务。
 
@@ -72,6 +73,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | GET/POST | `/api/v1/rules` | 查询/创建规则 |
 | PATCH | `/api/v1/rules/{id}` | 启停规则 |
 | POST | `/api/v1/contracts/activate` | 接收生效合同，幂等生成项目与独立服务项 |
+| POST | `/internal/v1/contracts/activate` | 合同系统内部网络投递入口，不使用浏览器会话 |
 | POST | `/api/v1/projects/{id}/decomposition-adjustments` | 调整拆解并记录补充协议引用 |
 | POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
 | POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理、工程师和设备并校验能力 |
@@ -89,8 +91,8 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 
 本模块保存业务状态、外部单据编号和文件 URL，不伪造其他系统的处理结果。完整自动闭环仍需要：
 
-- 合同系统在合同生效后，以稳定的 `contract_id + contract_version + source_id` 调用合同生效接口；拆解调整后需接收 `supplement_contract_id` 并启动与主合同一致的补充协议流程。
-- 基础平台为合同系统的机器 Client 提供可调用项目接口的服务身份认证；当前项目 API 已有权限点，但现有认证器仅建立浏览器 OIDC 会话。
+- 合同生效事件已通过事务型 Outbox、内部网络接口和 `contract_id + contract_version` 幂等键自动生成项目；内部接口不得通过公网或门户网关暴露。
+- 拆解调整当前记录外部 `supplement_contract_id`；自动创建补充协议仍需合同系统明确主合同关联、金额/服务变更规则和审批发起人语义。
 - 组织/人事系统提供团队、负责人、项目经理和工程师的稳定用户 ID，以及资质证书的签发、吊销和有效期数据。
 - 设备系统提供设备 ID、能力码、校准有效期、占用排期和设备申领单状态；差旅系统提供行程预定单状态。
 - 文件服务提供受控上传、病毒扫描、内容哈希、EXIF/拍摄时间校验和长期留存；现场接口当前只保存证据 URL。

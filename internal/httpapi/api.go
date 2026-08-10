@@ -33,11 +33,16 @@ type Handler struct {
 	logger   *slog.Logger
 }
 
-func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger) *gin.Engine {
+func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, integrationOptions ...ContractIntegrationOptions) *gin.Engine {
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
 	router := gin.New()
 	router.Use(gin.Recovery(), requestID(), securityHeaders())
 	router.GET("/healthz", func(c *gin.Context) { writeData(c, http.StatusOK, map[string]string{"status": "ok"}) })
+	if len(integrationOptions) > 0 {
+		internal := router.Group("/internal/v1")
+		internal.Use(h.authenticateContractIntegration(integrationOptions[0]))
+		internal.POST("/contracts/activate", h.activateContract)
+	}
 	if flow, ok := identity.(OIDCFlow); ok {
 		router.GET("/auth/login", func(c *gin.Context) { flow.Login(c.Writer, c.Request) })
 		router.GET("/auth/callback", func(c *gin.Context) { flow.Callback(c.Writer, c.Request) })

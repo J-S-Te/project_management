@@ -39,6 +39,7 @@ type Config struct {
 	PlatformCatalogSync         bool
 	PlatformCatalogClientID     string
 	PlatformCatalogClientSecret string
+	ContractIntegrationEnabled  bool
 }
 
 func Load() (Config, error) {
@@ -73,6 +74,9 @@ func Load() (Config, error) {
 	}
 	if c.RunWorkerWithAPI, err = strconv.ParseBool(env("PROJECT_RUN_WORKER_WITH_API", "true")); err != nil {
 		return c, fmt.Errorf("PROJECT_RUN_WORKER_WITH_API: %w", err)
+	}
+	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
 	}
 	return c, c.validate()
 }

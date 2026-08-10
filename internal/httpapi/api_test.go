@@ -183,6 +183,36 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 		t.Fatalf("body=%s", response.Body.String())
 	}
 }
+
+func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true})
+	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	deliveryID, tenantID := ulid.Make().String(), "tenant-contract"
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Contract-Delivery-ID", deliveryID)
+	request.Header.Set("X-Contract-Tenant-ID", tenantID)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.projects) != 1 || repository.projects[0].TenantID != tenantID {
+		t.Fatalf("projects=%+v", repository.projects)
+	}
+}
+
+func TestContractIntegrationRejectsMissingRoutingHeaders(t *testing.T) {
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
 func TestFieldCheckInRejectsInvalidGPS(t *testing.T) {
 	response := perform(router(t, map[string]bool{"project.field.execute": true}, nil), http.MethodPost, "/api/v1/service-items/SI-1/check-in", `{"latitude":120,"longitude":31,"occurred_at":"2026-08-10T00:00:00Z"}`)
 	if response.Code != http.StatusUnprocessableEntity {
