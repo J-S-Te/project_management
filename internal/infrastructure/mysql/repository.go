@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ func (r *Repository) GetProject(ctx context.Context, tenant, id string) (domain.
 	return projectFromRecord(record), err
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 }
 func (r *Repository) ListServiceItems(ctx context.Context, tenant, projectID string) ([]domain.ServiceItem, error) {
 	query := r.db.WithContext(ctx).Where("tenant_id = ?", tenant)
@@ -163,11 +164,27 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, Health: r.Health, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	return domain.Project{TenantID: r.TenantID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, Health: r.Health, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
-	return domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, Special: r.Special, Status: r.Status}
+	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, Status: r.Status}
+	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
+	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
+	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)
+	if r.PlannedStart != nil {
+		item.PlannedStart = r.PlannedStart.Format(time.RFC3339)
+	}
+	if r.PlannedEnd != nil {
+		item.PlannedEnd = r.PlannedEnd.Format(time.RFC3339)
+	}
+	return item
 }
 func ruleFromRecord(r ruleRecord) domain.Rule {
 	return domain.Rule{TenantID: r.TenantID, ID: r.ID, Kind: r.Kind, Name: r.Name, Scope: r.Scope, Trigger: r.Trigger, Enabled: r.Enabled, Updated: r.UpdatedAt.Format("2006-01-02 15:04")}
+}
+func firstValue(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }

@@ -29,9 +29,43 @@ func (i identity) Authenticate(context.Context, *http.Request) (platform.Princip
 }
 
 type repo struct {
-	projects []domain.Project
-	items    []domain.ServiceItem
-	rules    []domain.Rule
+	projects     []domain.Project
+	items        []domain.ServiceItem
+	rules        []domain.Rule
+	events       []domain.DeliveryEvent
+	capabilities []domain.Capability
+}
+
+func (r *repo) FindProjectByContractVersion(_ context.Context, tenant, contract, version string) (domain.Project, error) {
+	for _, p := range r.projects {
+		if p.TenantID == tenant && p.Contract == contract && p.ContractVersion == version {
+			return p, nil
+		}
+	}
+	return domain.Project{}, application.ErrNotFound
+}
+func (r *repo) ActivateContract(_ context.Context, p domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
+	r.projects = append(r.projects, p)
+	r.items = append(r.items, items...)
+	r.events = append(r.events, event)
+	return nil
+}
+func (r *repo) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
+func (r *repo) ListDeliveryEvents(_ context.Context, tenant, project string) ([]domain.DeliveryEvent, error) {
+	return r.events, nil
+}
+func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
+	r.capabilities = append(r.capabilities, item)
+	return item, nil
+}
+func (r *repo) ListCapabilities(_ context.Context, tenant, typ string) ([]domain.Capability, error) {
+	return r.capabilities, nil
+}
+func (r *repo) FindCapabilities(_ context.Context, tenant, at string, ids []string) ([]domain.Capability, error) {
+	return r.capabilities, nil
 }
 
 func (r *repo) ListProjects(context.Context, string, string, string) ([]domain.Project, error) {
@@ -136,6 +170,23 @@ func TestServiceItemConfirmationUsesWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "SI-1") {
 		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
+	handler := router(t, map[string]bool{"project.contract.import": true}, nil)
+	body := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
+	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"services":2`) {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+func TestFieldCheckInRejectsInvalidGPS(t *testing.T) {
+	response := perform(router(t, map[string]bool{"project.field.execute": true}, nil), http.MethodPost, "/api/v1/service-items/SI-1/check-in", `{"latitude":120,"longitude":31,"occurred_at":"2026-08-10T00:00:00Z"}`)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 func TestMissingPermissionIsForbidden(t *testing.T) {

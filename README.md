@@ -71,6 +71,31 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/confirm` | 确认拆解结果 |
 | GET/POST | `/api/v1/rules` | 查询/创建规则 |
 | PATCH | `/api/v1/rules/{id}` | 启停规则 |
+| POST | `/api/v1/contracts/activate` | 接收生效合同，幂等生成项目与独立服务项 |
+| POST | `/api/v1/projects/{id}/decomposition-adjustments` | 调整拆解并记录补充协议引用 |
+| POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
+| POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理、工程师和设备并校验能力 |
+| POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布现场计划；渗透测试项必须包含专项计划 |
+| POST | `/api/v1/service-items/{id}/preparation` | 登记设备申领和行程预定 |
+| POST | `/api/v1/service-items/{id}/check-in` | 记录带时间戳的 GPS 签到 |
+| POST | `/api/v1/service-items/{id}/field-records` | 提交原始数据、环境条件和证据文件引用 |
+| POST | `/api/v1/service-items/{id}/deviations` | 停止任务并上报偏离 |
+| POST | `/api/v1/deviations/{id}/review` | 团队负责人或技术总监决定放行、终止或重测 |
+| POST | `/api/v1/projects/{id}/field-complete` | 项目经理汇总确认现场实施完成 |
+| GET/PUT | `/api/v1/capabilities` | 查询或维护人员资质、设备能力与有效期 |
+| GET | `/api/v1/delivery-events` | 查询完整交付过程留痕 |
+
+### 外部系统边界
+
+本模块保存业务状态、外部单据编号和文件 URL，不伪造其他系统的处理结果。完整自动闭环仍需要：
+
+- 合同系统在合同生效后，以稳定的 `contract_id + contract_version + source_id` 调用合同生效接口；拆解调整后需接收 `supplement_contract_id` 并启动与主合同一致的补充协议流程。
+- 基础平台为合同系统的机器 Client 提供可调用项目接口的服务身份认证；当前项目 API 已有权限点，但现有认证器仅建立浏览器 OIDC 会话。
+- 组织/人事系统提供团队、负责人、项目经理和工程师的稳定用户 ID，以及资质证书的签发、吊销和有效期数据。
+- 设备系统提供设备 ID、能力码、校准有效期、占用排期和设备申领单状态；差旅系统提供行程预定单状态。
+- 文件服务提供受控上传、病毒扫描、内容哈希、EXIF/拍摄时间校验和长期留存；现场接口当前只保存证据 URL。
+- 移动端提供可信定位权限、定位精度、设备标识、离线补传和防篡改签名；当前后端校验经纬度与签到时间窗口。
+- 通知/待办系统消费偏离、冲突、资质到期和评审事件，向团队负责人及技术总监派发待办。
 
 ## 验证
 

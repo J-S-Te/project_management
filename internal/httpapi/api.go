@@ -51,9 +51,24 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.POST("/projects", require("project.create"), h.createProject)
+	api.POST("/contracts/activate", require("project.contract.import"), h.activateContract)
 	api.GET("/projects/:id", require("project.read"), h.getProject)
+	api.POST("/projects/:id/decomposition-adjustments", require("project.decomposition.manage"), h.adjustDecomposition)
+	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
+	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
+	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
+	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
+	api.POST("/service-items/:id/execution-assignment", require("project.execution.assign"), h.assignExecutionTeam)
+	api.POST("/service-items/:id/implementation-plan", require("project.implementation.plan"), h.planImplementation)
+	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
+	api.POST("/service-items/:id/check-in", require("project.field.execute"), h.checkIn)
+	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
+	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
+	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
+	api.GET("/capabilities", require("project.resource.read"), h.listCapabilities)
+	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
@@ -200,6 +215,44 @@ func (h *Handler) createProject(c *gin.Context) {
 	}
 	writeData(c, http.StatusCreated, item)
 }
+func (h *Handler) activateContract(c *gin.Context) {
+	var input domain.ContractActivation
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.ActivateContract(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, item)
+}
+func (h *Handler) adjustDecomposition(c *gin.Context) {
+	var input domain.DecompositionAdjustmentInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.AdjustDecomposition(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusAccepted, map[string]string{"status": "SUPPLEMENT_REQUIRED"})
+}
+func (h *Handler) listDeliveryEvents(c *gin.Context) {
+	items, err := h.service.ListDeliveryEvents(c.Request.Context(), principal(c), c.Query("project_id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) completeFieldImplementation(c *gin.Context) {
+	if err := h.service.CompleteFieldImplementation(c.Request.Context(), principal(c), c.Param("id")); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
+}
 func (h *Handler) listServiceItems(c *gin.Context) {
 	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
 	if err != nil {
@@ -221,6 +274,128 @@ func (h *Handler) confirmServiceItems(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) assignServiceItem(c *gin.Context) {
+	var input domain.AssignmentInput
+	if !decode(c, &input) {
+		return
+	}
+	result, err := h.service.AssignServiceItem(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
+}
+func (h *Handler) assignTeam(c *gin.Context) {
+	var input domain.TeamAssignmentInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.AssignTeam(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "TEAM_ASSIGNED"})
+}
+func (h *Handler) assignExecutionTeam(c *gin.Context) {
+	var input domain.ExecutionAssignmentInput
+	if !decode(c, &input) {
+		return
+	}
+	result, err := h.service.AssignExecutionTeam(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
+}
+func (h *Handler) planImplementation(c *gin.Context) {
+	var input domain.ImplementationPlanInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.PlanImplementation(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "待实施"})
+}
+func (h *Handler) startPreparation(c *gin.Context) {
+	var input domain.PreparationInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.StartPreparation(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusAccepted, map[string]string{"status": "实施准备中"})
+}
+func (h *Handler) checkIn(c *gin.Context) {
+	var input domain.CheckInInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.CheckIn(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"status": "实施中"})
+}
+func (h *Handler) submitFieldRecord(c *gin.Context) {
+	var input domain.FieldRecordInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.SubmitFieldRecord(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"status": "RECORDED"})
+}
+func (h *Handler) reportDeviation(c *gin.Context) {
+	var input domain.DeviationInput
+	if !decode(c, &input) {
+		return
+	}
+	id, err := h.service.ReportDeviation(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"id": id, "status": "PENDING"})
+}
+func (h *Handler) reviewDeviation(c *gin.Context) {
+	var input domain.DeviationReviewInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.ReviewDeviation(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(input.Decision)})
+}
+func (h *Handler) listCapabilities(c *gin.Context) {
+	items, err := h.service.ListCapabilities(c.Request.Context(), principal(c), strings.ToUpper(c.Query("resource_type")))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) upsertCapability(c *gin.Context) {
+	var input domain.Capability
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.UpsertCapability(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listRules(c *gin.Context) {
 	items, err := h.service.ListRules(c.Request.Context(), principal(c), c.Query("kind"))

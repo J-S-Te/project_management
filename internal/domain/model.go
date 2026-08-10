@@ -3,34 +3,46 @@ package domain
 import "time"
 
 type Project struct {
-	TenantID  string    `json:"-"`
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Customer  string    `json:"customer"`
-	Contract  string    `json:"contract"`
-	Services  int       `json:"services"`
-	Category  string    `json:"category"`
-	Team      string    `json:"team"`
-	Manager   string    `json:"manager"`
-	Health    string    `json:"health"`
-	Status    string    `json:"status"`
-	Progress  int       `json:"progress"`
-	Due       string    `json:"due"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TenantID         string    `json:"-"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Customer         string    `json:"customer"`
+	Contract         string    `json:"contract"`
+	ContractVersion  string    `json:"contract_version,omitempty"`
+	SupplementStatus string    `json:"supplement_status,omitempty"`
+	Services         int       `json:"services"`
+	Category         string    `json:"category"`
+	Team             string    `json:"team"`
+	Manager          string    `json:"manager"`
+	Health           string    `json:"health"`
+	Status           string    `json:"status"`
+	Progress         int       `json:"progress"`
+	Due              string    `json:"due"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type ServiceItem struct {
-	TenantID    string `json:"-"`
-	ID          string `json:"id"`
-	ProjectID   string `json:"project_id"`
-	Batch       string `json:"batch"`
-	Site        string `json:"site"`
-	Category    string `json:"category"`
-	Requirement string `json:"requirement"`
-	System      string `json:"system"`
-	Special     string `json:"special"`
-	Status      string `json:"status"`
+	TenantID         string   `json:"-"`
+	ID               string   `json:"id"`
+	ProjectID        string   `json:"project_id"`
+	SourceServiceID  string   `json:"source_service_id,omitempty"`
+	Batch            string   `json:"batch"`
+	Site             string   `json:"site"`
+	Category         string   `json:"category"`
+	Requirement      string   `json:"requirement"`
+	System           string   `json:"system"`
+	Special          string   `json:"special"`
+	TestMode         string   `json:"test_mode"`
+	TeamLeadID       string   `json:"team_lead_id,omitempty"`
+	ProjectManagerID string   `json:"project_manager_id,omitempty"`
+	EngineerIDs      []string `json:"engineer_ids,omitempty"`
+	EquipmentIDs     []string `json:"equipment_ids,omitempty"`
+	RequiredCodes    []string `json:"required_codes,omitempty"`
+	PlannedStart     string   `json:"planned_start,omitempty"`
+	PlannedEnd       string   `json:"planned_end,omitempty"`
+	ConflictStatus   string   `json:"conflict_status,omitempty"`
+	Status           string   `json:"status"`
 }
 
 type Rule struct {

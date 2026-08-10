@@ -5,12 +5,27 @@
     {"code":"project.create","name":"创建项目","action":"create","resource_code":"project","resource_name":"项目","risk_level":"MEDIUM"},
     {"code":"service_item.confirm","name":"确认服务项拆解","action":"confirm","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"},
     {"code":"project_rule.manage","name":"管理项目规则","action":"manage","resource_code":"project_rule","resource_name":"项目规则","risk_level":"HIGH"}
+    ,{"code":"project.contract.import","name":"接收生效合同并生成项目","action":"import","resource_code":"project","resource_name":"项目","risk_level":"HIGH"}
+    ,{"code":"project.decomposition.manage","name":"调整服务项拆解并发起补充协议","action":"manage","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.resource.read","name":"查看人员资质与设备能力","action":"read","resource_code":"project_resource","resource_name":"项目资源","risk_level":"LOW"}
+    ,{"code":"project.resource.manage","name":"管理人员资质与设备能力","action":"manage","resource_code":"project_resource","resource_name":"项目资源","risk_level":"HIGH"}
+    ,{"code":"project.resource.assign","name":"分配项目团队、人员和设备","action":"assign","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.team.assign","name":"业务管理员分配团队负责人","action":"assign_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.execution.assign","name":"团队负责人指派项目经理和实施工程师","action":"assign_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.implementation.plan","name":"制定实施计划与准备事项","action":"plan","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"}
+    ,{"code":"project.field.execute","name":"签到并提交现场实施记录","action":"execute","resource_code":"field_record","resource_name":"现场记录","risk_level":"MEDIUM"}
+    ,{"code":"project.deviation.report","name":"停止任务并上报偏离","action":"report","resource_code":"deviation","resource_name":"现场偏离","risk_level":"HIGH"}
+    ,{"code":"project.deviation.review","name":"评审偏离并决定放行终止或重测","action":"review","resource_code":"deviation","resource_name":"现场偏离","risk_level":"HIGH"}
+    ,{"code":"project.field.complete","name":"确认现场实施完成","action":"complete","resource_code":"project","resource_name":"项目","risk_level":"HIGH"}
   ],
   "roles": [
-    {"code":"admin","name":"项目系统管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage"]},
-    {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage"]},
-    {"code":"project_manager","name":"项目经理","permissions":["project.read","service_item.confirm"]},
-    {"code":"engineer","name":"实施工程师","permissions":["project.read"]},
-    {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage"]}
+    {"code":"admin","name":"项目系统管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.field.complete"]},
+    {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign"]},
+    {"code":"team_lead","name":"团队负责人","permissions":["project.read","project.resource.read","project.execution.assign","project.deviation.review"]},
+    {"code":"technical_director","name":"技术总监","permissions":["project.read","project.resource.read","project.deviation.review"]},
+    {"code":"project_manager","name":"项目经理","permissions":["project.read","service_item.confirm","project.resource.read","project.implementation.plan","project.field.complete"]},
+    {"code":"engineer","name":"实施工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
+    {"code":"penetration_engineer","name":"渗透测试工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
+    {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage","project.resource.read","project.resource.manage"]}
   ]
 }
