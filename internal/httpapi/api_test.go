@@ -50,6 +50,19 @@ func (r *repo) ActivateContract(_ context.Context, p domain.Project, items []dom
 	r.events = append(r.events, event)
 	return nil
 }
+func (r *repo) SyncContractStampStatus(_ context.Context, p domain.Project, uploaded bool, event domain.DeliveryEvent) error {
+	for index := range r.projects {
+		if r.projects[index].ID == p.ID {
+			if uploaded {
+				r.projects[index].Health = "正常"
+			} else {
+				r.projects[index].Health = "关注"
+			}
+		}
+	}
+	r.events = append(r.events, event)
+	return nil
+}
 func (r *repo) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
 	r.events = append(r.events, event)
 	return nil
@@ -173,7 +186,9 @@ func TestServiceItemConfirmationUsesWorkflow(t *testing.T) {
 	}
 }
 func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
-	handler := router(t, map[string]bool{"project.contract.import": true}, nil)
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	body := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
 	if response.Code != http.StatusCreated {
@@ -181,6 +196,21 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"services":2`) {
 		t.Fatalf("body=%s", response.Body.String())
+	}
+	if len(repository.projects) != 1 || repository.projects[0].Status != "待拆解确认" || repository.projects[0].Health != "关注" {
+		t.Fatalf("projects=%+v", repository.projects)
+	}
+	if len(repository.items) != 2 || repository.items[0].Status != "待确认" || repository.items[1].Status != "待确认" {
+		t.Fatalf("items=%+v", repository.items)
+	}
+	if len(repository.events) != 1 || repository.events[0].Payload["stamped_contract_uploaded"] != false {
+		t.Fatalf("events=%+v", repository.events)
+	}
+
+	stampedBody := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", stampedBody)
+	if response.Code != http.StatusCreated || repository.projects[0].Health != "正常" || len(repository.events) != 2 || repository.events[1].Type != application.EventContractStampStatus {
+		t.Fatalf("status=%d projects=%+v events=%+v", response.Code, repository.projects, repository.events)
 	}
 }
 

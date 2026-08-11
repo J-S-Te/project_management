@@ -39,6 +39,29 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 	})
 }
 
+func (r *Repository) SyncContractStampStatus(ctx context.Context, project domain.Project, uploaded bool, event domain.DeliveryEvent) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var latest deliveryEventRecord
+		err := tx.Where("tenant_id = ? AND project_id = ? AND event_type = ?", project.TenantID, project.ID, application.EventContractStampStatus).Order("created_at DESC").Take(&latest).Error
+		if err == nil {
+			payload := map[string]any{}
+			if json.Unmarshal(latest.Payload, &payload) == nil && payload["stamped_contract_uploaded"] == uploaded {
+				return nil
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		health := "关注"
+		if uploaded {
+			health = "正常"
+		}
+		if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ?", project.TenantID, project.ID).Updates(map[string]any{"health": health, "updated_at": event.CreatedAt}).Error; err != nil {
+			return err
+		}
+		return createEvent(tx, event)
+	})
+}
+
 func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if event.Type == application.EventDeviationReviewed {

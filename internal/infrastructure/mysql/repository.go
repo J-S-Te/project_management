@@ -80,6 +80,25 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id = ? AND id IN ?", tenant, ids).Updates(map[string]any{"status": "待分配", "updated_at": now, "updated_by": actor}).Error; err != nil {
 			return err
 		}
+		projectIDs := make([]string, 0)
+		seenProjects := map[string]bool{}
+		for _, record := range records {
+			if !seenProjects[record.ProjectID] {
+				seenProjects[record.ProjectID] = true
+				projectIDs = append(projectIDs, record.ProjectID)
+			}
+		}
+		for _, projectID := range projectIDs {
+			var pending int64
+			if err := tx.Model(&serviceItemRecord{}).Where("tenant_id = ? AND project_id = ? AND status IN ?", tenant, projectID, []string{"待确认", "待复核"}).Count(&pending).Error; err != nil {
+				return err
+			}
+			if pending == 0 {
+				if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ? AND status = ?", tenant, projectID, "待拆解确认").Updates(map[string]any{"status": "待分配", "updated_at": now}).Error; err != nil {
+					return err
+				}
+			}
+		}
 		result = make([]domain.ServiceItem, 0, len(records))
 		for _, record := range records {
 			record.Status = "待分配"

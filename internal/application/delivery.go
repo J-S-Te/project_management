@@ -15,6 +15,7 @@ import (
 
 const (
 	EventContractActivated       = "CONTRACT_ACTIVATED"
+	EventContractStampStatus     = "CONTRACT_STAMP_STATUS_SYNCED"
 	EventDecompositionAdjusted   = "DECOMPOSITION_ADJUSTED"
 	EventAssignmentPublished     = "ASSIGNMENT_PUBLISHED"
 	EventTeamAssigned            = "TEAM_ASSIGNED"
@@ -31,6 +32,7 @@ const (
 type DeliveryRepository interface {
 	FindProjectByContractVersion(context.Context, string, string, string) (domain.Project, error)
 	ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error
+	SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error
 	ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error
 	ListDeliveryEvents(context.Context, string, string) ([]domain.DeliveryEvent, error)
 	UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error)
@@ -55,12 +57,25 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		return domain.Project{}, err
 	}
 	if existing, findErr := repo.FindProjectByContractVersion(ctx, p.TenantID, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractVersion)); findErr == nil {
+		event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": input.StampedContractUploaded})
+		if err := repo.SyncContractStampStatus(ctx, existing, input.StampedContractUploaded, event); err != nil {
+			return domain.Project{}, err
+		}
+		if input.StampedContractUploaded {
+			existing.Health = "正常"
+		} else {
+			existing.Health = "关注"
+		}
 		return existing, nil
 	} else if !errors.Is(findErr, ErrNotFound) {
 		return domain.Project{}, findErr
 	}
 	now := time.Now().UTC()
-	project := domain.Project{TenantID: p.TenantID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Health: "待确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
+	health := "关注"
+	if input.StampedContractUploaded {
+		health = "正常"
+	}
+	project := domain.Project{TenantID: p.TenantID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Health: health, Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
 	grouped, groupErr := groupContractServices(input.Services)
 	if groupErr != nil {
 		return domain.Project{}, groupErr
@@ -80,7 +95,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: "待确认", ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
-	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items)})
+	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
 	if err := repo.ActivateContract(ctx, project, items, event); err != nil {
 		return domain.Project{}, err
 	}

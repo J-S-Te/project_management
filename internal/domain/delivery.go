@@ -4,12 +4,13 @@ import "time"
 
 // ContractActivation is the idempotent contract-to-project handoff owned by the contract system.
 type ContractActivation struct {
-	ContractID      string            `json:"contract_id"`
-	ContractVersion string            `json:"contract_version"`
-	ContractName    string            `json:"contract_name"`
-	Customer        string            `json:"customer"`
-	EffectiveAt     time.Time         `json:"effective_at"`
-	Services        []ContractService `json:"services"`
+	ContractID              string            `json:"contract_id"`
+	ContractVersion         string            `json:"contract_version"`
+	ContractName            string            `json:"contract_name"`
+	Customer                string            `json:"customer"`
+	EffectiveAt             time.Time         `json:"effective_at"`
+	StampedContractUploaded bool              `json:"stamped_contract_uploaded"`
+	Services                []ContractService `json:"services"`
 }
 
 type ContractService struct {
