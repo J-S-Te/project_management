@@ -9,14 +9,15 @@ import (
 
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
+	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-func (r *Repository) FindProjectByContractVersion(ctx context.Context, tenant, contractID, version string) (domain.Project, error) {
+func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter platform.ScopeFilter, contractID, version string) (domain.Project, error) {
 	var record projectRecord
-	err := r.db.WithContext(ctx).Where("tenant_id = ? AND contract = ? AND contract_version = ?", tenant, contractID, version).First(&record).Error
+	err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("contract = ? AND contract_version = ?", contractID, version).First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
@@ -25,7 +26,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, tenant, c
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, Health: project.Health, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Health: project.Health, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			return err
 		}
@@ -231,8 +232,9 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", project.TenantID, project.ID).Updates(updates).Error
 }
 
-func (r *Repository) ListDeliveryEvents(ctx context.Context, tenant, projectID string) ([]domain.DeliveryEvent, error) {
-	query := r.db.WithContext(ctx).Where("tenant_id=?", tenant)
+func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.DeliveryEvent, error) {
+	projects := applyProjectScope(r.db.WithContext(ctx).Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
+	query := r.db.WithContext(ctx).Where("tenant_id = ? AND project_id IN (?)", filter.TenantID, projects)
 	if projectID != "" {
 		query = query.Where("project_id=?", projectID)
 	}
@@ -247,6 +249,18 @@ func (r *Repository) ListDeliveryEvents(ctx context.Context, tenant, projectID s
 		out = append(out, domain.DeliveryEvent{ID: v.ID, ProjectID: v.ProjectID, ServiceItemID: v.ServiceItemID, Type: v.EventType, ActorUserID: v.ActorUserID, Payload: payload, CreatedAt: v.CreatedAt})
 	}
 	return out, nil
+}
+
+func (r *Repository) FindProjectForDeviation(ctx context.Context, filter platform.ScopeFilter, deviationID string) (string, error) {
+	projects := applyProjectScope(r.db.WithContext(ctx).Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
+	var record deliveryEventRecord
+	err := r.db.WithContext(ctx).
+		Where("tenant_id = ? AND project_id IN (?) AND event_type = ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.deviation_id')) = ?", filter.TenantID, projects, application.EventDeviationReported, deviationID).
+		Take(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", application.ErrNotFound
+	}
+	return record.ProjectID, err
 }
 
 func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capability, actor string) (domain.Capability, error) {

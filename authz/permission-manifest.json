@@ -1,5 +1,7 @@
 {
-  "catalog_version": "1",
+  "catalog_version": "2",
+  "claims_role_config_hash": "project-management-v2-compact-identity-online-authorization",
+  "policy": {"max_effective_roles": 16},
   "permissions": [
     {"code":"project.read","name":"查看项目与执行数据","action":"read","resource_code":"project","resource_name":"项目","risk_level":"LOW"},
     {"code":"project.create","name":"创建项目","action":"create","resource_code":"project","resource_name":"项目","risk_level":"MEDIUM"},
@@ -19,7 +21,7 @@
     ,{"code":"project.field.complete","name":"确认现场实施完成","action":"complete","resource_code":"project","resource_name":"项目","risk_level":"HIGH"}
   ],
   "roles": [
-    {"code":"admin","name":"项目系统管理员","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.field.complete"]},
+    {"code":"admin","name":"项目系统管理员","description":"详细授权来自 authorization-context；APPLICATION/ENVIRONMENT/TENANT 为全量，ORG/SELF/PROJECT 为行级范围。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.field.complete"]},
     {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign"]},
     {"code":"team_lead","name":"团队负责人","permissions":["project.read","project.resource.read","project.execution.assign","project.deviation.review"]},
     {"code":"technical_director","name":"技术总监","permissions":["project.read","project.resource.read","project.deviation.review"]},

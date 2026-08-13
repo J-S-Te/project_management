@@ -17,18 +17,20 @@ import (
 var (
 	ErrNotFound   = errors.New("resource not found")
 	ErrValidation = errors.New("validation failed")
+	ErrForbidden  = errors.New("operation is outside the authorized project scope")
 )
 
 type Repository interface {
-	ListProjects(context.Context, string, string, string) ([]domain.Project, error)
-	GetProject(context.Context, string, string) (domain.Project, error)
+	ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error)
+	GetProject(context.Context, platform.ScopeFilter, string) (domain.Project, error)
 	CreateProject(context.Context, domain.Project) error
-	ListServiceItems(context.Context, string, string) ([]domain.ServiceItem, error)
+	ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error)
+	GetServiceItem(context.Context, platform.ScopeFilter, string) (domain.ServiceItem, error)
 	ConfirmServiceItems(context.Context, string, []string, string) ([]domain.ServiceItem, error)
 	ListRules(context.Context, string, string) ([]domain.Rule, error)
 	CreateRule(context.Context, domain.Rule) (domain.Rule, error)
 	SetRuleEnabled(context.Context, string, int64, bool, string) (domain.Rule, error)
-	Dashboard(context.Context, string) (domain.Dashboard, error)
+	Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error)
 }
 
 type WorkflowExecutor interface {
@@ -42,28 +44,66 @@ type Service struct {
 }
 
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {
-	return s.Repo.ListProjects(ctx, p.TenantID, q, status)
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return nil, err
+	}
+	return s.Repo.ListProjects(ctx, filter, q, status)
 }
 func (s *Service) GetProject(ctx context.Context, p platform.Principal, id string) (domain.Project, error) {
-	return s.Repo.GetProject(ctx, p.TenantID, id)
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return domain.Project{}, err
+	}
+	return s.Repo.GetProject(ctx, filter, id)
 }
 func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.Dashboard, error) {
-	return s.Repo.Dashboard(ctx, p.TenantID)
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return domain.Dashboard{}, err
+	}
+	return s.Repo.Dashboard(ctx, filter)
 }
 func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, projectID string) ([]domain.ServiceItem, error) {
-	return s.Repo.ListServiceItems(ctx, p.TenantID, projectID)
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return nil, err
+	}
+	return s.Repo.ListServiceItems(ctx, filter, projectID)
 }
 func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind string) ([]domain.Rule, error) {
+	if err := requireApplicationAuthorization(p, "project.read"); err != nil {
+		return nil, err
+	}
 	return s.Repo.ListRules(ctx, p.TenantID, kind)
 }
 
 func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input domain.Project) (domain.Project, error) {
+	filter, err := authorizeProjectScope(p, "project.create")
+	if err != nil {
+		return input, err
+	}
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Customer) == "" || strings.TrimSpace(input.Contract) == "" {
 		return input, ErrValidation
 	}
 	now := time.Now().UTC()
 	input.ID = "PJ-" + now.Format("2006") + "-" + strings.ToUpper(ulid.Make().String()[20:])
 	input.TenantID = p.TenantID
+	input.OwnerIdentityID = p.IdentityID
+	if input.OwnerIdentityID == "" {
+		input.OwnerIdentityID = p.UserID
+	}
+	if !filter.AllowAll {
+		if input.OwnerOrgID != "" && !contains(filter.OrganizationIDs, input.OwnerOrgID) {
+			return input, ErrForbidden
+		}
+		if input.OwnerOrgID == "" && len(filter.OrganizationIDs) == 1 {
+			input.OwnerOrgID = filter.OrganizationIDs[0]
+		}
+		if !filter.AllowSelf && input.OwnerOrgID == "" {
+			return input, ErrForbidden
+		}
+	}
 	input.Name = strings.TrimSpace(input.Name)
 	input.Customer = strings.TrimSpace(input.Customer)
 	input.Contract = strings.TrimSpace(input.Contract)
@@ -87,11 +127,20 @@ func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input
 }
 
 func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal, ids []string) ([]domain.ServiceItem, error) {
+	filter, err := authorizeProjectScope(p, "service_item.confirm")
+	if err != nil {
+		return nil, err
+	}
 	if len(ids) == 0 {
 		return nil, ErrValidation
 	}
 	if s.Temporal == nil {
 		return nil, errors.New("temporal client unavailable")
+	}
+	for _, id := range ids {
+		if _, err := s.Repo.GetServiceItem(ctx, filter, id); err != nil {
+			return nil, err
+		}
 	}
 	input := workflows.ConfirmServiceItemsInput{TenantID: p.TenantID, IDs: ids, ActorUserID: p.UserID}
 	workflowID := fmt.Sprintf("project-service-items-confirm:%s:%s", p.TenantID, ulid.Make().String())
@@ -107,6 +156,9 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 }
 
 func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input domain.Rule) (domain.Rule, error) {
+	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+		return input, err
+	}
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Scope) == "" {
 		return input, ErrValidation
 	}
@@ -118,5 +170,35 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 	return s.Repo.CreateRule(ctx, input)
 }
 func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, id int64, enabled bool) (domain.Rule, error) {
+	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+		return domain.Rule{}, err
+	}
 	return s.Repo.SetRuleEnabled(ctx, p.TenantID, id, enabled, p.UserID)
+}
+
+func authorizeProjectScope(p platform.Principal, permission string) (platform.ScopeFilter, error) {
+	if !p.Has(permission) {
+		return platform.ScopeFilter{}, ErrForbidden
+	}
+	filter, err := p.ProjectScopeFilter()
+	if err != nil {
+		return platform.ScopeFilter{}, ErrForbidden
+	}
+	return filter, nil
+}
+
+func requireApplicationAuthorization(p platform.Principal, permission string) error {
+	if !p.Has(permission) || !p.HasApplicationScope() {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }

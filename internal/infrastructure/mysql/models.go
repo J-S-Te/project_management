@@ -3,23 +3,26 @@ package mysql
 import "time"
 
 type projectRecord struct {
-	ID               string `gorm:"primaryKey;size:32"`
-	TenantID         string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
-	Name             string `gorm:"size:255;not null"`
-	Customer         string `gorm:"size:255;not null"`
-	Contract         string `gorm:"size:64;not null"`
-	ContractVersion  string `gorm:"size:64;not null"`
-	SupplementStatus string `gorm:"size:32;not null"`
-	Services         int
-	Category         string `gorm:"size:255"`
-	Team             string `gorm:"size:128"`
-	Manager          string `gorm:"size:128"`
-	Health           string `gorm:"size:32"`
-	Status           string `gorm:"size:32;not null;index:idx_pm_project_tenant_status,priority:2"`
-	Progress         int
-	Due              string `gorm:"size:64"`
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                string `gorm:"primaryKey;size:32"`
+	TenantID          string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
+	OwnerOrgID        string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
+	Name              string `gorm:"size:255;not null"`
+	Customer          string `gorm:"size:255;not null"`
+	Contract          string `gorm:"size:64;not null"`
+	ContractVersion   string `gorm:"size:64;not null"`
+	SupplementStatus  string `gorm:"size:32;not null"`
+	Services          int
+	Category          string `gorm:"size:255"`
+	Team              string `gorm:"size:128"`
+	Manager           string `gorm:"size:128"`
+	OwnerIdentityID   string `gorm:"size:128;not null;index:idx_pm_project_tenant_owner_identity,priority:2"`
+	ManagerIdentityID string `gorm:"size:128;not null;index:idx_pm_project_tenant_manager_identity,priority:2"`
+	Health            string `gorm:"size:32"`
+	Status            string `gorm:"size:32;not null;index:idx_pm_project_tenant_status,priority:2"`
+	Progress          int
+	Due               string `gorm:"size:64"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 func (projectRecord) TableName() string { return "pm_project" }

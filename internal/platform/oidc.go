@@ -4,13 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -19,61 +18,69 @@ import (
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
-const authorizationRefreshRetryInterval = 5 * time.Second
+const (
+	loginTransactionTTL               = 10 * time.Minute
+	authorizationRefreshRetryInterval = 5 * time.Second
+)
 
 type OIDCOptions struct {
-	Issuer, BackchannelBaseURL, ClientID, ClientSecret, RedirectURI, PostLogoutRedirectURI string
-	TenantID, SessionCookieName, PathPrefix                                                string
-	SessionTTL, AuthorizationRefreshInterval                                               time.Duration
-	SessionSecure                                                                          bool
+	Issuer, BackchannelBaseURL, PlatformBaseURL, ClientID, ClientSecret, RedirectURI, PostLogoutRedirectURI string
+	TenantID, ApplicationCode, EnvironmentCode, SessionCookieName, PathPrefix                               string
+	SessionTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                   time.Duration
+	SessionSecure                                                                                           bool
 }
 
 type oidcClaims struct {
-	Subject        string   `json:"sub"`
-	Nonce          string   `json:"nonce"`
-	TenantID       string   `json:"tenant_id"`
-	Roles          []string `json:"roles"`
-	Permissions    []string `json:"permissions"`
-	RoleConfigHash string   `json:"role_config_hash"`
-	AuthzRevision  uint64   `json:"authz_revision"`
+	Subject           string `json:"sub"`
+	IdentityID        string `json:"identity_id"`
+	TenantID          string `json:"tenant_id"`
+	PersonID          string `json:"person_id"`
+	Nonce             string `json:"nonce"`
+	TokenUse          string `json:"token_use"`
+	Name              string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
 }
 
-type transaction struct {
-	Nonce, Verifier string
-	ExpiresAt       time.Time
-}
-type session struct {
-	mu                          sync.Mutex
-	Principal                   Principal
-	IDToken                     string
-	Token                       *oauth2.Token
-	RefreshedAt, RefreshRetryAt time.Time
-	TokenExpiresAt, ExpiresAt   time.Time
+type compactIdentity struct {
+	Subject, IdentityID, TenantID, PersonID, DisplayName string
 }
 
 type OIDCAuthenticator struct {
-	options      OIDCOptions
-	provider     *oidc.Provider
-	verifier     *oidc.IDTokenVerifier
-	oauth        oauth2.Config
-	httpClient   *http.Client
-	mu           sync.Mutex
-	transactions map[string]transaction
-	sessions     map[string]*session
-	now          func() time.Time
-	refresh      func(context.Context, *session, time.Time) error
+	options              OIDCOptions
+	provider             *oidc.Provider
+	verifier             *oidc.IDTokenVerifier
+	oauth                oauth2.Config
+	httpClient           *http.Client
+	store                OIDCStore
+	authorization        AuthorizationContextClient
+	catalog              AuthorizationCatalog
+	codec                *secretCodec
+	endSessionEndpoint   string
+	now                  func() time.Time
+	refreshAuthorization func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error)
 }
 
-func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions) (*OIDCAuthenticator, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCStore, encryptionKey []byte) (*OIDCAuthenticator, error) {
+	if store == nil {
+		return nil, errors.New("OIDC persistent store is required")
+	}
+	codec, err := newSecretCodec(encryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	catalog, err := LoadAuthorizationCatalog()
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: options.AuthorizationTimeout}
 	if options.BackchannelBaseURL != "" {
-		publicURL, err := url.Parse(strings.TrimRight(options.Issuer, "/"))
-		if err != nil {
-			return nil, err
+		publicURL, parseErr := url.Parse(strings.TrimRight(options.Issuer, "/"))
+		if parseErr != nil {
+			return nil, parseErr
 		}
-		backchannelURL, err := url.Parse(strings.TrimRight(options.BackchannelBaseURL, "/"))
-		if err != nil {
-			return nil, err
+		backchannelURL, parseErr := url.Parse(strings.TrimRight(options.BackchannelBaseURL, "/"))
+		if parseErr != nil {
+			return nil, parseErr
 		}
 		client.Transport = &backchannelTransport{base: http.DefaultTransport, public: publicURL, backchannel: backchannelURL}
 	}
@@ -82,52 +89,74 @@ func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions) (*OIDCAuthen
 	if err != nil {
 		return nil, fmt.Errorf("load OIDC discovery: %w", err)
 	}
+	var discovery struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+	if err := provider.Claims(&discovery); err != nil {
+		return nil, fmt.Errorf("decode OIDC discovery: %w", err)
+	}
 	return &OIDCAuthenticator{
-		options: options, provider: provider, verifier: provider.Verifier(&oidc.Config{ClientID: options.ClientID}), httpClient: client, now: time.Now,
-		oauth:        oauth2.Config{ClientID: options.ClientID, ClientSecret: options.ClientSecret, RedirectURL: options.RedirectURI, Endpoint: provider.Endpoint(), Scopes: []string{"openid", "profile"}},
-		transactions: map[string]transaction{}, sessions: map[string]*session{},
+		options: options, provider: provider, verifier: provider.Verifier(&oidc.Config{ClientID: options.ClientID}), httpClient: client,
+		store: store, authorization: NewHTTPAuthorizationContextClient(options.PlatformBaseURL, client), catalog: catalog, codec: codec,
+		endSessionEndpoint: strings.TrimSpace(discovery.EndSessionEndpoint), now: time.Now,
+		oauth: oauth2.Config{ClientID: options.ClientID, ClientSecret: options.ClientSecret, RedirectURL: options.RedirectURI, Endpoint: provider.Endpoint(), Scopes: []string{"openid", "profile"}},
 	}, nil
 }
 
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
 	cookie, err := request.Cookie(a.options.SessionCookieName)
-	if err != nil || cookie.Value == "" {
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return Principal{}, ErrUnauthenticated
 	}
 	now := a.now().UTC()
-	a.mu.Lock()
-	a.cleanup(now)
-	current := a.sessions[cookie.Value]
-	a.mu.Unlock()
-	if current == nil {
+	hash := tokenDigest(cookie.Value)
+	stored, err := a.store.FindSession(ctx, hash, now)
+	if err != nil || stored.TenantID != a.options.TenantID {
 		return Principal{}, ErrUnauthenticated
 	}
-	current.mu.Lock()
-	defer current.mu.Unlock()
-	if !current.ExpiresAt.After(now) {
-		a.deleteSession(cookie.Value, current)
+	principal, err := decodePrincipal(stored.PrincipalJSON)
+	if err != nil || principal.IdentityID != stored.IdentityID || principal.TenantID != stored.TenantID {
+		_ = a.store.RevokeSession(ctx, hash, now)
 		return Principal{}, ErrUnauthenticated
 	}
-	tokenExpired := !current.TokenExpiresAt.After(now)
-	refreshDue := tokenExpired || now.Sub(current.RefreshedAt) >= a.options.AuthorizationRefreshInterval
-	refreshAllowed := tokenExpired || !current.RefreshRetryAt.After(now)
-	if refreshDue && refreshAllowed {
-		refresh := a.refresh
-		if refresh == nil {
-			refresh = a.refreshSession
-		}
-		if err := refresh(ctx, current, now); err != nil {
-			if tokenExpired || refreshWasRejected(err) {
-				a.deleteSession(cookie.Value, current)
-				return Principal{}, ErrUnauthenticated
+	refreshDue := !stored.TokenExpiresAt.After(now) || now.Sub(stored.AuthorizationCheckedAt) >= a.options.AuthorizationRefreshInterval
+	if refreshDue {
+		if stored.RefreshRetryAt.After(now) {
+			if staleReadAllowed(request.Method, now, stored.AuthorizationCheckedAt, a.options.AuthorizationMaxStale, stored.TokenExpiresAt) {
+				return principal, nil
 			}
-			// 平台短暂不可用时保留尚未过期的已验证主体；令牌过期或被撤销仍失败关闭。
-			current.RefreshRetryAt = now.Add(authorizationRefreshRetryInterval)
-			return current.Principal, nil
+			return Principal{}, ErrAuthorizationUnavailable
 		}
-		current.RefreshRetryAt = time.Time{}
+		refresh := a.refreshAuthorization
+		if refresh == nil {
+			refresh = a.refreshStoredSession
+		}
+		updated, current, refreshErr := refresh(ctx, stored, now, request.Method)
+		if refreshErr != nil {
+			if errors.Is(refreshErr, ErrAuthorizationUnavailable) && staleReadAllowed(request.Method, now, stored.AuthorizationCheckedAt, a.options.AuthorizationMaxStale, stored.TokenExpiresAt) {
+				stored.RefreshRetryAt = now.Add(authorizationRefreshRetryInterval)
+				stored.LastSeenAt = now
+				_ = a.store.UpdateSession(ctx, stored, now)
+				return principal, nil
+			}
+			if errors.Is(refreshErr, ErrAuthorizationDenied) || errors.Is(refreshErr, ErrInvalidAuthorization) {
+				_ = a.store.RevokeSessionsForIdentity(ctx, stored.TenantID, stored.IdentityID, now)
+			} else if errors.Is(refreshErr, ErrUnauthenticated) {
+				_ = a.store.RevokeSession(ctx, hash, now)
+			}
+			return Principal{}, refreshErr
+		}
+		updated.LastSeenAt = now
+		if err := a.store.UpdateSession(ctx, updated, now); err != nil {
+			return Principal{}, ErrUnauthenticated
+		}
+		return current, nil
 	}
-	return current.Principal, nil
+	stored.LastSeenAt = now
+	if err := a.store.UpdateSession(ctx, stored, now); err != nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	return principal, nil
 }
 
 func (a *OIDCAuthenticator) Login(w http.ResponseWriter, r *http.Request) {
@@ -142,11 +171,23 @@ func (a *OIDCAuthenticator) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifier := oauth2.GenerateVerifier()
+	nonceCipher, err := a.codec.encrypt([]byte(nonce))
+	if err != nil {
+		http.Error(w, "cannot protect login", http.StatusInternalServerError)
+		return
+	}
+	verifierCipher, err := a.codec.encrypt([]byte(verifier))
+	if err != nil {
+		http.Error(w, "cannot protect login", http.StatusInternalServerError)
+		return
+	}
+	returnPath := safeReturnPath(r.URL.Query().Get("return_to"))
 	now := a.now().UTC()
-	a.mu.Lock()
-	a.cleanup(now)
-	a.transactions[state] = transaction{Nonce: nonce, Verifier: verifier, ExpiresAt: now.Add(10 * time.Minute)}
-	a.mu.Unlock()
+	transaction := LoginTransaction{StateHash: tokenDigest(state), TenantID: a.options.TenantID, NonceCipher: nonceCipher, CodeVerifierCipher: verifierCipher, ReturnPath: returnPath, ExpiresAt: now.Add(loginTransactionTTL), CreatedAt: now}
+	if err := a.store.SaveLoginTransaction(r.Context(), transaction); err != nil {
+		http.Error(w, "login service is unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	target := a.oauth.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -158,148 +199,250 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := a.now().UTC()
-	a.mu.Lock()
-	a.cleanup(now)
-	tx, ok := a.transactions[state]
-	delete(a.transactions, state)
-	a.mu.Unlock()
-	if !ok || !tx.ExpiresAt.After(now) {
+	tx, err := a.store.ConsumeLoginTransaction(r.Context(), tokenDigest(state), now)
+	if err != nil || tx.TenantID != a.options.TenantID {
 		http.Error(w, "invalid or expired OIDC state", http.StatusUnauthorized)
 		return
 	}
+	nonce, err := a.codec.decrypt(tx.NonceCipher)
+	if err != nil {
+		http.Error(w, "OIDC state is invalid", http.StatusUnauthorized)
+		return
+	}
+	verifier, err := a.codec.decrypt(tx.CodeVerifierCipher)
+	if err != nil {
+		http.Error(w, "OIDC state is invalid", http.StatusUnauthorized)
+		return
+	}
 	ctx := oidc.ClientContext(r.Context(), a.httpClient)
-	token, err := a.oauth.Exchange(ctx, code, oauth2.VerifierOption(tx.Verifier))
+	token, err := a.oauth.Exchange(ctx, code, oauth2.VerifierOption(string(verifier)))
 	if err != nil {
 		http.Error(w, "OIDC token exchange failed", http.StatusUnauthorized)
 		return
 	}
-	raw, ok := token.Extra("id_token").(string)
-	if !ok || raw == "" {
-		http.Error(w, "OIDC ID token is missing", http.StatusUnauthorized)
-		return
-	}
-	idToken, err := a.verifier.Verify(ctx, raw)
+	rawIDToken, idToken, claims, identity, err := a.verifyIDToken(ctx, token, string(nonce))
 	if err != nil {
-		http.Error(w, "OIDC ID token verification failed", http.StatusUnauthorized)
+		http.Error(w, "OIDC ID token claims are invalid", http.StatusUnauthorized)
 		return
 	}
-	var claims oidcClaims
-	if err := idToken.Claims(&claims); err != nil || claims.Nonce != tx.Nonce {
-		http.Error(w, "OIDC claims are invalid", http.StatusUnauthorized)
-		return
-	}
-	principal, err := principalFromClaims(claims, a.options.TenantID)
+	authorization, token, rawIDToken, idToken, identity, err := a.resolveAuthorization(ctx, token, rawIDToken, idToken, claims, identity, true)
 	if err != nil {
-		http.Error(w, "OIDC authorization claims are invalid", http.StatusUnauthorized)
+		writeAuthorizationError(w, err)
 		return
 	}
-	info, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+	principal, err := a.principalFromAuthorization(identity, authorization)
 	if err != nil {
-		http.Error(w, "OIDC user information failed", http.StatusUnauthorized)
+		writeAuthorizationError(w, err)
 		return
 	}
-	var userInfo struct {
-		Name string `json:"name"`
-	}
-	if info.Subject != principal.UserID || info.Claims(&userInfo) != nil || strings.TrimSpace(userInfo.Name) == "" {
-		http.Error(w, "OIDC user information is invalid", http.StatusUnauthorized)
-		return
-	}
-	principal.DisplayName = strings.TrimSpace(userInfo.Name)
-	if token.RefreshToken == "" {
-		http.Error(w, "OIDC refresh token is missing", http.StatusUnauthorized)
-		return
-	}
-	sessionID, err := randomValue(32)
+	principalJSON, err := json.Marshal(principal)
 	if err != nil {
 		http.Error(w, "cannot create session", http.StatusInternalServerError)
 		return
 	}
-	current := &session{Principal: principal, IDToken: raw, Token: token, RefreshedAt: now, TokenExpiresAt: idToken.Expiry, ExpiresAt: now.Add(a.options.SessionTTL)}
-	a.mu.Lock()
-	a.sessions[sessionID] = current
-	a.mu.Unlock()
-	http.SetCookie(w, a.cookie(sessionID, current.ExpiresAt))
-	http.Redirect(w, r, a.PublicPath("/"), http.StatusFound)
+	tokenJSON, err := json.Marshal(token)
+	if err != nil {
+		http.Error(w, "cannot create session", http.StatusInternalServerError)
+		return
+	}
+	idTokenCipher, err := a.codec.encrypt([]byte(rawIDToken))
+	if err != nil {
+		http.Error(w, "cannot create session", http.StatusInternalServerError)
+		return
+	}
+	tokenCipher, err := a.codec.encrypt(tokenJSON)
+	if err != nil {
+		http.Error(w, "cannot create session", http.StatusInternalServerError)
+		return
+	}
+	rawSession, err := randomValue(48)
+	if err != nil {
+		http.Error(w, "cannot create session", http.StatusInternalServerError)
+		return
+	}
+	tokenExpiry := earliestTime(idToken.Expiry, token.Expiry)
+	if !tokenExpiry.After(now) {
+		http.Error(w, "OIDC token is expired", http.StatusUnauthorized)
+		return
+	}
+	expiresAt := now.Add(a.options.SessionTTL)
+	stored := StoredOIDCSession{SessionIDHash: tokenDigest(rawSession), TenantID: principal.TenantID, IdentityID: principal.IdentityID, PersonID: principal.PersonID, PrincipalJSON: principalJSON, IDTokenCipher: idTokenCipher, OAuthTokenCipher: tokenCipher, AuthorizationRevision: principal.AuthorizationRevision, AuthorizationCheckedAt: now, TokenExpiresAt: tokenExpiry, SessionExpiresAt: expiresAt, CreatedAt: now, LastSeenAt: now}
+	if err := a.store.CreateSession(r.Context(), stored); err != nil {
+		http.Error(w, "session service is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	http.SetCookie(w, a.cookie(rawSession, expiresAt))
+	http.Redirect(w, r, a.PublicPath(tx.ReturnPath), http.StatusFound)
 }
 
-func (a *OIDCAuthenticator) refreshSession(ctx context.Context, current *session, now time.Time) error {
-	if current.Token == nil || current.Token.RefreshToken == "" {
-		return errors.New("refresh token missing")
+func (a *OIDCAuthenticator) refreshStoredSession(ctx context.Context, stored StoredOIDCSession, now time.Time, method string) (StoredOIDCSession, Principal, error) {
+	tokenJSON, err := a.codec.decrypt(stored.OAuthTokenCipher)
+	if err != nil {
+		return stored, Principal{}, ErrUnauthenticated
 	}
-	seed := &oauth2.Token{RefreshToken: current.Token.RefreshToken, Expiry: now.Add(-time.Second)}
+	var token oauth2.Token
+	if err := json.Unmarshal(tokenJSON, &token); err != nil {
+		return stored, Principal{}, ErrUnauthenticated
+	}
+	idTokenBytes, err := a.codec.decrypt(stored.IDTokenCipher)
+	if err != nil {
+		return stored, Principal{}, ErrUnauthenticated
+	}
+	identity := compactIdentity{Subject: stored.IdentityID, IdentityID: stored.IdentityID, TenantID: stored.TenantID, PersonID: stored.PersonID}
+	var idToken *oidc.IDToken
+	var claims oidcClaims
+	if !token.Expiry.After(now) {
+		token, idTokenBytes, idToken, claims, identity, err = a.refreshTokens(ctx, &token, identity)
+		if err != nil {
+			return stored, Principal{}, ErrUnauthenticated
+		}
+	}
+	authorization, tokenPointer, rawIDToken, verifiedIDToken, refreshedIdentity, err := a.resolveAuthorization(ctx, &token, string(idTokenBytes), idToken, claims, identity, true)
+	if err != nil {
+		if errors.Is(err, ErrAuthorizationUnavailable) && staleReadAllowed(method, now, stored.AuthorizationCheckedAt, a.options.AuthorizationMaxStale, stored.TokenExpiresAt) {
+			return stored, Principal{}, err
+		}
+		return stored, Principal{}, err
+	}
+	identity = refreshedIdentity
+	principal, err := a.principalFromAuthorization(identity, authorization)
+	if err != nil {
+		return stored, Principal{}, err
+	}
+	oldPrincipal, decodeErr := decodePrincipal(stored.PrincipalJSON)
+	if decodeErr == nil && principal.DisplayName == "" {
+		principal.DisplayName = oldPrincipal.DisplayName
+	}
+	principalJSON, _ := json.Marshal(principal)
+	tokenJSON, _ = json.Marshal(tokenPointer)
+	stored.PrincipalJSON = principalJSON
+	stored.AuthorizationRevision = principal.AuthorizationRevision
+	stored.AuthorizationCheckedAt = now
+	stored.RefreshRetryAt = time.Time{}
+	stored.PersonID = principal.PersonID
+	stored.TokenExpiresAt = tokenPointer.Expiry
+	if verifiedIDToken != nil {
+		stored.TokenExpiresAt = earliestTime(verifiedIDToken.Expiry, tokenPointer.Expiry)
+	}
+	stored.IDTokenCipher, err = a.codec.encrypt([]byte(rawIDToken))
+	if err != nil {
+		return stored, Principal{}, ErrUnauthenticated
+	}
+	stored.OAuthTokenCipher, err = a.codec.encrypt(tokenJSON)
+	if err != nil {
+		return stored, Principal{}, ErrUnauthenticated
+	}
+	return stored, principal, nil
+}
+
+func (a *OIDCAuthenticator) resolveAuthorization(ctx context.Context, token *oauth2.Token, rawIDToken string, idToken *oidc.IDToken, claims oidcClaims, identity compactIdentity, retry401 bool) (AuthorizationContext, *oauth2.Token, string, *oidc.IDToken, compactIdentity, error) {
+	value, err := a.authorization.Resolve(ctx, token.AccessToken)
+	if errors.Is(err, ErrUnauthenticated) && retry401 {
+		refreshed, refreshedRaw, refreshedID, refreshedClaims, refreshedIdentity, refreshErr := a.refreshTokens(ctx, token, identity)
+		if refreshErr != nil {
+			return AuthorizationContext{}, token, rawIDToken, idToken, identity, ErrUnauthenticated
+		}
+		token, rawIDToken, idToken, claims, identity = &refreshed, string(refreshedRaw), refreshedID, refreshedClaims, refreshedIdentity
+		value, err = a.authorization.Resolve(ctx, token.AccessToken)
+	}
+	if err != nil {
+		return AuthorizationContext{}, token, rawIDToken, idToken, identity, err
+	}
+	return value, token, rawIDToken, idToken, identity, nil
+}
+
+func (a *OIDCAuthenticator) refreshTokens(ctx context.Context, current *oauth2.Token, expected compactIdentity) (oauth2.Token, []byte, *oidc.IDToken, oidcClaims, compactIdentity, error) {
+	if current == nil || strings.TrimSpace(current.RefreshToken) == "" {
+		return oauth2.Token{}, nil, nil, oidcClaims{}, compactIdentity{}, errors.New("refresh token is missing")
+	}
+	seed := &oauth2.Token{RefreshToken: current.RefreshToken, Expiry: a.now().UTC().Add(-time.Second)}
 	token, err := a.oauth.TokenSource(oidc.ClientContext(ctx, a.httpClient), seed).Token()
 	if err != nil {
-		return err
+		return oauth2.Token{}, nil, nil, oidcClaims{}, compactIdentity{}, err
 	}
+	rawIDToken, idToken, claims, identity, err := a.verifyIDToken(ctx, token, "")
+	if err != nil || identity.Subject != expected.Subject || identity.TenantID != expected.TenantID {
+		return oauth2.Token{}, nil, nil, oidcClaims{}, compactIdentity{}, errors.New("refreshed OIDC identity changed")
+	}
+	return *token, []byte(rawIDToken), idToken, claims, identity, nil
+}
+
+func (a *OIDCAuthenticator) verifyIDToken(ctx context.Context, token *oauth2.Token, nonce string) (string, *oidc.IDToken, oidcClaims, compactIdentity, error) {
 	raw, ok := token.Extra("id_token").(string)
-	if !ok || raw == "" {
-		return errors.New("refreshed ID token missing")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return "", nil, oidcClaims{}, compactIdentity{}, errors.New("ID token is missing")
 	}
-	idToken, err := a.verifier.Verify(oidc.ClientContext(ctx, a.httpClient), raw)
+	idToken, err := a.verifier.Verify(ctx, raw)
 	if err != nil {
-		return err
+		return "", nil, oidcClaims{}, compactIdentity{}, err
 	}
 	var claims oidcClaims
 	if err := idToken.Claims(&claims); err != nil {
-		return err
+		return "", nil, oidcClaims{}, compactIdentity{}, err
 	}
-	principal, err := principalFromClaims(claims, a.options.TenantID)
-	if err != nil {
-		return err
-	}
-	if principal.UserID != current.Principal.UserID {
-		return errors.New("refreshed subject changed")
-	}
-	principal.DisplayName = current.Principal.DisplayName
-	current.Principal, current.IDToken, current.Token, current.RefreshedAt, current.TokenExpiresAt = principal, raw, token, now, idToken.Expiry
-	return nil
+	identity, err := validateCompactIDTokenClaims(claims, nonce, a.options.TenantID)
+	return raw, idToken, claims, identity, err
 }
 
-func refreshWasRejected(err error) bool {
-	var retrieveError *oauth2.RetrieveError
-	return errors.As(err, &retrieveError) && retrieveError.ErrorCode == "invalid_grant"
+func validateCompactIDTokenClaims(claims oidcClaims, expectedNonce, expectedTenant string) (compactIdentity, error) {
+	claims.Subject = strings.TrimSpace(claims.Subject)
+	claims.IdentityID = strings.TrimSpace(claims.IdentityID)
+	claims.TenantID = strings.TrimSpace(claims.TenantID)
+	claims.PersonID = strings.TrimSpace(claims.PersonID)
+	if claims.Subject == "" || claims.TenantID != expectedTenant || claims.TokenUse != "id_token" {
+		return compactIdentity{}, errors.New("compact identity is incomplete")
+	}
+	if expectedNonce != "" && claims.Nonce != expectedNonce {
+		return compactIdentity{}, errors.New("nonce does not match")
+	}
+	if claims.IdentityID == "" {
+		claims.IdentityID = claims.Subject
+	}
+	if claims.IdentityID != claims.Subject {
+		return compactIdentity{}, errors.New("identity_id does not match sub")
+	}
+	if len(claims.Subject) > 128 || len(claims.PersonID) > 64 {
+		return compactIdentity{}, errors.New("identity exceeds storage boundary")
+	}
+	displayName := strings.TrimSpace(claims.Name)
+	if displayName == "" {
+		displayName = strings.TrimSpace(claims.PreferredUsername)
+	}
+	if displayName == "" {
+		displayName = claims.Subject
+	}
+	return compactIdentity{Subject: claims.Subject, IdentityID: claims.IdentityID, TenantID: claims.TenantID, PersonID: claims.PersonID, DisplayName: displayName}, nil
 }
 
-func principalFromClaims(claims oidcClaims, tenantID string) (Principal, error) {
-	if strings.TrimSpace(claims.Subject) == "" || claims.TenantID != tenantID || len(claims.Roles) == 0 || len(claims.Permissions) == 0 || claims.RoleConfigHash == "" || claims.AuthzRevision == 0 {
-		return Principal{}, errors.New("authorization metadata incomplete")
+func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity, value AuthorizationContext) (Principal, error) {
+	if identity.Subject != value.Subject || identity.IdentityID != value.IdentityID || identity.TenantID != value.TenantID || identity.PersonID != "" && value.PersonID != "" && identity.PersonID != value.PersonID {
+		return Principal{}, fmt.Errorf("%w: OIDC and authorization identities differ", ErrInvalidAuthorization)
 	}
-	for _, role := range claims.Roles {
-		if role == "" || role != strings.TrimSpace(role) {
-			return Principal{}, errors.New("roles malformed")
-		}
+	if err := a.catalog.Validate(value, a.options.ClientID, a.options.ApplicationCode, a.options.EnvironmentCode); err != nil {
+		return Principal{}, err
 	}
-	roles := normalize(claims.Roles)
-	if len(roles) != len(claims.Roles) {
-		return Principal{}, errors.New("roles malformed")
+	permissions := make(map[string]bool, len(value.Permissions))
+	for _, permission := range value.Permissions {
+		permissions[permission] = true
 	}
-	permissions := map[string]bool{}
-	for _, value := range claims.Permissions {
-		if strings.TrimSpace(value) == "" || value == "all" {
-			return Principal{}, errors.New("permissions malformed")
-		}
-		permissions[value] = true
+	personID := value.PersonID
+	if personID == "" {
+		personID = identity.PersonID
 	}
-	return Principal{TenantID: claims.TenantID, UserID: claims.Subject, Roles: roles, Permissions: permissions, RoleConfigHash: claims.RoleConfigHash, AuthzRevision: claims.AuthzRevision}, nil
-}
-
-func normalize(values []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" && !seen[value] {
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
-	sort.Strings(out)
-	return out
+	return Principal{TenantID: value.TenantID, IdentityID: value.IdentityID, PersonID: personID, UserID: value.IdentityID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
 }
 
 func (a *OIDCAuthenticator) Logout(w http.ResponseWriter, r *http.Request) {
 	idToken := a.clear(w, r)
-	endpoint, _ := url.Parse(strings.TrimRight(a.options.Issuer, "/") + "/oauth2/logout")
+	if a.endSessionEndpoint == "" {
+		http.Redirect(w, r, a.PublicPath("/logged-out"), http.StatusFound)
+		return
+	}
+	endpoint, err := url.Parse(a.endSessionEndpoint)
+	if err != nil {
+		http.Redirect(w, r, a.PublicPath("/logged-out"), http.StatusFound)
+		return
+	}
 	query := endpoint.Query()
 	query.Set("client_id", a.options.ClientID)
 	if idToken != "" {
@@ -316,24 +459,25 @@ func (a *OIDCAuthenticator) LogoutLocal(w http.ResponseWriter, r *http.Request) 
 	a.clear(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
+
 func (a *OIDCAuthenticator) clear(w http.ResponseWriter, r *http.Request) string {
-	var token string
-	if cookie, err := r.Cookie(a.options.SessionCookieName); err == nil {
-		a.mu.Lock()
-		current := a.sessions[cookie.Value]
-		delete(a.sessions, cookie.Value)
-		a.mu.Unlock()
-		if current != nil {
-			current.mu.Lock()
-			token = current.IDToken
-			current.mu.Unlock()
+	var idToken string
+	if cookie, err := r.Cookie(a.options.SessionCookieName); err == nil && cookie.Value != "" {
+		now := a.now().UTC()
+		hash := tokenDigest(cookie.Value)
+		if stored, findErr := a.store.FindSession(r.Context(), hash, now); findErr == nil {
+			if plaintext, decryptErr := a.codec.decrypt(stored.IDTokenCipher); decryptErr == nil {
+				idToken = string(plaintext)
+			}
 		}
+		_ = a.store.RevokeSession(r.Context(), hash, now)
 	}
 	expired := a.cookie("", time.Unix(1, 0))
 	expired.MaxAge = -1
 	http.SetCookie(w, expired)
-	return token
+	return idToken
 }
+
 func (a *OIDCAuthenticator) cookie(value string, expires time.Time) *http.Cookie {
 	path := a.options.PathPrefix
 	if path == "" {
@@ -341,32 +485,59 @@ func (a *OIDCAuthenticator) cookie(value string, expires time.Time) *http.Cookie
 	}
 	return &http.Cookie{Name: a.options.SessionCookieName, Value: value, Path: path, Expires: expires, HttpOnly: true, Secure: a.options.SessionSecure, SameSite: http.SameSiteLaxMode}
 }
+
 func (a *OIDCAuthenticator) PublicPath(path string) string {
 	prefix := strings.TrimRight(a.options.PathPrefix, "/")
-	if path == "/" {
+	if path == "/" || path == "" {
 		return prefix + "/"
 	}
 	return prefix + "/" + strings.TrimLeft(path, "/")
 }
-func (a *OIDCAuthenticator) cleanup(now time.Time) {
-	for key, value := range a.transactions {
-		if !value.ExpiresAt.After(now) {
-			delete(a.transactions, key)
-		}
+
+func safeReturnPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.ContainsAny(value, "\r\n") {
+		return "/"
 	}
-	for key, value := range a.sessions {
-		if !value.ExpiresAt.After(now) {
-			delete(a.sessions, key)
-		}
+	return value
+}
+
+func staleReadAllowed(method string, now, checkedAt time.Time, maxStale time.Duration, tokenExpiresAt time.Time) bool {
+	return (method == http.MethodGet || method == http.MethodHead) && maxStale > 0 && !checkedAt.IsZero() && now.Sub(checkedAt) <= maxStale && tokenExpiresAt.After(now)
+}
+
+func decodePrincipal(value []byte) (Principal, error) {
+	var principal Principal
+	if err := json.Unmarshal(value, &principal); err != nil {
+		return Principal{}, err
+	}
+	if principal.IdentityID == "" || principal.IdentityID != principal.UserID || principal.TenantID == "" || principal.AuthorizationRevision == 0 {
+		return Principal{}, errors.New("stored principal is invalid")
+	}
+	return principal, nil
+}
+
+func writeAuthorizationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrUnauthenticated):
+		http.Error(w, "OIDC access token is invalid", http.StatusUnauthorized)
+	case errors.Is(err, ErrAuthorizationDenied), errors.Is(err, ErrInvalidAuthorization):
+		http.Error(w, "project application authorization is denied", http.StatusForbidden)
+	default:
+		http.Error(w, "authorization service is unavailable", http.StatusServiceUnavailable)
 	}
 }
-func (a *OIDCAuthenticator) deleteSession(id string, expected *session) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.sessions[id] == expected {
-		delete(a.sessions, id)
+
+func earliestTime(values ...time.Time) time.Time {
+	var result time.Time
+	for _, value := range values {
+		if !value.IsZero() && (result.IsZero() || value.Before(result)) {
+			result = value.UTC()
+		}
 	}
+	return result
 }
+
 func randomValue(size int) (string, error) {
 	value := make([]byte, size)
 	if _, err := rand.Read(value); err != nil {

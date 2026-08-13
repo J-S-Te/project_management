@@ -117,11 +117,13 @@ func (h *Handler) authenticate() gin.HandlerFunc {
 		}
 		p, err := h.identity.Authenticate(c.Request.Context(), c.Request)
 		if err != nil {
-			if errors.Is(err, platform.ErrUnauthenticated) {
+			if errors.Is(err, platform.ErrAuthorizationDenied) || errors.Is(err, platform.ErrInvalidAuthorization) {
+				writeError(c, http.StatusForbidden, "PM_AUTHORIZATION_DENIED", "当前身份没有项目系统授权")
+			} else if errors.Is(err, platform.ErrUnauthenticated) {
 				writeError(c, http.StatusUnauthorized, "PM_UNAUTHENTICATED", "项目系统登录状态已失效")
 			} else {
 				h.logger.Error("authenticate request", "error", err)
-				writeError(c, http.StatusServiceUnavailable, "PM_IDENTITY_UNAVAILABLE", "身份服务暂不可用")
+				writeError(c, http.StatusServiceUnavailable, "PM_AUTHORIZATION_UNAVAILABLE", "授权服务暂不可用")
 			}
 			c.Abort()
 			return
@@ -182,7 +184,7 @@ func (h *Handler) me(c *gin.Context) {
 		}
 	}
 	sort.Strings(permissions)
-	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "role_config_hash": p.RoleConfigHash, "authz_revision": p.AuthzRevision})
+	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
 }
 func (h *Handler) dashboard(c *gin.Context) {
 	item, err := h.service.Dashboard(c.Request.Context(), principal(c))
@@ -456,6 +458,8 @@ func decode(c *gin.Context, target any) bool {
 }
 func writeServiceError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, application.ErrForbidden), errors.Is(err, platform.ErrDataScopeDenied):
+		writeError(c, http.StatusForbidden, "PM_SCOPE_FORBIDDEN", "资源不在当前授权数据范围内")
 	case errors.Is(err, application.ErrNotFound):
 		writeError(c, http.StatusNotFound, "PM_NOT_FOUND", "资源不存在")
 	case errors.Is(err, application.ErrValidation):

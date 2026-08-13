@@ -36,9 +36,9 @@ type repo struct {
 	capabilities []domain.Capability
 }
 
-func (r *repo) FindProjectByContractVersion(_ context.Context, tenant, contract, version string) (domain.Project, error) {
+func (r *repo) FindProjectByContractVersion(_ context.Context, filter platform.ScopeFilter, contract, version string) (domain.Project, error) {
 	for _, p := range r.projects {
-		if p.TenantID == tenant && p.Contract == contract && p.ContractVersion == version {
+		if p.TenantID == filter.TenantID && p.Contract == contract && p.ContractVersion == version {
 			return p, nil
 		}
 	}
@@ -67,8 +67,14 @@ func (r *repo) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent)
 	r.events = append(r.events, event)
 	return nil
 }
-func (r *repo) ListDeliveryEvents(_ context.Context, tenant, project string) ([]domain.DeliveryEvent, error) {
+func (r *repo) ListDeliveryEvents(_ context.Context, _ platform.ScopeFilter, project string) ([]domain.DeliveryEvent, error) {
 	return r.events, nil
+}
+func (r *repo) FindProjectForDeviation(_ context.Context, _ platform.ScopeFilter, _ string) (string, error) {
+	if len(r.projects) == 0 {
+		return "", application.ErrNotFound
+	}
+	return r.projects[0].ID, nil
 }
 func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
 	r.capabilities = append(r.capabilities, item)
@@ -81,10 +87,10 @@ func (r *repo) FindCapabilities(_ context.Context, tenant, at string, ids []stri
 	return r.capabilities, nil
 }
 
-func (r *repo) ListProjects(context.Context, string, string, string) ([]domain.Project, error) {
+func (r *repo) ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error) {
 	return r.projects, nil
 }
-func (r *repo) GetProject(_ context.Context, _ string, id string) (domain.Project, error) {
+func (r *repo) GetProject(_ context.Context, _ platform.ScopeFilter, id string) (domain.Project, error) {
 	for _, p := range r.projects {
 		if p.ID == id {
 			return p, nil
@@ -96,8 +102,16 @@ func (r *repo) CreateProject(_ context.Context, p domain.Project) error {
 	r.projects = append(r.projects, p)
 	return nil
 }
-func (r *repo) ListServiceItems(context.Context, string, string) ([]domain.ServiceItem, error) {
+func (r *repo) ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error) {
 	return r.items, nil
+}
+func (r *repo) GetServiceItem(_ context.Context, _ platform.ScopeFilter, id string) (domain.ServiceItem, error) {
+	for _, item := range r.items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return domain.ServiceItem{}, application.ErrNotFound
 }
 func (r *repo) ConfirmServiceItems(_ context.Context, _ string, ids []string, _ string) ([]domain.ServiceItem, error) {
 	return r.items, nil
@@ -111,7 +125,7 @@ func (r *repo) CreateRule(_ context.Context, item domain.Rule) (domain.Rule, err
 func (r *repo) SetRuleEnabled(_ context.Context, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
 	return domain.Rule{ID: id, Enabled: enabled}, nil
 }
-func (r *repo) Dashboard(context.Context, string) (domain.Dashboard, error) {
+func (r *repo) Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error) {
 	return domain.Dashboard{ProjectCount: len(r.projects), StatusCounts: map[string]int{}}, nil
 }
 
@@ -145,7 +159,7 @@ func router(t *testing.T, permissions map[string]bool, reporter platform.AuditRe
 	t.Helper()
 	repository := &repo{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}}}
 	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
-	id := identity{p: platform.Principal{TenantID: "tenant-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions}}
+	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
 	return httpapi.NewRouter(service, id, reporter, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -188,7 +202,7 @@ func TestServiceItemConfirmationUsesWorkflow(t *testing.T) {
 func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}
-	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "contract_management", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	body := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
 	if response.Code != http.StatusCreated {
@@ -253,6 +267,28 @@ func TestMissingPermissionIsForbidden(t *testing.T) {
 	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodPost, "/api/v1/projects", `{"name":"越权","customer":"客户","contract":"HT-1"}`)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+func TestPermissionWithoutDataScopeIsForbidden(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, AuthorizationRevision: 1}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/projects", "")
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PM_SCOPE_FORBIDDEN") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMeReturnsStableIdentityAndDataScopes(t *testing.T) {
+	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodGet, "/api/v1/auth/me", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{"identity_id", "person_id", "data_scopes", "authorization_revision", "catalog_version"} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("response missing %s: %s", expected, response.Body.String())
+		}
 	}
 }
 func TestWriteIsReportedToAudit(t *testing.T) {

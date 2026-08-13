@@ -20,12 +20,32 @@ func setValidEnvironment(t *testing.T) {
 		"OIDC_TENANT_ID":                              "01J00000000000000000000000",
 		"OIDC_SESSION_COOKIE_NAME":                    "project_management_session",
 		"OIDC_SESSION_COOKIE_SECURE":                  "false",
+		"OIDC_SESSION_ENCRYPTION_KEY_BASE64":          "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+		"OIDC_AUTHORIZATION_MAX_STALE":                "5m",
+		"PLATFORM_APPLICATION_CODE":                   "project_management",
+		"PLATFORM_ENVIRONMENT_CODE":                   "dev",
 		"PLATFORM_AUDIT_CLIENT_ID":                    "",
 		"PLATFORM_AUDIT_CLIENT_SECRET":                "",
 		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED": "false",
 	}
 	for key, value := range values {
 		t.Setenv(key, value)
+	}
+}
+
+func TestLoadRequiresExplicitIssuer(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_ISSUER", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OIDC_ISSUER") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidSessionEncryptionKey(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_SESSION_ENCRYPTION_KEY_BASE64", "not-a-32-byte-key")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OIDC_SESSION_ENCRYPTION_KEY_BASE64") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

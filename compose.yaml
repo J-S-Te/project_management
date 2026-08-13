@@ -6,10 +6,9 @@ x-project-environment: &project-environment
   environment:
     PM_HTTP_ADDR: :8082
     MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
-    # 浏览器使用 OIDC_ISSUER 的公开地址；容器内目录同步、审计、发现和令牌交换
-    # 必须走平台 Docker 网络，不能把宿主机 localhost 地址带进容器。
+    # 平台授权 API 与 Keycloak 后通道是两个独立信任边界，禁止共用地址变量。
     PLATFORM_BASE_URL: ${PROJECT_PLATFORM_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
-    OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_PLATFORM_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
+    OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
     TEMPORAL_TASK_QUEUE: project-management

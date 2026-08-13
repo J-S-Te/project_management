@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"os"
@@ -29,6 +30,9 @@ type Config struct {
 	OIDCSessionCookieName       string
 	OIDCSessionTTL              time.Duration
 	OIDCAuthorizationRefresh    time.Duration
+	OIDCAuthorizationMaxStale   time.Duration
+	OIDCAuthorizationTimeout    time.Duration
+	OIDCSessionEncryptionKey    []byte
 	OIDCSessionSecure           bool
 	AppPathPrefix               string
 	PlatformApplicationCode     string
@@ -46,12 +50,12 @@ func Load() (Config, error) {
 	c := Config{
 		HTTPAddress: env("PM_HTTP_ADDR", ":8082"), MySQLDSN: os.Getenv("MYSQL_DSN"),
 		TemporalAddress: env("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: env("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: env("TEMPORAL_TASK_QUEUE", "project-management"), TemporalAPIKey: os.Getenv("TEMPORAL_API_KEY"),
-		PlatformBaseURL: env("PLATFORM_BASE_URL", "http://localhost:8080"),
-		OIDCIssuer:      env("OIDC_ISSUER", "http://localhost:8080"), OIDCBackchannelBaseURL: os.Getenv("OIDC_BACKCHANNEL_BASE_URL"),
+		PlatformBaseURL: strings.TrimSpace(os.Getenv("PLATFORM_BASE_URL")),
+		OIDCIssuer:      strings.TrimSpace(os.Getenv("OIDC_ISSUER")), OIDCBackchannelBaseURL: os.Getenv("OIDC_BACKCHANNEL_BASE_URL"),
 		OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURI: os.Getenv("OIDC_REDIRECT_URI"),
 		OIDCPostLogoutRedirectURI: os.Getenv("OIDC_POST_LOGOUT_REDIRECT_URI"), OIDCTenantID: os.Getenv("OIDC_TENANT_ID"),
 		OIDCSessionCookieName: env("OIDC_SESSION_COOKIE_NAME", "project_management_session"), AppPathPrefix: env("APP_PATH_PREFIX", "/project_management"),
-		PlatformApplicationCode: env("PLATFORM_APPLICATION_CODE", "project_management"), PlatformEnvironmentCode: env("PLATFORM_ENVIRONMENT_CODE", "prod"),
+		PlatformApplicationCode: strings.TrimSpace(os.Getenv("PLATFORM_APPLICATION_CODE")), PlatformEnvironmentCode: strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")),
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
 		PlatformCatalogClientSecret: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
@@ -61,6 +65,15 @@ func Load() (Config, error) {
 		return c, err
 	}
 	if c.OIDCAuthorizationRefresh, err = duration("OIDC_AUTHORIZATION_REFRESH_INTERVAL", time.Minute); err != nil {
+		return c, err
+	}
+	if c.OIDCAuthorizationMaxStale, err = duration("OIDC_AUTHORIZATION_MAX_STALE", 5*time.Minute); err != nil {
+		return c, err
+	}
+	if c.OIDCAuthorizationTimeout, err = duration("OIDC_AUTHORIZATION_TIMEOUT", 10*time.Second); err != nil {
+		return c, err
+	}
+	if c.OIDCSessionEncryptionKey, err = encryptionKey("OIDC_SESSION_ENCRYPTION_KEY_BASE64"); err != nil {
 		return c, err
 	}
 	if c.OIDCSessionSecure, err = strconv.ParseBool(env("OIDC_SESSION_COOKIE_SECURE", "true")); err != nil {
@@ -91,9 +104,12 @@ func (c Config) validate() error {
 	if strings.TrimSpace(c.TemporalAddress) == "" || strings.TrimSpace(c.TemporalNamespace) == "" || strings.TrimSpace(c.TemporalTaskQueue) == "" {
 		return fmt.Errorf("Temporal address, namespace and task queue are required")
 	}
-	for name, value := range map[string]string{"OIDC_CLIENT_ID": c.OIDCClientID, "OIDC_CLIENT_SECRET": c.OIDCClientSecret, "OIDC_REDIRECT_URI": c.OIDCRedirectURI, "OIDC_TENANT_ID": c.OIDCTenantID} {
+	for name, value := range map[string]string{"OIDC_ISSUER": c.OIDCIssuer, "OIDC_CLIENT_ID": c.OIDCClientID, "OIDC_CLIENT_SECRET": c.OIDCClientSecret, "OIDC_REDIRECT_URI": c.OIDCRedirectURI, "OIDC_TENANT_ID": c.OIDCTenantID, "PLATFORM_BASE_URL": c.PlatformBaseURL, "PLATFORM_APPLICATION_CODE": c.PlatformApplicationCode, "PLATFORM_ENVIRONMENT_CODE": c.PlatformEnvironmentCode} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
+		}
+		if placeholder(value) {
+			return fmt.Errorf("%s contains a deployment placeholder", name)
 		}
 	}
 	if !validHTTPOrigin(c.PlatformBaseURL) {
@@ -111,8 +127,17 @@ func (c Config) validate() error {
 	if c.OIDCPostLogoutRedirectURI != "" && !validRedirectURL(c.OIDCPostLogoutRedirectURI) {
 		return fmt.Errorf("OIDC_POST_LOGOUT_REDIRECT_URI must be a valid HTTP(S) redirect URL")
 	}
-	if c.OIDCSessionTTL <= 0 || c.OIDCAuthorizationRefresh <= 0 || c.OIDCAuthorizationRefresh >= c.OIDCSessionTTL {
-		return fmt.Errorf("OIDC refresh interval must be positive and shorter than session TTL")
+	if c.OIDCSessionTTL <= 0 || c.OIDCAuthorizationRefresh <= 0 || c.OIDCAuthorizationRefresh >= c.OIDCSessionTTL || c.OIDCAuthorizationMaxStale < c.OIDCAuthorizationRefresh || c.OIDCAuthorizationMaxStale >= c.OIDCSessionTTL {
+		return fmt.Errorf("OIDC refresh and maximum stale intervals must be positive, ordered and shorter than session TTL")
+	}
+	if c.OIDCAuthorizationTimeout <= 0 || c.OIDCAuthorizationTimeout > 30*time.Second {
+		return fmt.Errorf("OIDC_AUTHORIZATION_TIMEOUT must be between 1ns and 30s")
+	}
+	if len(c.OIDCSessionEncryptionKey) != 32 {
+		return fmt.Errorf("OIDC_SESSION_ENCRYPTION_KEY_BASE64 must decode to 32 bytes")
+	}
+	if c.PlatformApplicationCode != "project_management" {
+		return fmt.Errorf("PLATFORM_APPLICATION_CODE must be project_management")
 	}
 	if c.AppPathPrefix == "/" || !strings.HasPrefix(c.AppPathPrefix, "/") || strings.HasSuffix(c.AppPathPrefix, "/") {
 		return fmt.Errorf("APP_PATH_PREFIX must be a non-root absolute path without trailing slash")
@@ -174,4 +199,23 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return parsed, nil
+}
+
+func encryptionKey(key string) ([]byte, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, fmt.Errorf("%s is required", key)
+	}
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+		decoded, err := encoding.DecodeString(value)
+		if err == nil && len(decoded) == 32 {
+			return decoded, nil
+		}
+	}
+	return nil, fmt.Errorf("%s must be base64 encoding of exactly 32 bytes", key)
+}
+
+func placeholder(value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	return strings.Contains(upper, "PENDING") || strings.Contains(upper, "CHANGEME") || strings.Contains(upper, "EXAMPLE.COM")
 }

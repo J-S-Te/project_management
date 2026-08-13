@@ -7,8 +7,9 @@
 - Temporal 承载服务项拆解确认工作流；Activity 可重试且以目标状态写入保证幂等。API 默认内嵌 Worker，也支持独立 Worker 进程。
 - 版本化 SQL 迁移由独立 `project-migrate` 入口执行，API 只在迁移成功后启动。
 - 与 ER 图一致的项目、服务项和规则核心实体，以及可直接体验完整页面的初始化数据。
-- 使用平台注册的 OAuth Client 建立授权码 + PKCE OIDC 会话，不复用平台 Cookie；权限变更通过刷新令牌周期性同步。
-- 后端精确校验 `project.read`、`project.create`、`service_item.confirm`、`project_rule.manage`，默认拒绝且不接受通配权限。
+- 使用 Keycloak Client 建立授权码 + PKCE OIDC 会话；ID Token 只校验稳定身份，Access Token 在线调用基础平台 `/oauth2/authorization-context` 获取项目应用授权。
+- 后端按内置目录复核角色/权限，并在 SQL 查询和写操作中同时执行 Permission + Data Scope；不接受未知码、`all` 通配权限或未知 Scope。
+- OIDC state 与项目 Session 持久化；Cookie/state 原文只保存 SHA-256，OIDC 秘密使用运行时注入的 AES-256-GCM 密钥加密。
 - 写操作使用独立机器 OAuth Client 上报平台审计；启动时可将内嵌角色/权限目录同步到平台。
 - Vue 前端通过同源 `/project_management/api/v1` 接入，Vite 开发代理默认转发至 `127.0.0.1:8082`。
 
@@ -49,9 +50,12 @@ npm run dev
 | `MYSQL_DSN` | 无 | 项目管理 MySQL DSN，必须启用 `parseTime=true` |
 | `TEMPORAL_ADDRESS` / `TEMPORAL_TASK_QUEUE` | `localhost:7233` / `project-management` | Temporal 服务与任务队列 |
 | `PROJECT_RUN_WORKER_WITH_API` | `true` | API 是否内嵌 Temporal Worker；拆分部署时关闭并启动 `cmd/worker` |
-| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | 无 | 平台签发的项目系统浏览器客户端 |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | 无 | Keycloak Realm 公开 Issuer 与项目系统独立浏览器 Client；Issuer 必须显式配置 |
 | `OIDC_REDIRECT_URI` / `OIDC_TENANT_ID` | 无 | 回调地址和固定租户边界 |
-| `PROJECT_PLATFORM_BACKCHANNEL_BASE_URL` | `http://platform-api:8080` | Compose 容器访问平台 API 与 OIDC 后通道的内部地址；与浏览器使用的公开 `OIDC_ISSUER` 分离 |
+| `PROJECT_PLATFORM_BACKCHANNEL_BASE_URL` | `http://platform-api:8080` | Compose 容器访问基础平台授权 API 的内部地址 |
+| `PROJECT_OIDC_BACKCHANNEL_BASE_URL` | `http://keycloak:8080` | Compose 容器访问 Keycloak Discovery、换码和刷新端点的内部地址；与平台 API 地址严格分离 |
+| `OIDC_AUTHORIZATION_REFRESH_INTERVAL` / `OIDC_AUTHORIZATION_MAX_STALE` | `1m` / `5m` | 在线授权复核周期与只读请求最大陈旧窗口；写请求不使用陈旧授权 |
+| `OIDC_SESSION_ENCRYPTION_KEY_BASE64` | 无 | Provisioner 生成的随机 32 字节 Base64 会话加密密钥，必须通过运行时 Secret 注入 |
 | `PLATFORM_AUDIT_CLIENT_*` | 空 | 具备 `audit.ingest` 的机器客户端；配置后上报写操作审计 |
 | `PLATFORM_AUTHORIZATION_CATALOG_*` | 空 | 具备 `authorization.catalog.sync` 的机器客户端 |
 | `CONTRACT_INTEGRATION_ENABLED` | `false` | 是否启用合同系统内部接收接口 |

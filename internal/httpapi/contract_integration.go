@@ -26,7 +26,7 @@ func (h *Handler) authenticateContractIntegration(options ContractIntegrationOpt
 			c.Abort()
 			return
 		}
-		c.Set("principal", platform.Principal{TenantID: tenantID, UserID: "contract_management", DisplayName: "合同管理系统", Permissions: map[string]bool{"project.contract.import": true}})
+		c.Set("principal", platform.Principal{TenantID: tenantID, IdentityID: "contract_management", UserID: "contract_management", DisplayName: "合同管理系统", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}})
 		c.Next()
 	}
 }

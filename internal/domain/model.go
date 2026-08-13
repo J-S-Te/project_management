@@ -3,23 +3,26 @@ package domain
 import "time"
 
 type Project struct {
-	TenantID         string    `json:"-"`
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Customer         string    `json:"customer"`
-	Contract         string    `json:"contract"`
-	ContractVersion  string    `json:"contract_version,omitempty"`
-	SupplementStatus string    `json:"supplement_status,omitempty"`
-	Services         int       `json:"services"`
-	Category         string    `json:"category"`
-	Team             string    `json:"team"`
-	Manager          string    `json:"manager"`
-	Health           string    `json:"health"`
-	Status           string    `json:"status"`
-	Progress         int       `json:"progress"`
-	Due              string    `json:"due"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	TenantID          string    `json:"-"`
+	OwnerOrgID        string    `json:"owner_org_id,omitempty"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Customer          string    `json:"customer"`
+	Contract          string    `json:"contract"`
+	ContractVersion   string    `json:"contract_version,omitempty"`
+	SupplementStatus  string    `json:"supplement_status,omitempty"`
+	Services          int       `json:"services"`
+	Category          string    `json:"category"`
+	Team              string    `json:"team"`
+	Manager           string    `json:"manager"`
+	OwnerIdentityID   string    `json:"owner_identity_id,omitempty"`
+	ManagerIdentityID string    `json:"manager_identity_id,omitempty"`
+	Health            string    `json:"health"`
+	Status            string    `json:"status"`
+	Progress          int       `json:"progress"`
+	Due               string    `json:"due"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type ServiceItem struct {
