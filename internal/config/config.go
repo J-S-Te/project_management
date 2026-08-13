@@ -11,39 +11,42 @@ import (
 )
 
 type Config struct {
-	HTTPAddress                 string
-	MySQLDSN                    string
-	TemporalAddress             string
-	TemporalNamespace           string
-	TemporalTaskQueue           string
-	TemporalAPIKey              string
-	TemporalTLS                 bool
-	RunWorkerWithAPI            bool
-	PlatformBaseURL             string
-	OIDCIssuer                  string
-	OIDCBackchannelBaseURL      string
-	OIDCClientID                string
-	OIDCClientSecret            string
-	OIDCRedirectURI             string
-	OIDCPostLogoutRedirectURI   string
-	OIDCTenantID                string
-	OIDCSessionCookieName       string
-	OIDCSessionTTL              time.Duration
-	OIDCAuthorizationRefresh    time.Duration
-	OIDCAuthorizationMaxStale   time.Duration
-	OIDCAuthorizationTimeout    time.Duration
-	OIDCSessionEncryptionKey    []byte
-	OIDCSessionSecure           bool
-	AppPathPrefix               string
-	PlatformApplicationCode     string
-	PlatformEnvironmentCode     string
-	PlatformApplicationID       string
-	PlatformAuditClientID       string
-	PlatformAuditClientSecret   string
-	PlatformCatalogSync         bool
-	PlatformCatalogClientID     string
-	PlatformCatalogClientSecret string
-	ContractIntegrationEnabled  bool
+	HTTPAddress                      string
+	MySQLDSN                         string
+	TemporalAddress                  string
+	TemporalNamespace                string
+	TemporalTaskQueue                string
+	TemporalAPIKey                   string
+	TemporalTLS                      bool
+	RunWorkerWithAPI                 bool
+	PlatformBaseURL                  string
+	OIDCIssuer                       string
+	OIDCBackchannelBaseURL           string
+	OIDCClientID                     string
+	OIDCClientSecret                 string
+	OIDCRedirectURI                  string
+	OIDCPostLogoutRedirectURI        string
+	OIDCTenantID                     string
+	OIDCSessionCookieName            string
+	OIDCSessionTTL                   time.Duration
+	OIDCAuthorizationRefresh         time.Duration
+	OIDCAuthorizationMaxStale        time.Duration
+	OIDCAuthorizationTimeout         time.Duration
+	OIDCSessionEncryptionKey         []byte
+	OIDCSessionSecure                bool
+	AppPathPrefix                    string
+	PlatformApplicationCode          string
+	PlatformEnvironmentCode          string
+	PlatformApplicationID            string
+	PlatformAuditClientID            string
+	PlatformAuditClientSecret        string
+	PlatformCatalogSync              bool
+	PlatformCatalogClientID          string
+	PlatformCatalogClientSecret      string
+	ContractIntegrationEnabled       bool
+	ContractIntegrationRequireBearer bool
+	ContractIntegrationClientID      string
+	ContractIntegrationAudience      string
 }
 
 func Load() (Config, error) {
@@ -59,6 +62,7 @@ func Load() (Config, error) {
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
 		PlatformCatalogClientSecret: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
+		ContractIntegrationClientID: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")), ContractIntegrationAudience: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -90,6 +94,9 @@ func Load() (Config, error) {
 	}
 	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
+	}
+	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "false")); err != nil {
+		return c, fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER: %w", err)
 	}
 	return c, c.validate()
 }
@@ -150,6 +157,16 @@ func (c Config) validate() error {
 	}
 	if c.PlatformCatalogSync && (c.PlatformApplicationID == "" || c.PlatformCatalogClientID == "" || c.PlatformCatalogClientSecret == "") {
 		return fmt.Errorf("catalog sync requires application ID, client ID and secret")
+	}
+	if c.ContractIntegrationRequireBearer {
+		if !c.ContractIntegrationEnabled {
+			return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER requires CONTRACT_INTEGRATION_ENABLED")
+		}
+		for name, value := range map[string]string{"CONTRACT_INTEGRATION_CLIENT_ID": c.ContractIntegrationClientID, "CONTRACT_INTEGRATION_AUDIENCE": c.ContractIntegrationAudience} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when bearer authentication is enabled", name)
+			}
+		}
 	}
 	return nil
 }

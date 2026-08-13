@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/httpapi"
@@ -22,6 +23,16 @@ import (
 type identity struct {
 	p   platform.Principal
 	err error
+}
+
+type integrationVerifier struct {
+	err   error
+	token string
+}
+
+func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) error {
+	v.token = token
+	return v.err
 }
 
 func (i identity) Authenticate(context.Context, *http.Request) (platform.Principal, error) {
@@ -254,6 +265,58 @@ func TestContractIntegrationRejectsMissingRoutingHeaders(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestContractIntegrationRequiresVerifiedKeycloakMachineTokenWhenEnabled(t *testing.T) {
+	service := &application.Service{Repo: &repo{}}
+	verifier := &integrationVerifier{}
+	handler := httpapi.NewRouter(service, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier})
+	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
+	request.Header.Set("X-Contract-Tenant-ID", "tenant-contract")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("missing bearer status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
+	request.Header.Set("X-Contract-Tenant-ID", "tenant-contract")
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || verifier.token != "verified-machine-token" {
+		t.Fatalf("verified bearer status=%d token=%q body=%s", response.Code, verifier.token, response.Body.String())
+	}
+}
+
+func TestContractIntegrationFailsClosedWhenBearerVerifierIsUnavailable(t *testing.T) {
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestContractIntegrationRejectsInvalidKeycloakMachineToken(t *testing.T) {
+	verifier := &integrationVerifier{err: errors.New("invalid signature")}
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer invalid-machine-token")
+	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
+	request.Header.Set("X-Contract-Tenant-ID", "tenant-contract")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

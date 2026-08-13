@@ -9,7 +9,9 @@ import (
 )
 
 type ContractIntegrationOptions struct {
-	Enabled bool
+	Enabled        bool
+	RequireBearer  bool
+	BearerVerifier platform.ClientCredentialsTokenVerifier
 }
 
 func (h *Handler) authenticateContractIntegration(options ContractIntegrationOptions) gin.HandlerFunc {
@@ -18,6 +20,25 @@ func (h *Handler) authenticateContractIntegration(options ContractIntegrationOpt
 			writeError(c, http.StatusNotFound, "PM_NOT_FOUND", "接口未启用")
 			c.Abort()
 			return
+		}
+		if options.RequireBearer {
+			if options.BearerVerifier == nil {
+				writeError(c, http.StatusServiceUnavailable, "PM_INTEGRATION_AUTH_UNAVAILABLE", "合同系统机器身份校验未配置")
+				c.Abort()
+				return
+			}
+			const bearerPrefix = "Bearer "
+			authorization := strings.TrimSpace(c.GetHeader("Authorization"))
+			if !strings.HasPrefix(authorization, bearerPrefix) || strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)) == "" {
+				writeError(c, http.StatusUnauthorized, "PM_INTEGRATION_BEARER_REQUIRED", "合同系统投递必须携带 Keycloak 机器访问令牌")
+				c.Abort()
+				return
+			}
+			if err := options.BearerVerifier.VerifyClientCredentials(c.Request.Context(), strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))); err != nil {
+				writeError(c, http.StatusUnauthorized, "PM_INTEGRATION_BEARER_INVALID", "合同系统机器访问令牌无效")
+				c.Abort()
+				return
+			}
 		}
 		tenantID := strings.TrimSpace(c.GetHeader("X-Contract-Tenant-ID"))
 		deliveryID := strings.TrimSpace(c.GetHeader("X-Contract-Delivery-ID"))

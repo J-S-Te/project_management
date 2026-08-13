@@ -166,6 +166,9 @@ func (s *fakeOIDCStore) ConsumeLoginTransaction(context.Context, []byte, time.Ti
 }
 func (s *fakeOIDCStore) CreateSession(context.Context, StoredOIDCSession) error { return nil }
 func (s *fakeOIDCStore) FindSession(context.Context, []byte, time.Time) (StoredOIDCSession, error) {
+	if s.revoked || s.revokedAll {
+		return StoredOIDCSession{}, errOIDCRecordNotFound
+	}
 	return s.session, nil
 }
 func (s *fakeOIDCStore) UpdateSession(_ context.Context, value StoredOIDCSession, _ time.Time) error {
@@ -202,6 +205,58 @@ func TestAuthorizationDenialRevokesAllIdentitySessions(t *testing.T) {
 	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
 	if _, err := auth.Authenticate(context.Background(), request); !errors.Is(err, ErrAuthorizationDenied) || !store.revokedAll || store.revoked {
 		t.Fatalf("error=%v revokedAll=%v revoked=%v", err, store.revokedAll, store.revoked)
+	}
+}
+
+func TestAuthorizationRefreshPersistsNewRevisionAcrossAuthenticatorRestart(t *testing.T) {
+	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.SessionIDHash = tokenDigest("shared-browser-session")
+	store := &fakeOIDCStore{session: stored}
+	updatedPrincipal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.create": true}, DataScopes: []DataScope{{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-2"}}, AuthorizationRevision: 8, CatalogVersion: "2"}
+	updatedJSON, err := json.Marshal(updatedPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &OIDCAuthenticator{
+		options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute},
+		store:   store, now: func() time.Time { return now },
+		refreshAuthorization: func(_ context.Context, value StoredOIDCSession, _ time.Time, _ string) (StoredOIDCSession, Principal, error) {
+			value.PrincipalJSON = updatedJSON
+			value.AuthorizationRevision = updatedPrincipal.AuthorizationRevision
+			value.AuthorizationCheckedAt = now
+			return value, updatedPrincipal, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	request.AddCookie(first.cookie("shared-browser-session", now.Add(time.Hour)))
+	principal, err := first.Authenticate(context.Background(), request)
+	if err != nil || principal.AuthorizationRevision != 8 || !principal.Has("project.create") || principal.Has("project.read") || !store.updated || store.session.AuthorizationRevision != 8 {
+		t.Fatalf("principal=%+v error=%v stored=%+v updated=%v", principal, err, store.session, store.updated)
+	}
+
+	// A new authenticator represents a restarted or different API instance. It
+	// reads the same persistent store rather than an in-process session cache.
+	second := &OIDCAuthenticator{options: first.options, store: store, now: func() time.Time { return now.Add(30 * time.Second) }}
+	principal, err = second.Authenticate(context.Background(), request)
+	if err != nil || principal.AuthorizationRevision != 8 || !principal.Has("project.create") || principal.Has("project.read") {
+		t.Fatalf("restarted instance principal=%+v error=%v", principal, err)
+	}
+}
+
+func TestRevocationIsVisibleToAnotherAuthenticatorInstance(t *testing.T) {
+	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	store := &fakeOIDCStore{session: stored}
+	first := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session"}, store: store, now: func() time.Time { return now }}
+	second := &OIDCAuthenticator{options: first.options, store: store, now: first.now}
+	if err := first.store.RevokeSessionsForIdentity(context.Background(), "tenant-1", "identity-1", now); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	request.AddCookie(second.cookie("shared-browser-session", now.Add(time.Hour)))
+	if _, err := second.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("revoked session error=%v", err)
 	}
 }
 

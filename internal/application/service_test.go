@@ -107,3 +107,31 @@ func TestProjectOnlyScopeCannotCreateUnassignedProject(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestNarrowScopeCannotManageTenantWideRulesOrCapabilities(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}}
+	principal := principalWith("project_rule.manage", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"})
+	if _, err := service.CreateRule(context.Background(), principal, domain.Rule{Name: "越权规则", Scope: "tenant"}); err != ErrForbidden {
+		t.Fatalf("CreateRule error=%v", err)
+	}
+	principal = principalWith("project.read", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"})
+	if _, err := service.ListRules(context.Background(), principal, "split-rules"); err != ErrForbidden {
+		t.Fatalf("ListRules error=%v", err)
+	}
+	principal = principalWith("project.resource.manage", platform.DataScope{RoleCode: "project_manager", ScopeType: "ORG", ScopeID: "org-1"})
+	if _, err := service.UpsertCapability(context.Background(), principal, domain.Capability{ResourceType: "PERSON", ResourceID: "person-1", ResourceName: "人员", Codes: []string{"TEST"}}); err != ErrForbidden {
+		t.Fatalf("UpsertCapability error=%v", err)
+	}
+	principal = principalWith("project.resource.read", platform.DataScope{RoleCode: "project_manager", ScopeType: "ORG", ScopeID: "org-1"})
+	if _, err := service.ListCapabilities(context.Background(), principal, "PERSON"); err != ErrForbidden {
+		t.Fatalf("ListCapabilities error=%v", err)
+	}
+}
+
+func TestFullDataScopeCanManageTenantWideRules(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}}
+	principal := principalWith("project_rule.manage", platform.DataScope{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"})
+	if _, err := service.CreateRule(context.Background(), principal, domain.Rule{Name: "规则", Scope: "tenant"}); err != nil {
+		t.Fatal(err)
+	}
+}

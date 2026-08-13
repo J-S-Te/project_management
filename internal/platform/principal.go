@@ -30,8 +30,17 @@ type Principal struct {
 
 func (p Principal) Has(permission string) bool { return p.Permissions[permission] }
 
-func (p Principal) HasApplicationScope() bool {
-	return len(p.DataScopes) > 0
+// HasFullDataScope is for tenant-wide master data that cannot safely be
+// filtered by an individual project, organization or person. A non-empty
+// narrow scope is not an application grant.
+func (p Principal) HasFullDataScope() bool {
+	for _, scope := range p.DataScopes {
+		switch scope.ScopeType {
+		case "APPLICATION", "ENVIRONMENT", "TENANT":
+			return true
+		}
+	}
+	return false
 }
 
 // ScopeFilter is the only business-data boundary accepted by repositories.

@@ -188,7 +188,7 @@ func authorizeProjectScope(p platform.Principal, permission string) (platform.Sc
 }
 
 func requireApplicationAuthorization(p platform.Principal, permission string) error {
-	if !p.Has(permission) || !p.HasApplicationScope() {
+	if !p.Has(permission) || !p.HasFullDataScope() {
 		return ErrForbidden
 	}
 	return nil
