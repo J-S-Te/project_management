@@ -20,15 +20,14 @@ func validCompactClaims() oidcClaims {
 func TestValidateCompactIDTokenClaims(t *testing.T) {
 	claims := validCompactClaims()
 	claims.IdentityID = ""
-	identity, err := validateCompactIDTokenClaims(claims, "nonce-1", "tenant-1")
-	if err != nil || identity.IdentityID != identity.Subject || identity.PersonID != "person-1" {
-		t.Fatalf("identity=%+v error=%v", identity, err)
+	if _, err := validateCompactIDTokenClaims(claims, "nonce-1", "tenant-1"); err == nil {
+		t.Fatal("missing identity_id was accepted")
 	}
 }
 
 func TestValidateCompactIDTokenClaimsRejectsSecurityMismatch(t *testing.T) {
 	tests := map[string]func(*oidcClaims){
-		"identity":  func(value *oidcClaims) { value.IdentityID = "identity-2" },
+		"identity":  func(value *oidcClaims) { value.IdentityID = "" },
 		"tenant":    func(value *oidcClaims) { value.TenantID = "tenant-2" },
 		"nonce":     func(value *oidcClaims) { value.Nonce = "nonce-2" },
 		"token use": func(value *oidcClaims) { value.TokenUse = "access_token" },

@@ -16,6 +16,7 @@ type DataScope struct {
 }
 
 type Principal struct {
+	Subject               string
 	TenantID              string
 	IdentityID            string
 	PersonID              string

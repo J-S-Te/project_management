@@ -288,7 +288,12 @@ func (a *OIDCAuthenticator) refreshStoredSession(ctx context.Context, stored Sto
 	if err != nil {
 		return stored, Principal{}, ErrUnauthenticated
 	}
-	identity := compactIdentity{Subject: stored.IdentityID, IdentityID: stored.IdentityID, TenantID: stored.TenantID, PersonID: stored.PersonID}
+	storedPrincipal, _ := decodePrincipal(stored.PrincipalJSON)
+	subject := storedPrincipal.Subject
+	if subject == "" {
+		subject = stored.IdentityID
+	}
+	identity := compactIdentity{Subject: subject, IdentityID: stored.IdentityID, TenantID: stored.TenantID, PersonID: stored.PersonID}
 	var idToken *oidc.IDToken
 	var claims oidcClaims
 	if !token.Expiry.After(now) {
@@ -395,11 +400,8 @@ func validateCompactIDTokenClaims(claims oidcClaims, expectedNonce, expectedTena
 	if expectedNonce != "" && claims.Nonce != expectedNonce {
 		return compactIdentity{}, errors.New("nonce does not match")
 	}
-	if claims.IdentityID == "" {
-		claims.IdentityID = claims.Subject
-	}
-	if claims.IdentityID != claims.Subject {
-		return compactIdentity{}, errors.New("identity_id does not match sub")
+	if claims.IdentityID == "" || claims.IdentityID != strings.TrimSpace(claims.IdentityID) {
+		return compactIdentity{}, errors.New("identity_id is required")
 	}
 	if len(claims.Subject) > 128 || len(claims.PersonID) > 64 {
 		return compactIdentity{}, errors.New("identity exceeds storage boundary")
@@ -429,7 +431,7 @@ func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity,
 	if personID == "" {
 		personID = identity.PersonID
 	}
-	return Principal{TenantID: value.TenantID, IdentityID: value.IdentityID, PersonID: personID, UserID: value.IdentityID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
+	return Principal{Subject: identity.Subject, TenantID: value.TenantID, IdentityID: value.IdentityID, PersonID: personID, UserID: value.IdentityID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
 }
 
 func (a *OIDCAuthenticator) Logout(w http.ResponseWriter, r *http.Request) {
