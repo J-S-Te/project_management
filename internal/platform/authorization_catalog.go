@@ -48,7 +48,7 @@ func LoadAuthorizationCatalog() (AuthorizationCatalog, error) {
 }
 
 func (c AuthorizationCatalog) Validate(value AuthorizationContext, expectedClientID, expectedApplication, expectedEnvironment string) error {
-	if strings.TrimSpace(value.Subject) == "" || value.IdentityID != value.Subject || strings.TrimSpace(value.TenantID) == "" || value.AuthorizationRevision == 0 {
+	if strings.TrimSpace(value.Subject) == "" || strings.TrimSpace(value.IdentityID) == "" || value.IdentityID != strings.TrimSpace(value.IdentityID) || strings.TrimSpace(value.TenantID) == "" || value.AuthorizationRevision == 0 {
 		return fmt.Errorf("%w: identity or revision", ErrInvalidAuthorization)
 	}
 	if value.ClientID != expectedClientID || value.ApplicationCode != expectedApplication || value.EnvironmentCode != expectedEnvironment {
