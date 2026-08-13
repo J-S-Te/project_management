@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -288,7 +289,7 @@ func TestLoginPersistsOnlyStateDigestAndEncryptedSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &fakeOIDCStore{}
-	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1"}, store: store, codec: codec, now: time.Now, oauth: oauth2.Config{ClientID: "project_management-dev-web", RedirectURL: "http://localhost/callback", Endpoint: oauth2.Endpoint{AuthURL: "http://keycloak/authorize"}}}
+	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", IdentityProviderHint: "basic-platform"}, store: store, codec: codec, now: time.Now, oauth: oauth2.Config{ClientID: "project_management-dev-web", RedirectURL: "http://localhost/callback", Endpoint: oauth2.Endpoint{AuthURL: "http://keycloak/authorize"}}}
 	request := httptest.NewRequest(http.MethodGet, "/auth/login?return_to=/projects/PJ-1", nil)
 	response := httptest.NewRecorder()
 	auth.Login(response, request)
@@ -297,6 +298,31 @@ func TestLoginPersistsOnlyStateDigestAndEncryptedSecrets(t *testing.T) {
 	}
 	if len(store.login.NonceCipher) == 0 || len(store.login.CodeVerifierCipher) == 0 {
 		t.Fatal("nonce or verifier ciphertext is empty")
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("kc_idp_hint"); got != "basic-platform" {
+		t.Fatalf("kc_idp_hint = %q", got)
+	}
+}
+
+func TestLoginOmitsEmptyIdentityProviderHint(t *testing.T) {
+	codec, err := newSecretCodec([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeOIDCStore{}
+	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1"}, store: store, codec: codec, now: time.Now, oauth: oauth2.Config{ClientID: "project_management-dev-web", RedirectURL: "http://localhost/callback", Endpoint: oauth2.Endpoint{AuthURL: "http://keycloak/authorize"}}}
+	response := httptest.NewRecorder()
+	auth.Login(response, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := location.Query()["kc_idp_hint"]; exists {
+		t.Fatalf("unexpected kc_idp_hint in %q", location.String())
 	}
 }
 
