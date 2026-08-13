@@ -55,13 +55,25 @@ func main() {
 		logger.Error("initialize platform OIDC", "error", err)
 		os.Exit(1)
 	}
+	var contractBearer platform.ClientCredentialsTokenVerifier
+	if cfg.ContractIntegrationEnabled && cfg.ContractIntegrationRequireBearer {
+		contractBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
+			Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL,
+			ClientID: cfg.ContractIntegrationClientID, Audience: cfg.ContractIntegrationAudience,
+			Timeout: cfg.OIDCAuthorizationTimeout,
+		})
+		if err != nil {
+			logger.Error("initialize contract integration bearer verifier", "error", err)
+			os.Exit(1)
+		}
+	}
 	if err := platform.SyncAuthorizationCatalog(startupCtx, platform.CatalogSyncOptions{Enabled: cfg.PlatformCatalogSync, BaseURL: cfg.PlatformBaseURL, ApplicationID: cfg.PlatformApplicationID, ClientID: cfg.PlatformCatalogClientID, ClientSecret: cfg.PlatformCatalogClientSecret}); err != nil {
 		logger.Error("sync platform authorization catalog", "error", err)
 		os.Exit(1)
 	}
 	audit := platform.NewAuditReporter(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
 	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue}
-	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.ContractIntegrationOptions{Enabled: cfg.ContractIntegrationEnabled})
+	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.ContractIntegrationOptions{Enabled: cfg.ContractIntegrationEnabled, RequireBearer: cfg.ContractIntegrationRequireBearer, BearerVerifier: contractBearer})
 	server := &http.Server{Addr: cfg.HTTPAddress, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second}
 	logger.Info("project management API started", "address", cfg.HTTPAddress, "task_queue", cfg.TemporalTaskQueue, "embedded_worker", cfg.RunWorkerWithAPI)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

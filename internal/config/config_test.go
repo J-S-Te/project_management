@@ -85,3 +85,23 @@ func TestLoadRejectsInvalidSessionCookieName(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestLoadRequiresKeycloakMachineCallerContractWhenBearerIsEnabled(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("CONTRACT_INTEGRATION_ENABLED", "true")
+	t.Setenv("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")
+	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "")
+	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_CLIENT_ID") {
+		t.Fatalf("error = %v", err)
+	}
+
+	setValidEnvironment(t)
+	t.Setenv("CONTRACT_INTEGRATION_ENABLED", "false")
+	t.Setenv("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")
+	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "contract_management-integration")
+	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRE_BEARER") {
+		t.Fatalf("error = %v", err)
+	}
+}
