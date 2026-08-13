@@ -9,6 +9,7 @@ import (
 
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
+	"github.com/j-s-te/project-management/internal/platform"
 	"gorm.io/gorm"
 )
 
@@ -16,8 +17,8 @@ type Repository struct{ db *gorm.DB }
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
-func (r *Repository) ListProjects(ctx context.Context, tenant, q, status string) ([]domain.Project, error) {
-	query := r.db.WithContext(ctx).Where("tenant_id = ?", tenant)
+func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, q, status string) ([]domain.Project, error) {
+	query := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project")
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -35,19 +36,19 @@ func (r *Repository) ListProjects(ctx context.Context, tenant, q, status string)
 	}
 	return items, nil
 }
-func (r *Repository) GetProject(ctx context.Context, tenant, id string) (domain.Project, error) {
+func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter, id string) (domain.Project, error) {
 	var record projectRecord
-	err := r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, id).First(&record).Error
+	err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("pm_project.id = ?", id).First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
 	return projectFromRecord(record), err
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 }
-func (r *Repository) ListServiceItems(ctx context.Context, tenant, projectID string) ([]domain.ServiceItem, error) {
-	query := r.db.WithContext(ctx).Where("tenant_id = ?", tenant)
+func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.ServiceItem, error) {
+	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
 	if projectID != "" {
 		query = query.Where("project_id = ?", projectID)
 	}
@@ -61,6 +62,15 @@ func (r *Repository) ListServiceItems(ctx context.Context, tenant, projectID str
 	}
 	return items, nil
 }
+func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
+	var record serviceItemRecord
+	err := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).Where("pm_service_item.id = ?", id).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ServiceItem{}, application.ErrNotFound
+	}
+	return serviceFromRecord(record), err
+}
+
 func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids []string, actor string) ([]domain.ServiceItem, error) {
 	var result []domain.ServiceItem
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -146,13 +156,13 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, tenant string, id int64
 	})
 	return ruleFromRecord(record), err
 }
-func (r *Repository) Dashboard(ctx context.Context, tenant string) (domain.Dashboard, error) {
+func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
 	result := domain.Dashboard{StatusCounts: map[string]int{}}
 	var records []struct {
 		Status string
 		Count  int
 	}
-	if err := r.db.WithContext(ctx).Model(&projectRecord{}).Select("status, COUNT(*) AS count").Where("tenant_id = ?", tenant).Group("status").Scan(&records).Error; err != nil {
+	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Select("status, COUNT(*) AS count").Group("status").Scan(&records).Error; err != nil {
 		return result, err
 	}
 	for _, row := range records {
@@ -163,12 +173,12 @@ func (r *Repository) Dashboard(ctx context.Context, tenant string) (domain.Dashb
 		}
 	}
 	var riskCount int64
-	if err := r.db.WithContext(ctx).Model(&projectRecord{}).Where("tenant_id = ? AND health = ?", tenant, "风险").Count(&riskCount).Error; err != nil {
+	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("health = ?", "风险").Count(&riskCount).Error; err != nil {
 		return result, err
 	}
 	result.RiskProjects = int(riskCount)
 	var count int64
-	if err := r.db.WithContext(ctx).Model(&serviceItemRecord{}).Where("tenant_id = ?", tenant).Count(&count).Error; err != nil {
+	if err := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).Count(&count).Error; err != nil {
 		return result, err
 	}
 	result.ServiceItems = int(count)
@@ -183,7 +193,37 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, Health: r.Health, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Health: r.Health, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+}
+
+func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
+	query = query.Where(alias+".tenant_id = ?", filter.TenantID)
+	if filter.AllowAll {
+		return query
+	}
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 8)
+	if len(filter.OrganizationIDs) > 0 {
+		conditions = append(conditions, alias+".owner_org_id IN ?")
+		args = append(args, filter.OrganizationIDs)
+	}
+	if len(filter.ProjectIDs) > 0 {
+		conditions = append(conditions, alias+".id IN ?")
+		args = append(args, filter.ProjectIDs)
+	}
+	if filter.AllowSelf {
+		conditions = append(conditions, "("+alias+".owner_identity_id = ? OR "+alias+".manager_identity_id = ? OR EXISTS (SELECT 1 FROM pm_service_item scope_item WHERE scope_item.tenant_id = "+alias+".tenant_id AND scope_item.project_id = "+alias+".id AND (scope_item.team_lead_id = ? OR scope_item.project_manager_id = ? OR JSON_CONTAINS(scope_item.engineer_ids, JSON_QUOTE(?)))))")
+		args = append(args, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID)
+	}
+	if len(conditions) == 0 {
+		return query.Where("1 = 0")
+	}
+	return query.Where("("+strings.Join(conditions, " OR ")+")", args...)
+}
+
+func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilter) *gorm.DB {
+	projects := applyProjectScope(subqueryDB.Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
+	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
 	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, Status: r.Status}

@@ -30,11 +30,12 @@ const (
 )
 
 type DeliveryRepository interface {
-	FindProjectByContractVersion(context.Context, string, string, string) (domain.Project, error)
+	FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error)
 	ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error
 	SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error
 	ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error
-	ListDeliveryEvents(context.Context, string, string) ([]domain.DeliveryEvent, error)
+	ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error)
+	FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, error)
 	UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error)
 	ListCapabilities(context.Context, string, string) ([]domain.Capability, error)
 	FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error)
@@ -49,6 +50,10 @@ func (s *Service) deliveryRepo() (DeliveryRepository, error) {
 }
 
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
+	filter, scopeErr := authorizeProjectScope(p, "project.contract.import")
+	if scopeErr != nil {
+		return domain.Project{}, scopeErr
+	}
 	if strings.TrimSpace(input.ContractID) == "" || strings.TrimSpace(input.ContractVersion) == "" || strings.TrimSpace(input.Customer) == "" || len(input.Services) == 0 || input.EffectiveAt.IsZero() {
 		return domain.Project{}, ErrValidation
 	}
@@ -56,7 +61,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if err != nil {
 		return domain.Project{}, err
 	}
-	if existing, findErr := repo.FindProjectByContractVersion(ctx, p.TenantID, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractVersion)); findErr == nil {
+	if existing, findErr := repo.FindProjectByContractVersion(ctx, filter, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractVersion)); findErr == nil {
 		event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": input.StampedContractUploaded})
 		if err := repo.SyncContractStampStatus(ctx, existing, input.StampedContractUploaded, event); err != nil {
 			return domain.Project{}, err
@@ -75,7 +80,15 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if input.StampedContractUploaded {
 		health = "正常"
 	}
-	project := domain.Project{TenantID: p.TenantID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Health: health, Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
+	ownerIdentityID := firstNonEmpty(p.IdentityID, p.UserID)
+	ownerOrgID := ""
+	if len(filter.OrganizationIDs) == 1 {
+		ownerOrgID = filter.OrganizationIDs[0]
+	}
+	if !filter.AllowAll && !filter.AllowSelf && ownerOrgID == "" {
+		return domain.Project{}, ErrForbidden
+	}
+	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Health: health, Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
 	grouped, groupErr := groupContractServices(input.Services)
 	if groupErr != nil {
 		return domain.Project{}, groupErr
@@ -103,6 +116,9 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 }
 
 func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal, projectID string, input domain.DecompositionAdjustmentInput) error {
+	if err := s.authorizeProject(ctx, p, "project.decomposition.manage", projectID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
 	}
@@ -121,6 +137,9 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 }
 
 func (s *Service) AssignServiceItem(ctx context.Context, p platform.Principal, itemID string, input domain.AssignmentInput) (domain.ConflictCheckResult, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.resource.assign", itemID); err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
 	if strings.TrimSpace(input.TeamLeadID) == "" || strings.TrimSpace(input.ProjectManagerID) == "" || len(input.EngineerIDs) == 0 || input.PlannedStart == "" || input.PlannedEnd == "" {
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
@@ -147,17 +166,27 @@ func (s *Service) AssignServiceItem(ctx context.Context, p platform.Principal, i
 }
 
 func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID string, input domain.TeamAssignmentInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.team.assign", itemID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(input.TeamLeadID) == "" {
 		return ErrValidation
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID}))
 }
 func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal, itemID string, input domain.ExecutionAssignmentInput) (domain.ConflictCheckResult, error) {
+	filter, err := authorizeProjectScope(p, "project.execution.assign")
+	if err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	if _, err := s.Repo.GetServiceItem(ctx, filter, itemID); err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
 	if input.ProjectManagerID == "" || len(input.EngineerIDs) == 0 {
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
 	required := append([]string{}, input.RequiredCodes...)
-	items, err := s.Repo.ListServiceItems(ctx, p.TenantID, "")
+	items, err := s.Repo.ListServiceItems(ctx, filter, "")
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
@@ -188,6 +217,9 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	return result, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload))
 }
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.implementation.plan", itemID); err != nil {
+		return err
+	}
 	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
 	end, e2 := time.Parse(time.RFC3339, input.PlannedEnd)
 	if e1 != nil || e2 != nil || !end.After(start) || strings.TrimSpace(input.SitePlan) == "" {
@@ -197,6 +229,9 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 }
 
 func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PreparationInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.implementation.plan", itemID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(input.EquipmentRequestID) == "" || strings.TrimSpace(input.TravelRequestID) == "" {
 		return ErrValidation
 	}
@@ -204,6 +239,9 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 }
 
 func (s *Service) CheckIn(ctx context.Context, p platform.Principal, itemID string, input domain.CheckInInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
 	if input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 || input.OccurredAt.IsZero() || time.Since(input.OccurredAt) > 24*time.Hour || time.Until(input.OccurredAt) > 5*time.Minute {
 		return ErrValidation
 	}
@@ -211,6 +249,9 @@ func (s *Service) CheckIn(ctx context.Context, p platform.Principal, itemID stri
 }
 
 func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, itemID string, input domain.FieldRecordInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
 		return ErrValidation
 	}
@@ -218,6 +259,9 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 }
 
 func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, itemID string, input domain.DeviationInput) (string, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.deviation.report", itemID); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(input.Description) == "" {
 		return "", ErrValidation
 	}
@@ -226,6 +270,17 @@ func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, ite
 }
 
 func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, deviationID string, input domain.DeviationReviewInput) error {
+	filter, err := authorizeProjectScope(p, "project.deviation.review")
+	if err != nil {
+		return err
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	if _, err := repo.FindProjectForDeviation(ctx, filter, deviationID); err != nil {
+		return err
+	}
 	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
 	if decision != "RELEASE" && decision != "TERMINATE" && decision != "RETEST" {
 		return ErrValidation
@@ -234,17 +289,27 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 }
 
 func (s *Service) CompleteFieldImplementation(ctx context.Context, p platform.Principal, projectID string) error {
+	if err := s.authorizeProject(ctx, p, "project.field.complete", projectID); err != nil {
+		return err
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventFieldImplementationDone, map[string]any{"confirmed_by": p.UserID}))
 }
 
 func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, projectID string) ([]domain.DeliveryEvent, error) {
+	filter, scopeErr := authorizeProjectScope(p, "project.read")
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return nil, e
 	}
-	return repo.ListDeliveryEvents(ctx, p.TenantID, projectID)
+	return repo.ListDeliveryEvents(ctx, filter, projectID)
 }
 func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, item domain.Capability) (domain.Capability, error) {
+	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
+		return item, err
+	}
 	if item.ResourceType != "PERSON" && item.ResourceType != "EQUIPMENT" || item.ResourceID == "" || item.ResourceName == "" || len(item.Codes) == 0 {
 		return item, ErrValidation
 	}
@@ -257,6 +322,9 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
 func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, typ string) ([]domain.Capability, error) {
+	if err := requireApplicationAuthorization(p, "project.resource.read"); err != nil {
+		return nil, err
+	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return nil, e
@@ -269,6 +337,24 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 		return e
 	}
 	return repo.ApplyDeliveryEvent(ctx, event)
+}
+
+func (s *Service) authorizeProject(ctx context.Context, p platform.Principal, permission, projectID string) error {
+	filter, err := authorizeProjectScope(p, permission)
+	if err != nil {
+		return err
+	}
+	_, err = s.Repo.GetProject(ctx, filter, projectID)
+	return err
+}
+
+func (s *Service) authorizeServiceItem(ctx context.Context, p platform.Principal, permission, itemID string) error {
+	filter, err := authorizeProjectScope(p, permission)
+	if err != nil {
+		return err
+	}
+	_, err = s.Repo.GetServiceItem(ctx, filter, itemID)
+	return err
 }
 func deliveryEvent(p platform.Principal, projectID, itemID, typ string, payload map[string]any) domain.DeliveryEvent {
 	return domain.DeliveryEvent{ID: ulid.Make().String(), TenantID: p.TenantID, ProjectID: projectID, ServiceItemID: itemID, Type: typ, ActorUserID: p.UserID, Payload: payload, CreatedAt: time.Now().UTC()}
