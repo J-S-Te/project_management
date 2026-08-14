@@ -15,6 +15,7 @@ func setValidEnvironment(t *testing.T) {
 		"OIDC_BACKCHANNEL_BASE_URL":                   "",
 		"OIDC_CLIENT_ID":                              "project_management-dev-web",
 		"OIDC_CLIENT_SECRET":                          "secret",
+		"OIDC_IDP_HINT":                               "basic-platform",
 		"OIDC_REDIRECT_URI":                           "http://localhost:5173/project_management/auth/callback",
 		"OIDC_POST_LOGOUT_REDIRECT_URI":               "http://localhost:5173/project_management/logged-out",
 		"OIDC_TENANT_ID":                              "01J00000000000000000000000",
@@ -51,8 +52,12 @@ func TestLoadRejectsInvalidSessionEncryptionKey(t *testing.T) {
 
 func TestLoadAcceptsValidPlatformIntegrationConfiguration(t *testing.T) {
 	setValidEnvironment(t)
-	if _, err := Load(); err != nil {
+	cfg, err := Load()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.OIDCIDPHint != "basic-platform" {
+		t.Fatalf("OIDCIDPHint = %q", cfg.OIDCIDPHint)
 	}
 }
 

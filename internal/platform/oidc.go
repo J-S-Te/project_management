@@ -24,10 +24,10 @@ const (
 )
 
 type OIDCOptions struct {
-	Issuer, BackchannelBaseURL, PlatformBaseURL, ClientID, ClientSecret, RedirectURI, PostLogoutRedirectURI string
-	TenantID, ApplicationCode, EnvironmentCode, SessionCookieName, PathPrefix                               string
-	SessionTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                   time.Duration
-	SessionSecure                                                                                           bool
+	Issuer, BackchannelBaseURL, PlatformBaseURL, ClientID, ClientSecret, IdentityProviderHint, RedirectURI, PostLogoutRedirectURI string
+	TenantID, ApplicationCode, EnvironmentCode, SessionCookieName, PathPrefix                                                     string
+	SessionTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                                         time.Duration
+	SessionSecure                                                                                                                 bool
 }
 
 type oidcClaims struct {
@@ -188,7 +188,11 @@ func (a *OIDCAuthenticator) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login service is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	target := a.oauth.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+	authOptions := []oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}
+	if hint := strings.TrimSpace(a.options.IdentityProviderHint); hint != "" {
+		authOptions = append(authOptions, oauth2.SetAuthURLParam("kc_idp_hint", hint))
+	}
+	target := a.oauth.AuthCodeURL(state, authOptions...)
 	http.Redirect(w, r, target, http.StatusFound)
 }
 

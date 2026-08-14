@@ -24,6 +24,7 @@ type Config struct {
 	OIDCBackchannelBaseURL           string
 	OIDCClientID                     string
 	OIDCClientSecret                 string
+	OIDCIDPHint                      string
 	OIDCRedirectURI                  string
 	OIDCPostLogoutRedirectURI        string
 	OIDCTenantID                     string
@@ -55,7 +56,7 @@ func Load() (Config, error) {
 		TemporalAddress: env("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: env("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: env("TEMPORAL_TASK_QUEUE", "project-management"), TemporalAPIKey: os.Getenv("TEMPORAL_API_KEY"),
 		PlatformBaseURL: strings.TrimSpace(os.Getenv("PLATFORM_BASE_URL")),
 		OIDCIssuer:      strings.TrimSpace(os.Getenv("OIDC_ISSUER")), OIDCBackchannelBaseURL: os.Getenv("OIDC_BACKCHANNEL_BASE_URL"),
-		OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURI: os.Getenv("OIDC_REDIRECT_URI"),
+		OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCIDPHint: strings.TrimSpace(os.Getenv("OIDC_IDP_HINT")), OIDCRedirectURI: os.Getenv("OIDC_REDIRECT_URI"),
 		OIDCPostLogoutRedirectURI: os.Getenv("OIDC_POST_LOGOUT_REDIRECT_URI"), OIDCTenantID: os.Getenv("OIDC_TENANT_ID"),
 		OIDCSessionCookieName: env("OIDC_SESSION_COOKIE_NAME", "project_management_session"), AppPathPrefix: env("APP_PATH_PREFIX", "/project_management"),
 		PlatformApplicationCode: strings.TrimSpace(os.Getenv("PLATFORM_APPLICATION_CODE")), PlatformEnvironmentCode: strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")),
