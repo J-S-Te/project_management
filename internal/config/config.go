@@ -96,7 +96,8 @@ func Load() (Config, error) {
 	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
 	}
-	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "false")); err != nil {
+	// H4 修复：内部投递来源校验默认开启；显式关闭将被 validate 拒绝。
+	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER: %w", err)
 	}
 	return c, c.validate()
@@ -168,6 +169,10 @@ func (c Config) validate() error {
 				return fmt.Errorf("%s is required when bearer authentication is enabled", name)
 			}
 		}
+	}
+	// H4 修复：内部投递来源校验不可关闭。
+	if c.ContractIntegrationEnabled && !c.ContractIntegrationRequireBearer {
+		return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER must be true when CONTRACT_INTEGRATION_ENABLED=true (internal delivery source verification is mandatory)")
 	}
 	return nil
 }

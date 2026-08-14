@@ -242,11 +242,14 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}
-	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true})
+	// H4 后：内部投递必须携带可验证的机器令牌（浏览器会话依旧不需要）。
+	verifier := &integrationVerifier{}
+	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier})
 	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	deliveryID, tenantID := ulid.Make().String(), "tenant-contract"
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
 	request.Header.Set("X-Contract-Delivery-ID", deliveryID)
 	request.Header.Set("X-Contract-Tenant-ID", tenantID)
 	response := httptest.NewRecorder()
@@ -260,8 +263,10 @@ func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testi
 }
 
 func TestContractIntegrationRejectsMissingRoutingHeaders(t *testing.T) {
-	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true})
+	// H4 后：先通过机器令牌校验，再按缺失路由头拒绝 400。
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: &integrationVerifier{}})
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
