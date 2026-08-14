@@ -28,6 +28,8 @@ func setValidEnvironment(t *testing.T) {
 		"PLATFORM_AUDIT_CLIENT_ID":                    "",
 		"PLATFORM_AUDIT_CLIENT_SECRET":                "",
 		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED": "false",
+		"CONTRACT_INTEGRATION_ENABLED":              "false",
+		"CONTRACT_INTEGRATION_REQUIRE_BEARER":       "false",
 	}
 	for key, value := range values {
 		t.Setenv(key, value)
@@ -107,6 +109,16 @@ func TestLoadRequiresKeycloakMachineCallerContractWhenBearerIsEnabled(t *testing
 	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "contract_management-integration")
 	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRE_BEARER") {
+		t.Fatalf("error = %v", err)
+	}
+
+	// H4：启用内部投递后不得关闭来源校验（RequireBearer=false 必须被拒绝）。
+	setValidEnvironment(t)
+	t.Setenv("CONTRACT_INTEGRATION_ENABLED", "true")
+	t.Setenv("CONTRACT_INTEGRATION_REQUIRE_BEARER", "false")
+	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "contract_management-integration")
+	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRE_BEARER must be true") {
 		t.Fatalf("error = %v", err)
 	}
 }
