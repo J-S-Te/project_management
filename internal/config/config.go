@@ -96,8 +96,9 @@ func Load() (Config, error) {
 	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
 	}
-	// H4 修复：内部投递来源校验默认开启；显式关闭将被 validate 拒绝。
-	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")); err != nil {
+	// 默认 false 保持"集成未启用"环境的兼容（H4 部署回归修复）：validate 会拒绝
+	// ENABLED=true 且 REQUIRE_BEARER=false 的组合，因此启用集成必须显式开启来源校验。
+	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER: %w", err)
 	}
 	return c, c.validate()
