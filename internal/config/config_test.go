@@ -28,8 +28,12 @@ func setValidEnvironment(t *testing.T) {
 		"PLATFORM_AUDIT_CLIENT_ID":                    "",
 		"PLATFORM_AUDIT_CLIENT_SECRET":                "",
 		"PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED": "false",
-		"CONTRACT_INTEGRATION_ENABLED":              "false",
-		"CONTRACT_INTEGRATION_REQUIRE_BEARER":       "false",
+		"CONTRACT_INTEGRATION_ENABLED":                "false",
+		"CONTRACT_INTEGRATION_REQUIRE_BEARER":         "false",
+		"DASHBOARD_MACHINE_ENABLED":                   "false",
+		"DASHBOARD_MACHINE_REQUIRE_BEARER":            "false",
+		"DASHBOARD_MACHINE_CLIENT_ID":                 "",
+		"DASHBOARD_MACHINE_AUDIENCE":                  "",
 	}
 	for key, value := range values {
 		t.Setenv(key, value)
@@ -120,5 +124,36 @@ func TestLoadRequiresKeycloakMachineCallerContractWhenBearerIsEnabled(t *testing
 	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRE_BEARER must be true") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRequiresVerifiedDashboardMachineCaller(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("DASHBOARD_MACHINE_ENABLED", "true")
+	t.Setenv("DASHBOARD_MACHINE_REQUIRE_BEARER", "false")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DASHBOARD_MACHINE_REQUIRE_BEARER must be true") {
+		t.Fatalf("error = %v", err)
+	}
+
+	setValidEnvironment(t)
+	t.Setenv("DASHBOARD_MACHINE_ENABLED", "true")
+	t.Setenv("DASHBOARD_MACHINE_REQUIRE_BEARER", "true")
+	t.Setenv("DASHBOARD_MACHINE_CLIENT_ID", "")
+	t.Setenv("DASHBOARD_MACHINE_AUDIENCE", "basic-platform-application")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DASHBOARD_MACHINE_CLIENT_ID") {
+		t.Fatalf("error = %v", err)
+	}
+
+	setValidEnvironment(t)
+	t.Setenv("DASHBOARD_MACHINE_ENABLED", "true")
+	t.Setenv("DASHBOARD_MACHINE_REQUIRE_BEARER", "true")
+	t.Setenv("DASHBOARD_MACHINE_CLIENT_ID", "data_analysis-machine")
+	t.Setenv("DASHBOARD_MACHINE_AUDIENCE", "basic-platform-application")
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.DashboardMachineEnabled || !config.DashboardMachineRequireBearer {
+		t.Fatalf("dashboard machine config=%+v", config)
 	}
 }

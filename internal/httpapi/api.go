@@ -33,15 +33,30 @@ type Handler struct {
 	logger   *slog.Logger
 }
 
-func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, integrationOptions ...ContractIntegrationOptions) *gin.Engine {
+// RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
+type RouterOptions struct {
+	ContractIntegration  *ContractIntegrationOptions
+	DashboardIntegration *DashboardIntegrationOptions
+}
+
+func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, options ...RouterOptions) *gin.Engine {
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
 	router := gin.New()
 	router.Use(gin.Recovery(), requestID(), securityHeaders())
 	router.GET("/healthz", func(c *gin.Context) { writeData(c, http.StatusOK, map[string]string{"status": "ok"}) })
-	if len(integrationOptions) > 0 {
+	var routerOptions RouterOptions
+	if len(options) > 0 {
+		routerOptions = options[0]
+	}
+	if integration := routerOptions.ContractIntegration; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1")
-		internal.Use(h.authenticateContractIntegration(integrationOptions[0]))
+		internal.Use(h.authenticateContractIntegration(*integration))
 		internal.POST("/contracts/activate", h.activateContract)
+	}
+	if integration := routerOptions.DashboardIntegration; integration != nil && integration.Enabled {
+		daInternal := router.Group("/internal/v1")
+		daInternal.Use(h.authenticateDashboardIntegration(*integration))
+		daInternal.GET("/dashboard", h.dashboard)
 	}
 	if flow, ok := identity.(OIDCFlow); ok {
 		router.GET("/auth/login", func(c *gin.Context) { flow.Login(c.Writer, c.Request) })
