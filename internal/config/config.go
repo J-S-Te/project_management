@@ -48,6 +48,10 @@ type Config struct {
 	ContractIntegrationRequireBearer bool
 	ContractIntegrationClientID      string
 	ContractIntegrationAudience      string
+	DashboardMachineEnabled          bool
+	DashboardMachineRequireBearer    bool
+	DashboardMachineClientID         string
+	DashboardMachineAudience         string
 }
 
 func Load() (Config, error) {
@@ -63,7 +67,10 @@ func Load() (Config, error) {
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
 		PlatformCatalogClientSecret: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
-		ContractIntegrationClientID: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")), ContractIntegrationAudience: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		ContractIntegrationClientID: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
+		ContractIntegrationAudience: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		DashboardMachineClientID:    strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
+		DashboardMachineAudience:    strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -100,6 +107,12 @@ func Load() (Config, error) {
 	// ENABLED=true 且 REQUIRE_BEARER=false 的组合，因此启用集成必须显式开启来源校验。
 	if c.ContractIntegrationRequireBearer, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_REQUIRE_BEARER", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER: %w", err)
+	}
+	if c.DashboardMachineEnabled, err = strconv.ParseBool(env("DASHBOARD_MACHINE_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("DASHBOARD_MACHINE_ENABLED: %w", err)
+	}
+	if c.DashboardMachineRequireBearer, err = strconv.ParseBool(env("DASHBOARD_MACHINE_REQUIRE_BEARER", "false")); err != nil {
+		return c, fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER: %w", err)
 	}
 	return c, c.validate()
 }
@@ -174,6 +187,23 @@ func (c Config) validate() error {
 	// H4 修复：内部投递来源校验不可关闭。
 	if c.ContractIntegrationEnabled && !c.ContractIntegrationRequireBearer {
 		return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER must be true when CONTRACT_INTEGRATION_ENABLED=true (internal delivery source verification is mandatory)")
+	}
+	if c.DashboardMachineRequireBearer {
+		if !c.DashboardMachineEnabled {
+			return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER requires DASHBOARD_MACHINE_ENABLED")
+		}
+		for name, value := range map[string]string{
+			"DASHBOARD_MACHINE_CLIENT_ID": c.DashboardMachineClientID,
+			"DASHBOARD_MACHINE_AUDIENCE":  c.DashboardMachineAudience,
+		} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when dashboard bearer authentication is enabled", name)
+			}
+		}
+	}
+	// 项目汇总包含全租户数据，机器接口启用后必须校验调用方身份。
+	if c.DashboardMachineEnabled && !c.DashboardMachineRequireBearer {
+		return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER must be true when DASHBOARD_MACHINE_ENABLED=true")
 	}
 	return nil
 }
