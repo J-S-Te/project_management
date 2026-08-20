@@ -21,18 +21,30 @@ var ErrInvalidServiceToken = errors.New("invalid service token")
 // trusted service-to-service caller. It verifies signature, issuer, expiry,
 // token type, authorized party and audience; it does not accept an ID token.
 type ClientCredentialsTokenVerifier interface {
-	VerifyClientCredentials(context.Context, string) error
+	VerifyClientCredentials(context.Context, string) (ServiceTokenIdentity, error)
 }
 
 type ClientCredentialsVerifierOptions struct {
-	Issuer, BackchannelBaseURL, ClientID, Audience string
-	Timeout                                        time.Duration
+	Issuer, BackchannelBaseURL, ClientID, Audience         string
+	TenantID, CallerApplicationCode, CallerEnvironmentCode string
+	Timeout                                                time.Duration
+}
+
+// ServiceTokenIdentity 是经过签名、issuer、audience 及调用方绑定校验后的机器身份。
+// 路由层必须使用这里的租户，不能再从可由请求方任意填写的请求头推导租户边界。
+type ServiceTokenIdentity struct {
+	TenantID        string
+	ApplicationCode string
+	EnvironmentCode string
 }
 
 type keycloakClientCredentialsVerifier struct {
-	verifier *oidc.IDTokenVerifier
-	clientID string
-	audience string
+	verifier              *oidc.IDTokenVerifier
+	clientID              string
+	audience              string
+	tenantID              string
+	callerApplicationCode string
+	callerEnvironmentCode string
 }
 
 type serviceTokenClaims struct {
@@ -40,6 +52,9 @@ type serviceTokenClaims struct {
 	ClientID        string `json:"client_id"`
 	Type            string `json:"typ"`
 	TokenUse        string `json:"token_use"`
+	TenantID        string `json:"tenant_id"`
+	ApplicationCode string `json:"application_code"`
+	EnvironmentCode string `json:"environment_code"`
 }
 
 func NewClientCredentialsTokenVerifier(ctx context.Context, options ClientCredentialsVerifierOptions) (ClientCredentialsTokenVerifier, error) {
@@ -47,8 +62,11 @@ func NewClientCredentialsTokenVerifier(ctx context.Context, options ClientCreden
 	backchannel := strings.TrimRight(strings.TrimSpace(options.BackchannelBaseURL), "/")
 	clientID := strings.TrimSpace(options.ClientID)
 	audience := strings.TrimSpace(options.Audience)
-	if issuer == "" || clientID == "" || audience == "" {
-		return nil, fmt.Errorf("%w: issuer, client ID and audience are required", ErrInvalidServiceToken)
+	tenantID := strings.TrimSpace(options.TenantID)
+	callerApplicationCode := strings.TrimSpace(options.CallerApplicationCode)
+	callerEnvironmentCode := strings.TrimSpace(options.CallerEnvironmentCode)
+	if issuer == "" || clientID == "" || audience == "" || tenantID == "" || callerApplicationCode == "" || callerEnvironmentCode == "" {
+		return nil, fmt.Errorf("%w: issuer, client ID, audience, tenant, caller application and caller environment are required", ErrInvalidServiceToken)
 	}
 	if options.Timeout <= 0 {
 		options.Timeout = 10 * time.Second
@@ -72,25 +90,31 @@ func NewClientCredentialsTokenVerifier(ctx context.Context, options ClientCreden
 	// Access tokens are issued for the machine-client audience, not the
 	// browser RP Client ID. The audience is validated explicitly below.
 	return &keycloakClientCredentialsVerifier{
-		verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
-		clientID: clientID,
-		audience: audience,
+		verifier:              provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
+		clientID:              clientID,
+		audience:              audience,
+		tenantID:              tenantID,
+		callerApplicationCode: callerApplicationCode,
+		callerEnvironmentCode: callerEnvironmentCode,
 	}, nil
 }
 
-func (v *keycloakClientCredentialsVerifier) VerifyClientCredentials(ctx context.Context, rawToken string) error {
+func (v *keycloakClientCredentialsVerifier) VerifyClientCredentials(ctx context.Context, rawToken string) (ServiceTokenIdentity, error) {
 	if v == nil || v.verifier == nil || strings.TrimSpace(rawToken) == "" {
-		return ErrInvalidServiceToken
+		return ServiceTokenIdentity{}, ErrInvalidServiceToken
 	}
 	token, err := v.verifier.Verify(ctx, rawToken)
 	if err != nil {
-		return fmt.Errorf("%w: signature, issuer or expiry: %v", ErrInvalidServiceToken, err)
+		return ServiceTokenIdentity{}, fmt.Errorf("%w: signature, issuer or expiry: %v", ErrInvalidServiceToken, err)
 	}
 	claims := serviceTokenClaims{}
 	if err := token.Claims(&claims); err != nil {
-		return fmt.Errorf("%w: claims: %v", ErrInvalidServiceToken, err)
+		return ServiceTokenIdentity{}, fmt.Errorf("%w: claims: %v", ErrInvalidServiceToken, err)
 	}
-	return v.validateClaims(claims, token.Audience)
+	if err := v.validateClaims(claims, token.Audience); err != nil {
+		return ServiceTokenIdentity{}, err
+	}
+	return ServiceTokenIdentity{TenantID: claims.TenantID, ApplicationCode: claims.ApplicationCode, EnvironmentCode: claims.EnvironmentCode}, nil
 }
 
 func (v *keycloakClientCredentialsVerifier) validateClaims(claims serviceTokenClaims, audiences []string) error {
@@ -108,6 +132,11 @@ func (v *keycloakClientCredentialsVerifier) validateClaims(claims serviceTokenCl
 	// the latter is an optional mapper and is not the authorized-party contract.
 	if strings.TrimSpace(claims.AuthorizedParty) != v.clientID || !containsAudience(audiences, v.audience) {
 		return fmt.Errorf("%w: authorized party or audience", ErrInvalidServiceToken)
+	}
+	// tenant/application/environment 均由已验签令牌提供并与本接口的固定调用方配置比对，
+	// 防止持有同 issuer 下其他应用令牌的调用方横向切换租户或运行环境。
+	if claims.TenantID != v.tenantID || claims.ApplicationCode != v.callerApplicationCode || claims.EnvironmentCode != v.callerEnvironmentCode {
+		return fmt.Errorf("%w: tenant, caller application or caller environment", ErrInvalidServiceToken)
 	}
 	return nil
 }

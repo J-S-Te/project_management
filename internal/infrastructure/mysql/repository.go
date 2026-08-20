@@ -11,6 +11,7 @@ import (
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Repository struct{ db *gorm.DB }
@@ -75,7 +76,8 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 	var result []domain.ServiceItem
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var records []serviceItemRecord
-		if err := tx.Where("tenant_id = ? AND id IN ?", tenant, ids).Find(&records).Error; err != nil {
+		// 对待确认服务项加排他锁，使状态校验、批量确认和项目状态推进处于同一串行化临界区。
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id IN ?", tenant, ids).Find(&records).Error; err != nil {
 			return err
 		}
 		if len(records) != len(unique(ids)) {
@@ -87,8 +89,15 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 			}
 		}
 		now := time.Now().UTC()
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id = ? AND id IN ?", tenant, ids).Updates(map[string]any{"status": "待分配", "updated_at": now, "updated_by": actor}).Error; err != nil {
-			return err
+		update := tx.Model(&serviceItemRecord{}).
+			Where("tenant_id = ? AND id IN ? AND status IN ?", tenant, ids, []string{"待确认", "待复核", "待分配"}).
+			Updates(map[string]any{"status": "待分配", "updated_at": now, "updated_by": actor})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != int64(len(records)) {
+			// 条件更新行数不匹配表示锁等待期间状态已变化，不用旧快照覆盖并发操作。
+			return application.ErrConflict
 		}
 		projectIDs := make([]string, 0)
 		seenProjects := map[string]bool{}
