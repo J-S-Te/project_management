@@ -26,13 +26,17 @@ type identity struct {
 }
 
 type integrationVerifier struct {
-	err   error
-	token string
+	err      error
+	token    string
+	identity platform.ServiceTokenIdentity
 }
 
-func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) error {
+func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) (platform.ServiceTokenIdentity, error) {
 	v.token = token
-	return v.err
+	if v.identity.TenantID == "" {
+		v.identity = platform.ServiceTokenIdentity{TenantID: "tenant-contract", ApplicationCode: "contract_management", EnvironmentCode: "test"}
+	}
+	return v.identity, v.err
 }
 
 func (i identity) Authenticate(context.Context, *http.Request) (platform.Principal, error) {
@@ -252,7 +256,7 @@ func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testi
 	// H4 后：内部投递必须携带可验证的机器令牌（浏览器会话依旧不需要）。
 	verifier := &integrationVerifier{}
 	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
-		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier},
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 	})
 	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	deliveryID, tenantID := ulid.Make().String(), "tenant-contract"
@@ -274,7 +278,7 @@ func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testi
 func TestContractIntegrationRejectsMissingRoutingHeaders(t *testing.T) {
 	// H4 后：先通过机器令牌校验，再按缺失路由头拒绝 400。
 	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
-		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: &integrationVerifier{}},
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
 	})
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
 	request.Header.Set("Authorization", "Bearer verified-machine-token")
@@ -289,7 +293,7 @@ func TestContractIntegrationRequiresVerifiedKeycloakMachineTokenWhenEnabled(t *t
 	service := &application.Service{Repo: &repo{}}
 	verifier := &integrationVerifier{}
 	handler := httpapi.NewRouter(service, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
-		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier},
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 	})
 	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
@@ -316,7 +320,7 @@ func TestContractIntegrationRequiresVerifiedKeycloakMachineTokenWhenEnabled(t *t
 
 func TestContractIntegrationFailsClosedWhenBearerVerifierIsUnavailable(t *testing.T) {
 	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
-		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true},
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true},
 	})
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
 	request.Header.Set("Authorization", "Bearer token")
@@ -330,7 +334,7 @@ func TestContractIntegrationFailsClosedWhenBearerVerifierIsUnavailable(t *testin
 func TestContractIntegrationRejectsInvalidKeycloakMachineToken(t *testing.T) {
 	verifier := &integrationVerifier{err: errors.New("invalid signature")}
 	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
-		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, RequireBearer: true, BearerVerifier: verifier},
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 	})
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(`{}`))
 	request.Header.Set("Authorization", "Bearer invalid-machine-token")
@@ -351,7 +355,6 @@ func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 		ServiceItems:     18,
 		StatusCounts:     map[string]int{"实施中": 4, "已完成": 2},
 	}}
-	verifier := &integrationVerifier{}
 	handler := httpapi.NewRouter(
 		&application.Service{Repo: repository},
 		nil,
@@ -359,22 +362,18 @@ func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpapi.RouterOptions{DashboardIntegration: &httpapi.DashboardIntegrationOptions{
 			Enabled:        true,
-			RequireBearer:  true,
-			BearerVerifier: verifier,
+			BearerVerifier: &integrationVerifier{identity: platform.ServiceTokenIdentity{TenantID: "tenant-dashboard", ApplicationCode: "data_analysis", EnvironmentCode: "test"}},
 		}},
 	)
 
 	request := httptest.NewRequest(http.MethodGet, "/internal/v1/dashboard", nil)
 	request.Header.Set("Authorization", "Bearer dashboard-machine-token")
-	request.Header.Set("X-DA-Tenant-ID", "tenant-dashboard")
+	request.Header.Set("X-DA-Tenant-ID", "spoofed-tenant")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if verifier.token != "dashboard-machine-token" {
-		t.Fatalf("verified token=%q", verifier.token)
 	}
 	if repository.dashboardScope.TenantID != "tenant-dashboard" || !repository.dashboardScope.AllowAll {
 		t.Fatalf("dashboard scope=%+v", repository.dashboardScope)
@@ -390,7 +389,7 @@ func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 	}
 }
 
-func TestDashboardIntegrationRejectsMissingTenantHeader(t *testing.T) {
+func TestDashboardIntegrationUsesVerifiedTenantWithoutRoutingHeader(t *testing.T) {
 	handler := httpapi.NewRouter(
 		&application.Service{Repo: &repo{}},
 		nil,
@@ -398,8 +397,7 @@ func TestDashboardIntegrationRejectsMissingTenantHeader(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpapi.RouterOptions{DashboardIntegration: &httpapi.DashboardIntegrationOptions{
 			Enabled:        true,
-			RequireBearer:  true,
-			BearerVerifier: &integrationVerifier{},
+			BearerVerifier: &integrationVerifier{identity: platform.ServiceTokenIdentity{TenantID: "tenant-dashboard", ApplicationCode: "data_analysis", EnvironmentCode: "test"}},
 		}},
 	)
 	request := httptest.NewRequest(http.MethodGet, "/internal/v1/dashboard", nil)
@@ -407,7 +405,7 @@ func TestDashboardIntegrationRejectsMissingTenantHeader(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "PM_DASHBOARD_TENANT_REQUIRED") {
+	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

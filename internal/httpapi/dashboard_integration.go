@@ -11,7 +11,6 @@ import (
 // DashboardIntegrationOptions 数据看板系统（服务器到服务器）机器接入配置。
 type DashboardIntegrationOptions struct {
 	Enabled        bool
-	RequireBearer  bool
 	BearerVerifier platform.ClientCredentialsTokenVerifier
 }
 
@@ -24,31 +23,25 @@ func (h *Handler) authenticateDashboardIntegration(options DashboardIntegrationO
 			c.Abort()
 			return
 		}
-		if options.RequireBearer {
-			if options.BearerVerifier == nil {
-				writeError(c, http.StatusServiceUnavailable, "PM_DASHBOARD_AUTH_UNAVAILABLE", "看板系统机器身份校验未配置")
-				c.Abort()
-				return
-			}
-			const bearerPrefix = "Bearer "
-			authorization := strings.TrimSpace(c.GetHeader("Authorization"))
-			if !strings.HasPrefix(authorization, bearerPrefix) || strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)) == "" {
-				writeError(c, http.StatusUnauthorized, "PM_DASHBOARD_BEARER_REQUIRED", "看板系统调用必须携带机器访问令牌")
-				c.Abort()
-				return
-			}
-			if err := options.BearerVerifier.VerifyClientCredentials(c.Request.Context(), strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))); err != nil {
-				writeError(c, http.StatusUnauthorized, "PM_DASHBOARD_BEARER_INVALID", "看板系统机器访问令牌无效")
-				c.Abort()
-				return
-			}
-		}
-		tenantID := strings.TrimSpace(c.GetHeader("X-DA-Tenant-ID"))
-		if tenantID == "" {
-			writeError(c, http.StatusBadRequest, "PM_DASHBOARD_TENANT_REQUIRED", "看板系统调用必须携带租户标识")
+		if options.BearerVerifier == nil {
+			writeError(c, http.StatusServiceUnavailable, "PM_DASHBOARD_AUTH_UNAVAILABLE", "看板系统机器身份校验未配置")
 			c.Abort()
 			return
 		}
+		const bearerPrefix = "Bearer "
+		authorization := strings.TrimSpace(c.GetHeader("Authorization"))
+		if !strings.HasPrefix(authorization, bearerPrefix) || strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)) == "" {
+			writeError(c, http.StatusUnauthorized, "PM_DASHBOARD_BEARER_REQUIRED", "看板系统调用必须携带机器访问令牌")
+			c.Abort()
+			return
+		}
+		identity, err := options.BearerVerifier.VerifyClientCredentials(c.Request.Context(), strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)))
+		if err != nil {
+			writeError(c, http.StatusUnauthorized, "PM_DASHBOARD_BEARER_INVALID", "看板系统机器访问令牌无效")
+			c.Abort()
+			return
+		}
+		tenantID := identity.TenantID
 		c.Set("principal", platform.Principal{
 			Subject:     "data_analysis",
 			TenantID:    tenantID,

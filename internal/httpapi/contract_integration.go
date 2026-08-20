@@ -10,7 +10,6 @@ import (
 
 type ContractIntegrationOptions struct {
 	Enabled        bool
-	RequireBearer  bool
 	BearerVerifier platform.ClientCredentialsTokenVerifier
 }
 
@@ -35,15 +34,16 @@ func (h *Handler) authenticateContractIntegration(options ContractIntegrationOpt
 			c.Abort()
 			return
 		}
-		if err := options.BearerVerifier.VerifyClientCredentials(c.Request.Context(), strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))); err != nil {
+		identity, err := options.BearerVerifier.VerifyClientCredentials(c.Request.Context(), strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)))
+		if err != nil {
 			writeError(c, http.StatusUnauthorized, "PM_INTEGRATION_BEARER_INVALID", "合同系统机器访问令牌无效")
 			c.Abort()
 			return
 		}
-		tenantID := strings.TrimSpace(c.GetHeader("X-Contract-Tenant-ID"))
+		tenantID := identity.TenantID
 		deliveryID := strings.TrimSpace(c.GetHeader("X-Contract-Delivery-ID"))
-		if tenantID == "" || deliveryID == "" {
-			writeError(c, http.StatusBadRequest, "PM_INTEGRATION_HEADERS_REQUIRED", "缺少合同系统租户或投递编号")
+		if deliveryID == "" {
+			writeError(c, http.StatusBadRequest, "PM_INTEGRATION_HEADERS_REQUIRED", "缺少合同系统投递编号")
 			c.Abort()
 			return
 		}

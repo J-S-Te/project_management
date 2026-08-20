@@ -17,6 +17,7 @@ import (
 var (
 	ErrNotFound   = errors.New("resource not found")
 	ErrValidation = errors.New("validation failed")
+	ErrConflict   = errors.New("resource state conflict")
 	ErrForbidden  = errors.New("operation is outside the authorized project scope")
 )
 

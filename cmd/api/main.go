@@ -56,10 +56,11 @@ func main() {
 		os.Exit(1)
 	}
 	var contractBearer platform.ClientCredentialsTokenVerifier
-	if cfg.ContractIntegrationEnabled && cfg.ContractIntegrationRequireBearer {
+	if cfg.ContractIntegrationEnabled {
 		contractBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
 			Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL,
 			ClientID: cfg.ContractIntegrationClientID, Audience: cfg.ContractIntegrationAudience,
+			TenantID: cfg.OIDCTenantID, CallerApplicationCode: "contract_management", CallerEnvironmentCode: cfg.PlatformEnvironmentCode,
 			Timeout: cfg.OIDCAuthorizationTimeout,
 		})
 		if err != nil {
@@ -68,13 +69,16 @@ func main() {
 		}
 	}
 	var dashboardBearer platform.ClientCredentialsTokenVerifier
-	if cfg.DashboardMachineEnabled && cfg.DashboardMachineRequireBearer {
+	if cfg.DashboardMachineEnabled {
 		dashboardBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
-			Issuer:             cfg.OIDCIssuer,
-			BackchannelBaseURL: cfg.OIDCBackchannelBaseURL,
-			ClientID:           cfg.DashboardMachineClientID,
-			Audience:           cfg.DashboardMachineAudience,
-			Timeout:            cfg.OIDCAuthorizationTimeout,
+			Issuer:                cfg.OIDCIssuer,
+			BackchannelBaseURL:    cfg.OIDCBackchannelBaseURL,
+			ClientID:              cfg.DashboardMachineClientID,
+			Audience:              cfg.DashboardMachineAudience,
+			TenantID:              cfg.OIDCTenantID,
+			CallerApplicationCode: "data_analysis",
+			CallerEnvironmentCode: cfg.PlatformEnvironmentCode,
+			Timeout:               cfg.OIDCAuthorizationTimeout,
 		})
 		if err != nil {
 			logger.Error("initialize dashboard machine bearer verifier", "error", err)
@@ -90,12 +94,10 @@ func main() {
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,
-			RequireBearer:  cfg.ContractIntegrationRequireBearer,
 			BearerVerifier: contractBearer,
 		},
 		DashboardIntegration: &httpapi.DashboardIntegrationOptions{
 			Enabled:        cfg.DashboardMachineEnabled,
-			RequireBearer:  cfg.DashboardMachineRequireBearer,
 			BearerVerifier: dashboardBearer,
 		},
 	})
