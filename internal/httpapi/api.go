@@ -43,7 +43,13 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
 	router := gin.New()
 	router.Use(gin.Recovery(), requestID(), securityHeaders())
-	router.GET("/healthz", func(c *gin.Context) { writeData(c, http.StatusOK, map[string]string{"status": "ok"}) })
+	auditStatus := "disabled"
+	if audit != nil {
+		auditStatus = "enabled"
+	}
+	router.GET("/healthz", func(c *gin.Context) {
+		writeData(c, http.StatusOK, map[string]string{"status": "ok", "audit": auditStatus})
+	})
 	var routerOptions RouterOptions
 	if len(options) > 0 {
 		routerOptions = options[0]
