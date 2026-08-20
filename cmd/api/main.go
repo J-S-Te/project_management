@@ -89,7 +89,13 @@ func main() {
 		logger.Error("sync platform authorization catalog", "error", err)
 		os.Exit(1)
 	}
+	auditConfig := platform.CheckAuditReporterConfiguration(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
 	audit := platform.NewAuditReporter(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
+	if auditConfig.Enabled {
+		logger.Info("platform audit reporting enabled")
+	} else {
+		logger.Warn("platform audit reporting disabled; write operations will not be sent to the platform audit service", "missing_configuration", auditConfig.MissingFields)
+	}
 	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{

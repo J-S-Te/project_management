@@ -61,10 +61,24 @@ func TestAuditReporterMatchesPlatformCorrelationContract(t *testing.T) {
 }
 
 func TestAuditReporterRequiresCompleteSourceIdentity(t *testing.T) {
+	if NewAuditReporter("", "client", "secret", "project_management", "dev") != nil {
+		t.Fatal("reporter accepted missing platform base URL")
+	}
 	if NewAuditReporter("http://platform", "client", "secret", "", "dev") != nil {
 		t.Fatal("reporter accepted missing application code")
 	}
 	if NewAuditReporter("http://platform", "client", "secret", "project_management", "") != nil {
 		t.Fatal("reporter accepted missing environment code")
+	}
+}
+
+func TestCheckAuditReporterConfigurationReportsMissingFieldsWithoutCredentials(t *testing.T) {
+	status := CheckAuditReporterConfiguration("http://platform", "", "", "project_management", "dev")
+	if status.Enabled {
+		t.Fatal("audit reporter unexpectedly enabled")
+	}
+	got := strings.Join(status.MissingFields, ",")
+	if got != "PLATFORM_AUDIT_CLIENT_ID,PLATFORM_AUDIT_CLIENT_SECRET" {
+		t.Fatalf("missing fields = %q", got)
 	}
 }

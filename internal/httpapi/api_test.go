@@ -475,6 +475,29 @@ func TestRequestIDReplacesInvalidClientValue(t *testing.T) {
 	}
 }
 
+func TestHealthReportsWhetherPlatformAuditIsEnabled(t *testing.T) {
+	for name, reporter := range map[string]platform.AuditReporter{
+		"disabled": nil,
+		"enabled":  &audit{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := perform(httpapi.NewRouter(nil, nil, reporter, slog.New(slog.NewTextHandler(io.Discard, nil))), http.MethodGet, "/healthz", "")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d", response.Code)
+			}
+			var payload struct {
+				Data map[string]string `json:"data"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if got := payload.Data["audit"]; got != name {
+				t.Fatalf("audit=%q, want %q", got, name)
+			}
+		})
+	}
+}
+
 func TestRequestIDPreservesValidClientULID(t *testing.T) {
 	id := ulid.Make().String()
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)

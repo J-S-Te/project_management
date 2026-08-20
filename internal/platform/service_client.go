@@ -84,8 +84,36 @@ type auditClient struct {
 	applicationCode, environmentCode string
 }
 
+// AuditReporterConfiguration describes whether this process can send audit
+// events without exposing any credential values.
+type AuditReporterConfiguration struct {
+	Enabled       bool
+	MissingFields []string
+}
+
+func CheckAuditReporterConfiguration(baseURL, clientID, clientSecret, applicationCode, environmentCode string) AuditReporterConfiguration {
+	values := []struct {
+		name  string
+		value string
+	}{
+		{"PLATFORM_BASE_URL", baseURL},
+		{"PLATFORM_AUDIT_CLIENT_ID", clientID},
+		{"PLATFORM_AUDIT_CLIENT_SECRET", clientSecret},
+		{"PLATFORM_APPLICATION_CODE", applicationCode},
+		{"PLATFORM_ENVIRONMENT_CODE", environmentCode},
+	}
+	status := AuditReporterConfiguration{Enabled: true}
+	for _, item := range values {
+		if strings.TrimSpace(item.value) == "" {
+			status.Enabled = false
+			status.MissingFields = append(status.MissingFields, item.name)
+		}
+	}
+	return status
+}
+
 func NewAuditReporter(baseURL, clientID, clientSecret, applicationCode, environmentCode string) AuditReporter {
-	if clientID == "" || clientSecret == "" || applicationCode == "" || environmentCode == "" {
+	if !CheckAuditReporterConfiguration(baseURL, clientID, clientSecret, applicationCode, environmentCode).Enabled {
 		return nil
 	}
 	return &auditClient{newServiceClient(baseURL, clientID, clientSecret), applicationCode, environmentCode}
