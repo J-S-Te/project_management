@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -188,28 +189,38 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 	}
 }
 
-// requestClientIP 提取前端反向代理传入的首个客户端地址，并在未经过代理时回退到对端地址。
-// 生产服务端口只绑定本机，X-Forwarded-For 只能由受控前端容器写入；平台接收端仍会校验该值必须是 IP 字面量。
+// requestClientIP extracts a public client address from the managed frontend
+// proxy. X-Real-IP is authoritative; the right-most XFF value is used as a
+// fallback so a client-supplied left-most value cannot spoof audit records.
 func requestClientIP(request *http.Request) string {
 	if request == nil {
 		return ""
 	}
-	for _, value := range strings.Split(request.Header.Get("X-Forwarded-For"), ",") {
-		if ip := net.ParseIP(strings.TrimSpace(value)); ip != nil {
+	if ip := publicClientIP(request.Header.Get("X-Real-IP")); ip != nil {
+		return ip.String()
+	}
+	values := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
+	for i := len(values) - 1; i >= 0; i-- {
+		if ip := publicClientIP(values[i]); ip != nil {
 			return ip.String()
 		}
-	}
-	if ip := net.ParseIP(strings.TrimSpace(request.Header.Get("X-Real-IP"))); ip != nil {
-		return ip.String()
 	}
 	remote := strings.TrimSpace(request.RemoteAddr)
 	if host, _, err := net.SplitHostPort(remote); err == nil {
 		remote = host
 	}
-	if ip := net.ParseIP(remote); ip != nil {
+	if ip := publicClientIP(remote); ip != nil {
 		return ip.String()
 	}
 	return ""
+}
+
+func publicClientIP(value string) *netip.Addr {
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !addr.IsGlobalUnicast() || addr.IsPrivate() {
+		return nil
+	}
+	return &addr
 }
 func auditResource(path string) string {
 	if strings.Contains(path, "service-items") {
