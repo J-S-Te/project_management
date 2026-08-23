@@ -114,18 +114,16 @@ func (v *keycloakClientCredentialsVerifier) VerifyClientCredentials(ctx context.
 	if err := v.validateClaims(claims, token.Audience); err != nil {
 		return ServiceTokenIdentity{}, err
 	}
-	return ServiceTokenIdentity{TenantID: claims.TenantID, ApplicationCode: claims.ApplicationCode, EnvironmentCode: claims.EnvironmentCode}, nil
+	return ServiceTokenIdentity{TenantID: v.tenantID, ApplicationCode: v.callerApplicationCode, EnvironmentCode: v.callerEnvironmentCode}, nil
 }
 
 func (v *keycloakClientCredentialsVerifier) validateClaims(claims serviceTokenClaims, audiences []string) error {
 	if !strings.EqualFold(strings.TrimSpace(claims.Type), "bearer") {
 		return fmt.Errorf("%w: token typ is not bearer", ErrInvalidServiceToken)
 	}
-	// token_use is deliberately required in addition to typ.  The Keycloak
-	// client scope mapper for the contract integration client must emit the
-	// literal access_token value; ID tokens and tokens minted for another use
-	// therefore fail closed even when they are otherwise correctly signed.
-	if strings.TrimSpace(claims.TokenUse) != "access_token" {
+	// Keycloak service-account access tokens omit token_use unless a custom
+	// mapper is installed. If present it must still identify an access token.
+	if tokenUse := strings.TrimSpace(claims.TokenUse); tokenUse != "" && tokenUse != "access_token" {
 		return fmt.Errorf("%w: token_use is not access_token", ErrInvalidServiceToken)
 	}
 	// azp is the authenticated Keycloak caller.  Do not fall back to client_id:
@@ -133,9 +131,19 @@ func (v *keycloakClientCredentialsVerifier) validateClaims(claims serviceTokenCl
 	if strings.TrimSpace(claims.AuthorizedParty) != v.clientID || !containsAudience(audiences, v.audience) {
 		return fmt.Errorf("%w: authorized party or audience", ErrInvalidServiceToken)
 	}
-	// tenant/application/environment 均由已验签令牌提供并与本接口的固定调用方配置比对，
-	// 防止持有同 issuer 下其他应用令牌的调用方横向切换租户或运行环境。
-	if claims.TenantID != v.tenantID || claims.ApplicationCode != v.callerApplicationCode || claims.EnvironmentCode != v.callerEnvironmentCode {
+	if clientID := strings.TrimSpace(claims.ClientID); clientID != "" && clientID != v.clientID {
+		return fmt.Errorf("%w: client_id", ErrInvalidServiceToken)
+	}
+	// tenant/application/environment 由服务端固定配置绑定；若令牌安装了对应
+	// mapper，则 claim 必须与绑定一致。默认 Keycloak service-account token 不含
+	// 这些 claim，不能因此拒绝一个已通过签名、issuer、azp、audience 校验的调用方。
+	if tenantID := strings.TrimSpace(claims.TenantID); tenantID != "" && tenantID != v.tenantID {
+		return fmt.Errorf("%w: tenant", ErrInvalidServiceToken)
+	}
+	if applicationCode := strings.TrimSpace(claims.ApplicationCode); applicationCode != "" && applicationCode != v.callerApplicationCode {
+		return fmt.Errorf("%w: caller application", ErrInvalidServiceToken)
+	}
+	if environmentCode := strings.TrimSpace(claims.EnvironmentCode); environmentCode != "" && environmentCode != v.callerEnvironmentCode {
 		return fmt.Errorf("%w: tenant, caller application or caller environment", ErrInvalidServiceToken)
 	}
 	return nil
