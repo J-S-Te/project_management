@@ -21,6 +21,8 @@ import (
 type AuditEvent struct {
 	ActorID, ActorName, Action, ResourceType, ResourceID string
 	RequestID, CorrelationID, Result, ReasonCode         string
+	// RiskLevel 为 LOW/MEDIUM/HIGH/CRITICAL；为空时按 LOW 上报。
+	RiskLevel string
 	// UserLoginIP 是被审计用户的原始客户端地址；缺少该字段时，平台只能记录
 	// 项目服务投递请求的容器地址。
 	UserLoginIP string
@@ -142,7 +144,7 @@ func (c *auditClient) Report(ctx context.Context, event AuditEvent) error {
 	if correlationID == "" {
 		correlationID = requestID
 	}
-	payload := map[string]any{"event_id": ulid.Make().String(), "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "application_code": c.applicationCode, "environment_code": c.environmentCode, "actor_type": "USER", "actor_id": event.ActorID, "actor_name": event.ActorName, "action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID, "request_id": requestID, "trace_id": hex.EncodeToString(trace), "correlation_id": correlationID, "result": event.Result, "risk_level": "LOW", "reason_code": event.ReasonCode}
+	payload := map[string]any{"event_id": ulid.Make().String(), "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "application_code": c.applicationCode, "environment_code": c.environmentCode, "actor_type": "USER", "actor_id": event.ActorID, "actor_name": event.ActorName, "action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID, "request_id": requestID, "trace_id": hex.EncodeToString(trace), "correlation_id": correlationID, "result": event.Result, "risk_level": riskLevelOrDefault(event.RiskLevel), "reason_code": event.ReasonCode}
 	if event.UserLoginIP != "" {
 		payload["user_login_ip"] = event.UserLoginIP
 	}
@@ -211,4 +213,11 @@ func containsScope(value, wanted string) bool {
 		}
 	}
 	return false
+}
+func riskLevelOrDefault(level string) string {
+	level = strings.ToUpper(strings.TrimSpace(level))
+	if level != "LOW" && level != "MEDIUM" && level != "HIGH" && level != "CRITICAL" {
+		return "LOW"
+	}
+	return level
 }

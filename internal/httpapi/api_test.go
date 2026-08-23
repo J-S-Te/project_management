@@ -498,6 +498,23 @@ func TestHealthReportsWhetherPlatformAuditIsEnabled(t *testing.T) {
 	}
 }
 
+func TestReadinessFailsWhenRequiredAuditIsDisabled(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	response := perform(httpapi.NewRouter(nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), http.MethodGet, "/readyz", "")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d; body=%s", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+	var payload struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data["audit"] != "disabled" || payload.Data["status"] != "not_ready" {
+		t.Fatalf("readiness=%v", payload.Data)
+	}
+}
+
 func TestRequestIDPreservesValidClientULID(t *testing.T) {
 	id := ulid.Make().String()
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)

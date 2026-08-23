@@ -28,6 +28,8 @@ type OIDCOptions struct {
 	TenantID, ApplicationCode, EnvironmentCode, SessionCookieName, PathPrefix                                                     string
 	SessionTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                                         time.Duration
 	SessionSecure                                                                                                                 bool
+	// Audit 可选；非空时在登录/登出成功后向平台审计上报 auth.login / auth.logout。
+	Audit AuditReporter
 }
 
 type oidcClaims struct {
@@ -56,6 +58,7 @@ type OIDCAuthenticator struct {
 	catalog              AuthorizationCatalog
 	codec                *secretCodec
 	endSessionEndpoint   string
+	audit                AuditReporter
 	now                  func() time.Time
 	refreshAuthorization func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error)
 }
@@ -98,7 +101,7 @@ func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCSt
 	return &OIDCAuthenticator{
 		options: options, provider: provider, verifier: provider.Verifier(&oidc.Config{ClientID: options.ClientID}), httpClient: client,
 		store: store, authorization: NewHTTPAuthorizationContextClient(options.PlatformBaseURL, client), catalog: catalog, codec: codec,
-		endSessionEndpoint: strings.TrimSpace(discovery.EndSessionEndpoint), now: time.Now,
+		endSessionEndpoint: strings.TrimSpace(discovery.EndSessionEndpoint), audit: options.Audit, now: time.Now,
 		oauth: oauth2.Config{ClientID: options.ClientID, ClientSecret: options.ClientSecret, RedirectURL: options.RedirectURI, Endpoint: provider.Endpoint(), Scopes: []string{"openid", "profile"}},
 	}, nil
 }
@@ -275,6 +278,7 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session service is unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	a.reportAuth(r, AuditEvent{ActorID: principal.UserID, ActorName: principal.DisplayName, Action: "auth.login", ResourceType: "auth_session", Result: "SUCCESS", RiskLevel: "LOW"})
 	http.SetCookie(w, a.cookie(rawSession, expiresAt))
 	http.Redirect(w, r, a.PublicPath(tx.ReturnPath), http.StatusFound)
 }
@@ -471,17 +475,30 @@ func (a *OIDCAuthenticator) clear(w http.ResponseWriter, r *http.Request) string
 	if cookie, err := r.Cookie(a.options.SessionCookieName); err == nil && cookie.Value != "" {
 		now := a.now().UTC()
 		hash := tokenDigest(cookie.Value)
+		identityID := ""
 		if stored, findErr := a.store.FindSession(r.Context(), hash, now); findErr == nil {
 			if plaintext, decryptErr := a.codec.decrypt(stored.IDTokenCipher); decryptErr == nil {
 				idToken = string(plaintext)
 			}
+			identityID = stored.IdentityID
 		}
 		_ = a.store.RevokeSession(r.Context(), hash, now)
+		if identityID != "" {
+			a.reportAuth(r, AuditEvent{ActorID: identityID, Action: "auth.logout", ResourceType: "auth_session", Result: "SUCCESS", RiskLevel: "LOW"})
+		}
 	}
 	expired := a.cookie("", time.Unix(1, 0))
 	expired.MaxAge = -1
 	http.SetCookie(w, expired)
 	return idToken
+}
+
+// reportAuth 向平台审计上报登录/登出事件；审计未配置或上报失败均不影响认证流程。
+func (a *OIDCAuthenticator) reportAuth(request *http.Request, event AuditEvent) {
+	if a.audit == nil {
+		return
+	}
+	_ = a.audit.Report(request.Context(), event)
 }
 
 func (a *OIDCAuthenticator) cookie(value string, expires time.Time) *http.Cookie {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,15 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	}
 	router.GET("/healthz", func(c *gin.Context) {
 		writeData(c, http.StatusOK, map[string]string{"status": "ok", "audit": auditStatus})
+	})
+	router.GET("/readyz", func(c *gin.Context) {
+		status := http.StatusOK
+		state := "ready"
+		if auditRequired() && audit == nil {
+			status = http.StatusServiceUnavailable
+			state = "not_ready"
+		}
+		writeData(c, status, map[string]string{"status": state, "audit": auditStatus})
 	})
 	var routerOptions RouterOptions
 	if len(options) > 0 {
@@ -101,6 +111,15 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
 	return router
+}
+
+func auditRequired() bool {
+	raw := strings.TrimSpace(os.Getenv("PLATFORM_AUDIT_REQUIRED"))
+	if raw != "" {
+		required, err := strconv.ParseBool(raw)
+		return err == nil && required
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")), "prod")
 }
 
 func requestID() gin.HandlerFunc {
@@ -174,35 +193,91 @@ func principal(c *gin.Context) platform.Principal {
 func (h *Handler) auditWrites() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
-		if h.audit == nil || c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+		if h.audit == nil || skipAudit(c.Request.Method, c.Request.URL.Path) {
 			return
 		}
 		p := principal(c)
-		result := "SUCCESS"
-		if c.Writer.Status() >= 400 {
-			result = "FAILURE"
-		}
-		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: c.GetHeader("X-Request-ID"), Result: result, ReasonCode: strconv.Itoa(c.Writer.Status()), UserLoginIP: requestClientIP(c.Request)}
+		status := c.Writer.Status()
+		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: c.GetHeader("X-Request-ID"), Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), UserLoginIP: requestClientIP(c.Request)}
 		if err := h.audit.Report(c.Request.Context(), event); err != nil {
 			h.logger.Error("report platform audit", "error", err)
 		}
 	}
 }
 
+// auditResult 区分成功、拒绝与失败：401/403 记为 DENIED，便于识别越权/未授权尝试。
+func auditResult(status int) string {
+	switch {
+	case status >= 200 && status < 400:
+		return "SUCCESS"
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return "DENIED"
+	default:
+		return "FAILURE"
+	}
+}
+
+// auditRiskLevel 计算粗略风险等级，使敏感/破坏性/被拒绝操作能在审计查询中被筛出。
+func auditRiskLevel(method, path string, status int) string {
+	if status >= http.StatusInternalServerError {
+		return "HIGH"
+	}
+	lowered := strings.ToLower(path)
+	if method == http.MethodDelete || containsAnyAudit(lowered,
+		"delete", "approval", "approve", "reject", "sign", "password", "credential",
+		"secret", "permission", "role", "authorization", "admin") {
+		return "HIGH"
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return "MEDIUM"
+	}
+	return "LOW"
+}
+
+func containsAnyAudit(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// skipAudit 跳过普通读请求；写请求和敏感读（下载/导出/令牌签发）仍会审计。
+func skipAudit(method, path string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return !sensitiveRead(path)
+	default:
+		return false
+	}
+}
+
+// sensitiveRead 识别会暴露数据的读操作（下载、导出、嵌入令牌签发）。
+func sensitiveRead(path string) bool {
+	lowered := strings.ToLower(path)
+	return containsAnyAudit(lowered, "embed", "download", "export")
+}
+
 // requestClientIP extracts a public client address from the managed frontend
 // proxy. X-Real-IP is authoritative; the right-most XFF value is used as a
 // fallback so a client-supplied left-most value cannot spoof audit records.
+// Forwarding headers are only honoured when the direct peer is the trusted
+// reverse proxy, so a directly reachable service cannot have its audit source
+// address spoofed by client-supplied headers.
 func requestClientIP(request *http.Request) string {
 	if request == nil {
 		return ""
 	}
-	if ip := publicClientIP(request.Header.Get("X-Real-IP")); ip != nil {
-		return ip.String()
-	}
-	values := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
-	for i := len(values) - 1; i >= 0; i-- {
-		if ip := publicClientIP(values[i]); ip != nil {
+	if trustedProxyPeer(request.RemoteAddr) {
+		if ip := publicClientIP(request.Header.Get("X-Real-IP")); ip != nil {
 			return ip.String()
+		}
+		values := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
+		for i := len(values) - 1; i >= 0; i-- {
+			if ip := publicClientIP(values[i]); ip != nil {
+				return ip.String()
+			}
 		}
 	}
 	remote := strings.TrimSpace(request.RemoteAddr)
@@ -213,6 +288,22 @@ func requestClientIP(request *http.Request) string {
 		return ip.String()
 	}
 	return ""
+}
+
+// trustedProxyPeer reports whether the direct peer address belongs to the
+// trusted reverse proxy (loopback or private/link-local Docker gateway).
+// A public peer means the service is directly reachable, so client-supplied
+// forwarding headers must not be trusted.
+func trustedProxyPeer(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(remoteAddr)
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
 func publicClientIP(value string) *netip.Addr {
