@@ -30,3 +30,19 @@ func TestProjectScopeMigrationAddsStableOwnerBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestBackchannelLogoutMigrationAddsSIDAndReplayBoundary(t *testing.T) {
+	body, err := Files.ReadFile("000006_oidc_backchannel_logout.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"oidc_subject VARCHAR(128)", "oidc_session_id VARCHAR(128)",
+		"idx_pm_oidc_session_sid", "pm_oidc_backchannel_logout_replay", "PRIMARY KEY (jti)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("back-channel logout migration missing %q", required)
+		}
+	}
+}

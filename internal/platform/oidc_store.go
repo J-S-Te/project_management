@@ -16,6 +16,8 @@ import (
 
 var errOIDCRecordNotFound = errors.New("OIDC record not found")
 
+var errOIDCBackchannelReplay = errors.New("OIDC back-channel logout token was already consumed")
+
 type LoginTransaction struct {
 	StateHash          []byte
 	TenantID           string
@@ -31,6 +33,8 @@ type StoredOIDCSession struct {
 	SessionIDHash          []byte
 	TenantID               string
 	IdentityID             string
+	OIDCSubject            string
+	OIDCSessionID          string
 	PersonID               string
 	PrincipalJSON          []byte
 	IDTokenCipher          []byte
@@ -72,6 +76,8 @@ type oidcSessionRecord struct {
 	SessionIDHash          []byte `gorm:"column:session_id_hash;primaryKey;type:binary(32)"`
 	TenantID               string `gorm:"column:tenant_id;size:64;not null;index"`
 	IdentityID             string `gorm:"column:identity_id;size:128;not null;index"`
+	OIDCSubject            string `gorm:"column:oidc_subject;size:128"`
+	OIDCSessionID          string `gorm:"column:oidc_session_id;size:128"`
 	PersonID               string `gorm:"column:person_id;size:64"`
 	PrincipalJSON          []byte `gorm:"column:principal_json;type:json;not null"`
 	IDTokenCipher          []byte `gorm:"column:id_token_ciphertext;type:mediumblob;not null"`
@@ -147,6 +153,7 @@ func (s *GORMOIDCStore) UpdateSession(ctx context.Context, value StoredOIDCSessi
 		"oauth_token_ciphertext": record.OAuthTokenCipher, "authorization_revision": record.AuthorizationRevision,
 		"authorization_checked_at": record.AuthorizationCheckedAt, "refresh_retry_at": record.RefreshRetryAt,
 		"token_expires_at": record.TokenExpiresAt, "last_seen_at": record.LastSeenAt,
+		"oidc_subject": record.OIDCSubject, "oidc_session_id": record.OIDCSessionID,
 	}
 	result := s.db.WithContext(ctx).Model(&oidcSessionRecord{}).Where("session_id_hash = ? AND revoked_at IS NULL AND session_expires_at > ?", value.SessionIDHash, now).Updates(updates)
 	if result.Error != nil {
@@ -175,13 +182,38 @@ func (s *GORMOIDCStore) RevokeSessionsForIdentity(ctx context.Context, tenantID,
 		Update("revoked_at", now).Error
 }
 
+// ConsumeBackchannelLogout 在同一事务中占用 JTI 并撤销命中的 RP 会话。
+// 优先使用 sid 精确注销单个 OP 会话；仅当令牌无 sid 时才按标准 sub 撤销该主体全部会话。
+func (s *GORMOIDCStore) ConsumeBackchannelLogout(ctx context.Context, value BackchannelLogout, now time.Time) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		replay := map[string]any{
+			"jti": value.JTI, "issuer": value.Issuer, "audience": value.Audience,
+			"expires_at": value.ExpiresAt.UTC(), "consumed_at": now.UTC(),
+		}
+		if err := tx.Table("pm_oidc_backchannel_logout_replay").Create(replay).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return errOIDCBackchannelReplay
+			}
+			return err
+		}
+		query := tx.Model(&oidcSessionRecord{}).
+			Where("tenant_id = ? AND revoked_at IS NULL", value.TenantID)
+		if value.SessionID != "" {
+			query = query.Where("oidc_session_id = ?", value.SessionID)
+		} else {
+			query = query.Where("oidc_subject = ?", value.Subject)
+		}
+		return query.Update("revoked_at", now.UTC()).Error
+	})
+}
+
 func sessionRecord(value StoredOIDCSession) oidcSessionRecord {
 	var retry *time.Time
 	if !value.RefreshRetryAt.IsZero() {
 		retryValue := value.RefreshRetryAt
 		retry = &retryValue
 	}
-	return oidcSessionRecord{SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, RevokedAt: value.RevokedAt}
+	return oidcSessionRecord{SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, OIDCSubject: value.OIDCSubject, OIDCSessionID: value.OIDCSessionID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, RevokedAt: value.RevokedAt}
 }
 
 func storedSession(record oidcSessionRecord) StoredOIDCSession {
@@ -189,7 +221,7 @@ func storedSession(record oidcSessionRecord) StoredOIDCSession {
 	if record.RefreshRetryAt != nil {
 		retry = *record.RefreshRetryAt
 	}
-	return StoredOIDCSession{SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, RevokedAt: record.RevokedAt}
+	return StoredOIDCSession{SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, OIDCSubject: record.OIDCSubject, OIDCSessionID: record.OIDCSessionID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, RevokedAt: record.RevokedAt}
 }
 
 type secretCodec struct{ aead cipher.AEAD }

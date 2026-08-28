@@ -7,6 +7,11 @@ x-project-runtime: &project-runtime
     PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}
     PLATFORM_BASE_URL: ${PROJECT_PLATFORM_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
     OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
+    TEMPORAL_WORKER_DEPLOYMENT_NAME: ${PROJECT_TEMPORAL_WORKER_DEPLOYMENT_NAME:-project-management}
+    TEMPORAL_WORKER_BUILD_ID: ${PROJECT_TEMPORAL_WORKER_BUILD_ID:-project-worker-v1}
+    TEMPORAL_WORKER_VERSIONING_ENABLED: ${PROJECT_TEMPORAL_WORKER_VERSIONING_ENABLED:-true}
+    TEMPORAL_WORKER_VERSIONING_POLICY: ${PROJECT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+    TEMPORAL_METRICS_ADDRESS: :9092
 
 services:
   migrate:
@@ -22,6 +27,8 @@ services:
     networks:
       platform:
         aliases: [project-api]
+    expose:
+      - "9092"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
       interval: 10s
@@ -34,6 +41,8 @@ services:
     profiles: ["split-runtime"]
     <<: *project-runtime
     entrypoint: ["/usr/local/bin/project-worker"]
+    expose:
+      - "9092"
     restart: unless-stopped
 
 networks:

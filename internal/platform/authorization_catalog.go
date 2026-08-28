@@ -54,6 +54,12 @@ func (c AuthorizationCatalog) Validate(value AuthorizationContext, expectedClien
 	if value.ClientID != expectedClientID || value.ApplicationCode != expectedApplication || value.EnvironmentCode != expectedEnvironment {
 		return fmt.Errorf("%w: client, application or environment binding", ErrInvalidAuthorization)
 	}
+	if value.CatalogVersion == "" && len(value.CompatibleCatalogVersions) == 0 && (value.RoleConfigHash != "" || len(value.CompatibleRoleConfigHashes) != 0) {
+		return fmt.Errorf("%w: partial catalog compatibility response", ErrInvalidAuthorization)
+	}
+	if err := validateProjectCatalogCompatibility(c.Version, value.CatalogVersion, value.CompatibleCatalogVersions); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidAuthorization, err)
+	}
 	roles, err := validateKnownSet(value.Roles, c.roles, false)
 	if err != nil || len(roles) == 0 {
 		return fmt.Errorf("%w: roles", ErrInvalidAuthorization)
@@ -109,6 +115,33 @@ func (c AuthorizationCatalog) Validate(value AuthorizationContext, expectedClien
 			return fmt.Errorf("%w: duplicate data scope", ErrInvalidAuthorization)
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateProjectCatalogCompatibility(localVersion, currentVersion string, compatible []string) error {
+	localVersion, currentVersion = strings.TrimSpace(localVersion), strings.TrimSpace(currentVersion)
+	if currentVersion == "" && len(compatible) == 0 {
+		return nil
+	}
+	if localVersion == "" || currentVersion == "" || len(compatible) == 0 || len(compatible) > 2 {
+		return errors.New("catalog compatibility window is incomplete")
+	}
+	found, currentFound := false, false
+	seen := map[string]struct{}{}
+	for _, version := range compatible {
+		if version == "" || version != strings.TrimSpace(version) {
+			return errors.New("catalog compatibility version is not canonical")
+		}
+		if _, duplicate := seen[version]; duplicate {
+			return errors.New("catalog compatibility window contains duplicates")
+		}
+		seen[version] = struct{}{}
+		found = found || version == localVersion
+		currentFound = currentFound || version == currentVersion
+	}
+	if !found || !currentFound {
+		return errors.New("local authorization catalog is outside the N/N-1 compatibility window")
 	}
 	return nil
 }

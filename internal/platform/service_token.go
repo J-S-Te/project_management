@@ -1,159 +1,150 @@
 package platform
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
+	"io"
+	"os"
 	"strings"
 	"time"
-
-	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-// ErrInvalidServiceToken is deliberately distinct from a browser session
-// error: callers must never fall back to routing headers when a bearer token
-// was supplied but cannot be verified.
+// ErrInvalidServiceToken 区分机器令牌错误与浏览器会话错误；机器认证失败时禁止回退到请求头身份。
 var ErrInvalidServiceToken = errors.New("invalid service token")
 
-// ClientCredentialsTokenVerifier verifies the Keycloak access token used by a
-// trusted service-to-service caller. It verifies signature, issuer, expiry,
-// token type, authorized party and audience; it does not accept an ID token.
+// ClientCredentialsTokenVerifier 校验基础平台签发的 application JWT。
 type ClientCredentialsTokenVerifier interface {
 	VerifyClientCredentials(context.Context, string) (ServiceTokenIdentity, error)
 }
 
+// ClientCredentialsVerifierOptions 定义本地接收端接受的唯一机器信任域。
 type ClientCredentialsVerifierOptions struct {
-	Issuer, BackchannelBaseURL, ClientID, Audience         string
-	TenantID, CallerApplicationCode, CallerEnvironmentCode string
-	Timeout                                                time.Duration
+	Issuer, Audience, PublicKeyPath, ClientID, TenantID string
+	CallerApplicationCode, CallerEnvironmentCode        string
+	RequiredScope                                       string
 }
 
-// ServiceTokenIdentity 是经过签名、issuer、audience 及调用方绑定校验后的机器身份。
-// 路由层必须使用这里的租户，不能再从可由请求方任意填写的请求头推导租户边界。
+// ServiceTokenIdentity 是经过平台签名和完整调用方绑定校验后的机器身份。
 type ServiceTokenIdentity struct {
 	TenantID        string
 	ApplicationCode string
 	EnvironmentCode string
 }
 
-type keycloakClientCredentialsVerifier struct {
-	verifier              *oidc.IDTokenVerifier
-	clientID              string
-	audience              string
-	tenantID              string
-	callerApplicationCode string
-	callerEnvironmentCode string
+type platformApplicationTokenVerifier struct {
+	publicKey                        ed25519.PublicKey
+	issuer, audience                 string
+	clientID, tenantID               string
+	applicationCode, environmentCode string
+	requiredScope                    string
 }
 
-type serviceTokenClaims struct {
-	AuthorizedParty string `json:"azp"`
-	ClientID        string `json:"client_id"`
-	Type            string `json:"typ"`
-	TokenUse        string `json:"token_use"`
-	TenantID        string `json:"tenant_id"`
-	ApplicationCode string `json:"application_code"`
-	EnvironmentCode string `json:"environment_code"`
+type platformApplicationTokenClaims struct {
+	Issuer          string   `json:"iss"`
+	Audience        string   `json:"aud"`
+	TokenUse        string   `json:"token_use"`
+	Subject         string   `json:"sub"`
+	OAuthClientID   string   `json:"oauth_client_id"`
+	TenantID        string   `json:"tenant_id"`
+	ApplicationCode string   `json:"application_code"`
+	EnvironmentCode string   `json:"environment_code"`
+	Scopes          []string `json:"scope"`
+	IssuedAt        int64    `json:"iat"`
+	NotBefore       int64    `json:"nbf"`
+	ExpiresAt       int64    `json:"exp"`
 }
 
-func NewClientCredentialsTokenVerifier(ctx context.Context, options ClientCredentialsVerifierOptions) (ClientCredentialsTokenVerifier, error) {
-	issuer := strings.TrimRight(strings.TrimSpace(options.Issuer), "/")
-	backchannel := strings.TrimRight(strings.TrimSpace(options.BackchannelBaseURL), "/")
-	clientID := strings.TrimSpace(options.ClientID)
-	audience := strings.TrimSpace(options.Audience)
-	tenantID := strings.TrimSpace(options.TenantID)
-	callerApplicationCode := strings.TrimSpace(options.CallerApplicationCode)
-	callerEnvironmentCode := strings.TrimSpace(options.CallerEnvironmentCode)
-	if issuer == "" || clientID == "" || audience == "" || tenantID == "" || callerApplicationCode == "" || callerEnvironmentCode == "" {
-		return nil, fmt.Errorf("%w: issuer, client ID, audience, tenant, caller application and caller environment are required", ErrInvalidServiceToken)
-	}
-	if options.Timeout <= 0 {
-		options.Timeout = 10 * time.Second
-	}
-	client := &http.Client{Timeout: options.Timeout}
-	if backchannel != "" {
-		publicURL, err := url.Parse(issuer)
-		if err != nil {
-			return nil, fmt.Errorf("%w: issuer: %v", ErrInvalidServiceToken, err)
+// NewClientCredentialsTokenVerifier 从只读公钥构建平台机器令牌验证器。
+// options 缺失或公钥无效时返回错误；成功时返回失败关闭的本地验证器。
+func NewClientCredentialsTokenVerifier(_ context.Context, options ClientCredentialsVerifierOptions) (ClientCredentialsTokenVerifier, error) {
+	values := []string{options.Issuer, options.Audience, options.PublicKeyPath, options.ClientID, options.TenantID, options.CallerApplicationCode, options.CallerEnvironmentCode, options.RequiredScope}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("%w: machine token trust binding is incomplete", ErrInvalidServiceToken)
 		}
-		backchannelURL, err := url.Parse(backchannel)
-		if err != nil {
-			return nil, fmt.Errorf("%w: backchannel: %v", ErrInvalidServiceToken, err)
-		}
-		client.Transport = &backchannelTransport{base: http.DefaultTransport, public: publicURL, backchannel: backchannelURL}
 	}
-	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), issuer)
+	publicKey, err := loadApplicationPublicKey(options.PublicKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: load discovery: %v", ErrInvalidServiceToken, err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidServiceToken, err)
 	}
-	// Access tokens are issued for the machine-client audience, not the
-	// browser RP Client ID. The audience is validated explicitly below.
-	return &keycloakClientCredentialsVerifier{
-		verifier:              provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
-		clientID:              clientID,
-		audience:              audience,
-		tenantID:              tenantID,
-		callerApplicationCode: callerApplicationCode,
-		callerEnvironmentCode: callerEnvironmentCode,
+	return &platformApplicationTokenVerifier{
+		publicKey: publicKey, issuer: options.Issuer, audience: options.Audience,
+		clientID: options.ClientID, tenantID: options.TenantID,
+		applicationCode: options.CallerApplicationCode, environmentCode: options.CallerEnvironmentCode,
+		requiredScope: options.RequiredScope,
 	}, nil
 }
 
-func (v *keycloakClientCredentialsVerifier) VerifyClientCredentials(ctx context.Context, rawToken string) (ServiceTokenIdentity, error) {
-	if v == nil || v.verifier == nil || strings.TrimSpace(rawToken) == "" {
+func (verifier *platformApplicationTokenVerifier) VerifyClientCredentials(_ context.Context, rawToken string) (ServiceTokenIdentity, error) {
+	parts := strings.Split(rawToken, ".")
+	if verifier == nil || len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return ServiceTokenIdentity{}, ErrInvalidServiceToken
 	}
-	token, err := v.verifier.Verify(ctx, rawToken)
-	if err != nil {
-		return ServiceTokenIdentity{}, fmt.Errorf("%w: signature, issuer or expiry: %v", ErrInvalidServiceToken, err)
+	var header struct {
+		Algorithm string `json:"alg"`
+		Type      string `json:"typ"`
 	}
-	claims := serviceTokenClaims{}
-	if err := token.Claims(&claims); err != nil {
-		return ServiceTokenIdentity{}, fmt.Errorf("%w: claims: %v", ErrInvalidServiceToken, err)
+	if err := decodeApplicationTokenJSON(parts[0], &header); err != nil || header.Algorithm != "EdDSA" || header.Type != "JWT" {
+		return ServiceTokenIdentity{}, ErrInvalidServiceToken
 	}
-	if err := v.validateClaims(claims, token.Audience); err != nil {
-		return ServiceTokenIdentity{}, err
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !ed25519.Verify(verifier.publicKey, []byte(parts[0]+"."+parts[1]), signature) {
+		return ServiceTokenIdentity{}, ErrInvalidServiceToken
 	}
-	return ServiceTokenIdentity{TenantID: v.tenantID, ApplicationCode: v.callerApplicationCode, EnvironmentCode: v.callerEnvironmentCode}, nil
+	claims := platformApplicationTokenClaims{}
+	if err := decodeApplicationTokenJSON(parts[1], &claims); err != nil || !verifier.validClaims(claims, time.Now().UTC()) {
+		return ServiceTokenIdentity{}, ErrInvalidServiceToken
+	}
+	return ServiceTokenIdentity{TenantID: claims.TenantID, ApplicationCode: claims.ApplicationCode, EnvironmentCode: claims.EnvironmentCode}, nil
 }
 
-func (v *keycloakClientCredentialsVerifier) validateClaims(claims serviceTokenClaims, audiences []string) error {
-	if !strings.EqualFold(strings.TrimSpace(claims.Type), "bearer") {
-		return fmt.Errorf("%w: token typ is not bearer", ErrInvalidServiceToken)
+func (verifier *platformApplicationTokenVerifier) validClaims(claims platformApplicationTokenClaims, now time.Time) bool {
+	return claims.Issuer == verifier.issuer && claims.Audience == verifier.audience && claims.TokenUse == "application" &&
+		claims.Subject == verifier.clientID && claims.OAuthClientID != "" && claims.TenantID == verifier.tenantID &&
+		claims.ApplicationCode == verifier.applicationCode && claims.EnvironmentCode == verifier.environmentCode &&
+		len(claims.Scopes) == 1 && claims.Scopes[0] == verifier.requiredScope && claims.IssuedAt > 0 &&
+		claims.NotBefore >= claims.IssuedAt && claims.ExpiresAt > claims.NotBefore &&
+		!time.Unix(claims.NotBefore, 0).After(now.Add(time.Minute)) && time.Unix(claims.ExpiresAt, 0).After(now)
+}
+
+func loadApplicationPublicKey(path string) (ed25519.PublicKey, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	// Keycloak service-account access tokens omit token_use unless a custom
-	// mapper is installed. If present it must still identify an access token.
-	if tokenUse := strings.TrimSpace(claims.TokenUse); tokenUse != "" && tokenUse != "access_token" {
-		return fmt.Errorf("%w: token_use is not access_token", ErrInvalidServiceToken)
+	block, remainder := pem.Decode(contents)
+	if block == nil || len(bytes.TrimSpace(remainder)) != 0 {
+		return nil, errors.New("application JWT public key must contain exactly one PEM block")
 	}
-	// azp is the authenticated Keycloak caller.  Do not fall back to client_id:
-	// the latter is an optional mapper and is not the authorized-party contract.
-	if strings.TrimSpace(claims.AuthorizedParty) != v.clientID || !containsAudience(audiences, v.audience) {
-		return fmt.Errorf("%w: authorized party or audience", ErrInvalidServiceToken)
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
 	}
-	if clientID := strings.TrimSpace(claims.ClientID); clientID != "" && clientID != v.clientID {
-		return fmt.Errorf("%w: client_id", ErrInvalidServiceToken)
+	publicKey, ok := parsed.(ed25519.PublicKey)
+	if !ok || len(publicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("application JWT public key must be an Ed25519 PKIX key")
 	}
-	// tenant/application/environment 由服务端固定配置绑定；若令牌安装了对应
-	// mapper，则 claim 必须与绑定一致。默认 Keycloak service-account token 不含
-	// 这些 claim，不能因此拒绝一个已通过签名、issuer、azp、audience 校验的调用方。
-	if tenantID := strings.TrimSpace(claims.TenantID); tenantID != "" && tenantID != v.tenantID {
-		return fmt.Errorf("%w: tenant", ErrInvalidServiceToken)
+	return publicKey, nil
+}
+
+func decodeApplicationTokenJSON(encoded string, destination any) error {
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return err
 	}
-	if applicationCode := strings.TrimSpace(claims.ApplicationCode); applicationCode != "" && applicationCode != v.callerApplicationCode {
-		return fmt.Errorf("%w: caller application", ErrInvalidServiceToken)
+	decoder := json.NewDecoder(bytes.NewReader(decoded))
+	if err := decoder.Decode(destination); err != nil {
+		return err
 	}
-	if environmentCode := strings.TrimSpace(claims.EnvironmentCode); environmentCode != "" && environmentCode != v.callerEnvironmentCode {
-		return fmt.Errorf("%w: tenant, caller application or caller environment", ErrInvalidServiceToken)
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("application JWT JSON contains multiple values")
 	}
 	return nil
-}
-
-func containsAudience(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
 }

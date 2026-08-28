@@ -387,6 +387,9 @@ func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 	if payload.Data.ProjectCount != 6 || payload.Data.InFlightProjects != 4 || payload.Data.RiskProjects != 2 || payload.Data.ServiceItems != 18 || payload.Data.StatusCounts["实施中"] != 4 {
 		t.Fatalf("dashboard=%+v", payload.Data)
 	}
+	if payload.Data.TenantID != "tenant-dashboard" {
+		t.Fatalf("dashboard tenant=%q, want verified tenant", payload.Data.TenantID)
+	}
 }
 
 func TestDashboardIntegrationUsesVerifiedTenantWithoutRoutingHeader(t *testing.T) {

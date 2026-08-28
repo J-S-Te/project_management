@@ -27,6 +27,7 @@ type OIDCFlow interface {
 	Callback(http.ResponseWriter, *http.Request)
 	Logout(http.ResponseWriter, *http.Request)
 	LogoutLocal(http.ResponseWriter, *http.Request)
+	BackchannelLogout(http.ResponseWriter, *http.Request)
 }
 
 type Handler struct {
@@ -81,6 +82,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		router.GET("/auth/callback", func(c *gin.Context) { flow.Callback(c.Writer, c.Request) })
 		router.GET("/auth/logout", func(c *gin.Context) { flow.Logout(c.Writer, c.Request) })
 		router.POST("/auth/local-logout", func(c *gin.Context) { flow.LogoutLocal(c.Writer, c.Request) })
+		router.POST("/auth/backchannel-logout", func(c *gin.Context) { flow.BackchannelLogout(c.Writer, c.Request) })
 		router.GET("/logged-out", loggedOut)
 	}
 	api := router.Group("/api/v1")
@@ -335,11 +337,14 @@ func (h *Handler) me(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
 }
 func (h *Handler) dashboard(c *gin.Context) {
-	item, err := h.service.Dashboard(c.Request.Context(), principal(c))
+	currentPrincipal := principal(c)
+	item, err := h.service.Dashboard(c.Request.Context(), currentPrincipal)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
+	// 回显经过验签的租户，供聚合端拒绝跨租户或错误路由的响应。
+	item.TenantID = currentPrincipal.TenantID
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listProjects(c *gin.Context) {
