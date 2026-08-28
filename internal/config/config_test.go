@@ -23,6 +23,11 @@ func setValidEnvironment(t *testing.T) {
 		"OIDC_SESSION_COOKIE_SECURE":                  "false",
 		"OIDC_SESSION_ENCRYPTION_KEY_BASE64":          "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		"OIDC_AUTHORIZATION_MAX_STALE":                "5m",
+		"TEMPORAL_WORKER_BUILD_ID":                    "project-worker-v1",
+		"TEMPORAL_WORKER_DEPLOYMENT_NAME":             "project-management",
+		"TEMPORAL_WORKER_VERSIONING_ENABLED":          "true",
+		"TEMPORAL_WORKER_VERSIONING_POLICY":           "PINNED",
+		"TEMPORAL_METRICS_ADDRESS":                    ":9092",
 		"PLATFORM_APPLICATION_CODE":                   "project_management",
 		"PLATFORM_ENVIRONMENT_CODE":                   "dev",
 		"PLATFORM_AUDIT_CLIENT_ID":                    "",
@@ -64,6 +69,17 @@ func TestLoadAcceptsValidPlatformIntegrationConfiguration(t *testing.T) {
 	}
 	if cfg.OIDCIDPHint != "basic-platform" {
 		t.Fatalf("OIDCIDPHint = %q", cfg.OIDCIDPHint)
+	}
+	if !cfg.TemporalWorkerVersioning || cfg.TemporalWorkerDeploymentName != "project-management" || cfg.TemporalWorkerBuildID == "" || cfg.TemporalWorkerVersioningPolicy != "PINNED" || cfg.TemporalMetricsAddress != ":9092" {
+		t.Fatalf("Temporal worker defaults = %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidTemporalWorkerVersioningPolicy(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("TEMPORAL_WORKER_VERSIONING_POLICY", "LATEST")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TEMPORAL_WORKER_VERSIONING_POLICY") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -149,6 +165,11 @@ func TestLoadRequiresVerifiedDashboardMachineCaller(t *testing.T) {
 	t.Setenv("DASHBOARD_MACHINE_REQUIRE_BEARER", "true")
 	t.Setenv("DASHBOARD_MACHINE_CLIENT_ID", "data_analysis-machine")
 	t.Setenv("DASHBOARD_MACHINE_AUDIENCE", "basic-platform-application")
+	t.Setenv("DASHBOARD_MACHINE_ISSUER", "basic-platform")
+	t.Setenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH", "/tmp/application-jwt-public.pem")
+	t.Setenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE", "data_analysis")
+	t.Setenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE", "test")
+	t.Setenv("DASHBOARD_MACHINE_REQUIRED_SCOPE", "dashboard.project.read")
 	config, err := Load()
 	if err != nil {
 		t.Fatal(err)

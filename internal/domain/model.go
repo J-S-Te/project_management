@@ -66,6 +66,7 @@ type Snapshot struct {
 }
 
 type Dashboard struct {
+	TenantID         string         `json:"tenant_id,omitempty"`
 	ProjectCount     int            `json:"project_count"`
 	InFlightProjects int            `json:"in_flight_projects"`
 	RiskProjects     int            `json:"risk_projects"`

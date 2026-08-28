@@ -15,6 +15,11 @@ x-project-environment: &project-environment
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
     TEMPORAL_TASK_QUEUE: project-management
+    TEMPORAL_WORKER_DEPLOYMENT_NAME: ${PROJECT_TEMPORAL_WORKER_DEPLOYMENT_NAME:-project-management}
+    TEMPORAL_WORKER_BUILD_ID: ${PROJECT_TEMPORAL_WORKER_BUILD_ID:-project-worker-v1}
+    TEMPORAL_WORKER_VERSIONING_ENABLED: ${PROJECT_TEMPORAL_WORKER_VERSIONING_ENABLED:-true}
+    TEMPORAL_WORKER_VERSIONING_POLICY: ${PROJECT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+    TEMPORAL_METRICS_ADDRESS: :9092
     PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}
     GIN_MODE: release
 
@@ -82,6 +87,8 @@ services:
         condition: service_healthy
     ports:
       - "8082:8082"
+    expose:
+      - "9092"
     networks:
       default:
       platform:
@@ -104,6 +111,8 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+    expose:
+      - "9092"
     restart: unless-stopped
 
   temporal-ui:

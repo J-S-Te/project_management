@@ -56,11 +56,27 @@ npm run dev
 | `PROJECT_OIDC_BACKCHANNEL_BASE_URL` | `http://keycloak:8080` | Compose 容器访问 Keycloak Discovery、换码和刷新端点的内部地址；与平台 API 地址严格分离 |
 | `OIDC_AUTHORIZATION_REFRESH_INTERVAL` / `OIDC_AUTHORIZATION_MAX_STALE` | `1m` / `5m` | 在线授权复核周期与只读请求最大陈旧窗口；写请求不使用陈旧授权 |
 | `OIDC_SESSION_ENCRYPTION_KEY_BASE64` | 无 | Provisioner 生成的随机 32 字节 Base64 会话加密密钥，必须通过运行时 Secret 注入 |
+| `TEMPORAL_WORKER_DEPLOYMENT_NAME` / `TEMPORAL_WORKER_BUILD_ID` | `project-management` / `project-worker-v1` | Deployment-based Worker Versioning 标识；生产 Build ID 必须使用镜像摘要或发布版本且不可复用 |
+| `TEMPORAL_WORKER_VERSIONING_ENABLED` / `TEMPORAL_WORKER_VERSIONING_POLICY` | `true` / `PINNED` | 启用版本路由；策略仅允许 `PINNED` 或 `AUTO_UPGRADE` |
+| `TEMPORAL_METRICS_ADDRESS` | `:9092` | API 内嵌 Worker 或独立 Worker 的 Prometheus 指标端口，工作流失败指标为 `temporal_workflow_failed_total` |
 | `PLATFORM_AUDIT_CLIENT_*` | 空 | 具备 `audit.ingest` 的机器客户端；配置后上报写操作审计 |
 | `PLATFORM_AUTHORIZATION_CATALOG_*` | 空 | 具备 `authorization.catalog.sync` 的机器客户端 |
 | `CONTRACT_INTEGRATION_ENABLED` | `false` | 是否启用合同系统内部接收接口 |
 
 OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行时 Secret 注入，不得提交到仓库或写入前端环境变量。前端按钮权限只影响展示，服务端权限校验才是安全边界。MySQL 与 Temporal 均应使用独立持久卷或托管服务。
+
+### Temporal Worker 发布
+
+独立 `project-worker` 与 API 内嵌 Worker 使用同一 Deployment、Build ID 和策略配置。新版本必须先启动并确认目标 Task Queue 已存在 Poller，再使用 `/usr/local/bin/project-worker-rollout` 操作路由；控制命令会携带 Temporal conflict token，且 Promote 禁止无 Poller 提升。
+
+推荐顺序为 `RAMP 5` → `RAMP 25` → `RAMP 50` → `RAMP 100` → `PROMOTE`。每一步观察 `temporal_workflow_failed_total`、Workflow 延迟和业务错误；异常时执行 `ABORT_RAMP`，将灰度比例归零。命令通过以下环境变量输入：
+
+- `TEMPORAL_WORKER_ROLLOUT_ACTION=RAMP|PROMOTE|ABORT_RAMP`
+- `TEMPORAL_WORKER_RAMP_PERCENTAGE=5|25|50|100`
+- `TEMPORAL_WORKER_ROLLOUT_IDENTITY=<发布流水线唯一标识>`
+- `TEMPORAL_WORKER_DEPLOYMENT_NAME`、`TEMPORAL_WORKER_BUILD_ID` 以及现有 Temporal 连接配置
+
+`RAMP 100` 仍属于可撤销灰度；确认稳定后必须执行 `PROMOTE`，再停止旧版本 Poller。回滚时先恢复旧 Build ID 的 Poller，再将其 `PROMOTE` 为 Current，不能只删除新容器。
 
 ## API
 
@@ -68,6 +84,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 |---|---|---|
 | GET | `/healthz` | 存活检查 |
 | GET | `/auth/login`、`/auth/callback`、`/auth/logout` | 项目系统 OIDC 会话 |
+| POST | `/auth/backchannel-logout` | OIDC Provider 以 `application/x-www-form-urlencoded` 投递标准 `logout_token`；不接受浏览器 Cookie |
 | GET | `/api/v1/auth/me` | 当前项目系统主体与权限 |
 | GET | `/api/v1/dashboard` | 汇总指标 |
 | GET/POST | `/api/v1/projects` | 查询/创建项目 |

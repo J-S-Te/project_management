@@ -41,6 +41,7 @@ type oidcClaims struct {
 	TokenUse          string `json:"token_use"`
 	Name              string `json:"name"`
 	PreferredUsername string `json:"preferred_username"`
+	SessionID         string `json:"sid"`
 }
 
 type compactIdentity struct {
@@ -61,6 +62,7 @@ type OIDCAuthenticator struct {
 	audit                AuditReporter
 	now                  func() time.Time
 	refreshAuthorization func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error)
+	backchannelVerifier  backchannelLogoutVerifier
 }
 
 func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCStore, encryptionKey []byte) (*OIDCAuthenticator, error) {
@@ -98,12 +100,14 @@ func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCSt
 	if err := provider.Claims(&discovery); err != nil {
 		return nil, fmt.Errorf("decode OIDC discovery: %w", err)
 	}
-	return &OIDCAuthenticator{
+	authenticator := &OIDCAuthenticator{
 		options: options, provider: provider, verifier: provider.Verifier(&oidc.Config{ClientID: options.ClientID}), httpClient: client,
 		store: store, authorization: NewHTTPAuthorizationContextClient(options.PlatformBaseURL, client), catalog: catalog, codec: codec,
 		endSessionEndpoint: strings.TrimSpace(discovery.EndSessionEndpoint), audit: options.Audit, now: time.Now,
 		oauth: oauth2.Config{ClientID: options.ClientID, ClientSecret: options.ClientSecret, RedirectURL: options.RedirectURI, Endpoint: provider.Endpoint(), Scopes: []string{"openid", "profile"}},
-	}, nil
+	}
+	authenticator.backchannelVerifier = oidcProviderLogoutVerifier{authenticator: authenticator, maxTTL: 2 * time.Minute}
+	return authenticator, nil
 }
 
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
@@ -273,7 +277,7 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresAt := now.Add(a.options.SessionTTL)
-	stored := StoredOIDCSession{SessionIDHash: tokenDigest(rawSession), TenantID: principal.TenantID, IdentityID: principal.IdentityID, PersonID: principal.PersonID, PrincipalJSON: principalJSON, IDTokenCipher: idTokenCipher, OAuthTokenCipher: tokenCipher, AuthorizationRevision: principal.AuthorizationRevision, AuthorizationCheckedAt: now, TokenExpiresAt: tokenExpiry, SessionExpiresAt: expiresAt, CreatedAt: now, LastSeenAt: now}
+	stored := StoredOIDCSession{SessionIDHash: tokenDigest(rawSession), TenantID: principal.TenantID, IdentityID: principal.IdentityID, OIDCSubject: strings.TrimSpace(claims.Subject), OIDCSessionID: strings.TrimSpace(claims.SessionID), PersonID: principal.PersonID, PrincipalJSON: principalJSON, IDTokenCipher: idTokenCipher, OAuthTokenCipher: tokenCipher, AuthorizationRevision: principal.AuthorizationRevision, AuthorizationCheckedAt: now, TokenExpiresAt: tokenExpiry, SessionExpiresAt: expiresAt, CreatedAt: now, LastSeenAt: now}
 	if err := a.store.CreateSession(r.Context(), stored); err != nil {
 		http.Error(w, "session service is unavailable", http.StatusServiceUnavailable)
 		return
@@ -333,6 +337,10 @@ func (a *OIDCAuthenticator) refreshStoredSession(ctx context.Context, stored Sto
 	stored.AuthorizationCheckedAt = now
 	stored.RefreshRetryAt = time.Time{}
 	stored.PersonID = principal.PersonID
+	if claims.Subject != "" {
+		stored.OIDCSubject = strings.TrimSpace(claims.Subject)
+		stored.OIDCSessionID = strings.TrimSpace(claims.SessionID)
+	}
 	stored.TokenExpiresAt = tokenPointer.Expiry
 	if verifiedIDToken != nil {
 		stored.TokenExpiresAt = earliestTime(verifiedIDToken.Expiry, tokenPointer.Expiry)
@@ -425,6 +433,10 @@ func validateCompactIDTokenClaims(claims oidcClaims, expectedNonce, expectedTena
 }
 
 func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity, value AuthorizationContext) (Principal, error) {
+	subjectID, err := canonicalSubjectID(value.SubjectID, value.IdentityID)
+	if err != nil {
+		return Principal{}, fmt.Errorf("%w: %v", ErrInvalidAuthorization, err)
+	}
 	if identity.Subject != value.Subject || identity.IdentityID != value.IdentityID || identity.TenantID != value.TenantID || identity.PersonID != "" && value.PersonID != "" && identity.PersonID != value.PersonID {
 		return Principal{}, fmt.Errorf("%w: OIDC and authorization identities differ", ErrInvalidAuthorization)
 	}
@@ -439,7 +451,19 @@ func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity,
 	if personID == "" {
 		personID = identity.PersonID
 	}
-	return Principal{Subject: identity.Subject, TenantID: value.TenantID, IdentityID: value.IdentityID, PersonID: personID, UserID: value.IdentityID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
+	return Principal{Subject: identity.Subject, TenantID: value.TenantID, IdentityID: subjectID, PersonID: personID, UserID: subjectID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
+}
+
+func canonicalSubjectID(subjectID, identityID string) (string, error) {
+	subjectID = strings.TrimSpace(subjectID)
+	identityID = strings.TrimSpace(identityID)
+	if subjectID == "" {
+		subjectID = identityID
+	}
+	if subjectID == "" || identityID == "" || subjectID != identityID {
+		return "", errors.New("subject_id and identity_id must identify the same platform subject")
+	}
+	return subjectID, nil
 }
 
 func (a *OIDCAuthenticator) Logout(w http.ResponseWriter, r *http.Request) {

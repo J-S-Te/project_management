@@ -18,6 +18,11 @@ type Config struct {
 	TemporalTaskQueue                string
 	TemporalAPIKey                   string
 	TemporalTLS                      bool
+	TemporalWorkerBuildID            string
+	TemporalWorkerDeploymentName     string
+	TemporalWorkerVersioning         bool
+	TemporalWorkerVersioningPolicy   string
+	TemporalMetricsAddress           string
 	RunWorkerWithAPI                 bool
 	PlatformBaseURL                  string
 	OIDCIssuer                       string
@@ -52,12 +57,19 @@ type Config struct {
 	DashboardMachineRequireBearer    bool
 	DashboardMachineClientID         string
 	DashboardMachineAudience         string
+	DashboardMachineIssuer           string
+	DashboardMachinePublicKeyPath    string
+	DashboardMachineCallerApp        string
+	DashboardMachineCallerEnv        string
+	DashboardMachineScope            string
 }
 
 func Load() (Config, error) {
 	c := Config{
 		HTTPAddress: env("PM_HTTP_ADDR", ":8082"), MySQLDSN: os.Getenv("MYSQL_DSN"),
 		TemporalAddress: env("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: env("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: env("TEMPORAL_TASK_QUEUE", "project-management"), TemporalAPIKey: os.Getenv("TEMPORAL_API_KEY"),
+		TemporalWorkerBuildID: env("TEMPORAL_WORKER_BUILD_ID", "project-worker-v1"), TemporalWorkerDeploymentName: env("TEMPORAL_WORKER_DEPLOYMENT_NAME", "project-management"),
+		TemporalWorkerVersioningPolicy: strings.ToUpper(env("TEMPORAL_WORKER_VERSIONING_POLICY", "PINNED")), TemporalMetricsAddress: env("TEMPORAL_METRICS_ADDRESS", ":9092"),
 		PlatformBaseURL: strings.TrimSpace(os.Getenv("PLATFORM_BASE_URL")),
 		OIDCIssuer:      strings.TrimSpace(os.Getenv("OIDC_ISSUER")), OIDCBackchannelBaseURL: os.Getenv("OIDC_BACKCHANNEL_BASE_URL"),
 		OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCIDPHint: strings.TrimSpace(os.Getenv("OIDC_IDP_HINT")), OIDCRedirectURI: os.Getenv("OIDC_REDIRECT_URI"),
@@ -66,11 +78,16 @@ func Load() (Config, error) {
 		PlatformApplicationCode: strings.TrimSpace(os.Getenv("PLATFORM_APPLICATION_CODE")), PlatformEnvironmentCode: strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")),
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
-		PlatformCatalogClientSecret: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
-		ContractIntegrationClientID: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
-		ContractIntegrationAudience: strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
-		DashboardMachineClientID:    strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
-		DashboardMachineAudience:    strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
+		PlatformCatalogClientSecret:   os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
+		ContractIntegrationClientID:   strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
+		ContractIntegrationAudience:   strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		DashboardMachineClientID:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
+		DashboardMachineAudience:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
+		DashboardMachineIssuer:        strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_ISSUER")),
+		DashboardMachinePublicKeyPath: strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH")),
+		DashboardMachineCallerApp:     strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
+		DashboardMachineCallerEnv:     strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
+		DashboardMachineScope:         strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -96,6 +113,9 @@ func Load() (Config, error) {
 	}
 	if c.TemporalTLS, err = strconv.ParseBool(env("TEMPORAL_TLS", "false")); err != nil {
 		return c, fmt.Errorf("TEMPORAL_TLS: %w", err)
+	}
+	if c.TemporalWorkerVersioning, err = strconv.ParseBool(env("TEMPORAL_WORKER_VERSIONING_ENABLED", "true")); err != nil {
+		return c, fmt.Errorf("TEMPORAL_WORKER_VERSIONING_ENABLED: %w", err)
 	}
 	if c.RunWorkerWithAPI, err = strconv.ParseBool(env("PROJECT_RUN_WORKER_WITH_API", "true")); err != nil {
 		return c, fmt.Errorf("PROJECT_RUN_WORKER_WITH_API: %w", err)
@@ -124,8 +144,14 @@ func (c Config) validate() error {
 	if strings.TrimSpace(c.MySQLDSN) == "" {
 		return fmt.Errorf("MYSQL_DSN is required")
 	}
-	if strings.TrimSpace(c.TemporalAddress) == "" || strings.TrimSpace(c.TemporalNamespace) == "" || strings.TrimSpace(c.TemporalTaskQueue) == "" {
-		return fmt.Errorf("Temporal address, namespace and task queue are required")
+	if strings.TrimSpace(c.TemporalAddress) == "" || strings.TrimSpace(c.TemporalNamespace) == "" || strings.TrimSpace(c.TemporalTaskQueue) == "" || strings.TrimSpace(c.TemporalWorkerBuildID) == "" || strings.TrimSpace(c.TemporalMetricsAddress) == "" {
+		return fmt.Errorf("Temporal address, namespace, task queue, worker build ID and metrics address are required")
+	}
+	if c.TemporalWorkerVersioning && strings.TrimSpace(c.TemporalWorkerDeploymentName) == "" {
+		return fmt.Errorf("TEMPORAL_WORKER_DEPLOYMENT_NAME is required when worker versioning is enabled")
+	}
+	if c.TemporalWorkerVersioningPolicy != "PINNED" && c.TemporalWorkerVersioningPolicy != "AUTO_UPGRADE" {
+		return fmt.Errorf("TEMPORAL_WORKER_VERSIONING_POLICY must be PINNED or AUTO_UPGRADE")
 	}
 	for name, value := range map[string]string{"OIDC_ISSUER": c.OIDCIssuer, "OIDC_CLIENT_ID": c.OIDCClientID, "OIDC_CLIENT_SECRET": c.OIDCClientSecret, "OIDC_REDIRECT_URI": c.OIDCRedirectURI, "OIDC_TENANT_ID": c.OIDCTenantID, "PLATFORM_BASE_URL": c.PlatformBaseURL, "PLATFORM_APPLICATION_CODE": c.PlatformApplicationCode, "PLATFORM_ENVIRONMENT_CODE": c.PlatformEnvironmentCode} {
 		if strings.TrimSpace(value) == "" {
@@ -192,12 +218,17 @@ func (c Config) validate() error {
 		if !c.DashboardMachineEnabled {
 			return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER requires DASHBOARD_MACHINE_ENABLED")
 		}
-		for name, value := range map[string]string{
-			"DASHBOARD_MACHINE_CLIENT_ID": c.DashboardMachineClientID,
-			"DASHBOARD_MACHINE_AUDIENCE":  c.DashboardMachineAudience,
+		for _, item := range []struct{ name, value string }{
+			{"DASHBOARD_MACHINE_CLIENT_ID", c.DashboardMachineClientID},
+			{"DASHBOARD_MACHINE_AUDIENCE", c.DashboardMachineAudience},
+			{"DASHBOARD_MACHINE_ISSUER", c.DashboardMachineIssuer},
+			{"DASHBOARD_MACHINE_PUBLIC_KEY_PATH", c.DashboardMachinePublicKeyPath},
+			{"DASHBOARD_MACHINE_CALLER_APPLICATION_CODE", c.DashboardMachineCallerApp},
+			{"DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE", c.DashboardMachineCallerEnv},
+			{"DASHBOARD_MACHINE_REQUIRED_SCOPE", c.DashboardMachineScope},
 		} {
-			if strings.TrimSpace(value) == "" || placeholder(value) {
-				return fmt.Errorf("%s is required when dashboard bearer authentication is enabled", name)
+			if strings.TrimSpace(item.value) == "" || placeholder(item.value) {
+				return fmt.Errorf("%s is required when dashboard bearer authentication is enabled", item.name)
 			}
 		}
 	}
