@@ -13,6 +13,17 @@ type scopeRepository struct {
 	created    domain.Project
 }
 
+type serviceProjectRepository struct {
+	scopeRepository
+	items []domain.ServiceItem
+}
+
+func (r *serviceProjectRepository) CreateProjectWithServiceItems(_ context.Context, project domain.Project, items []domain.ServiceItem) error {
+	r.created = project
+	r.items = items
+	return nil
+}
+
 func (r *scopeRepository) ListProjects(_ context.Context, filter platform.ScopeFilter, _, _ string) ([]domain.Project, error) {
 	r.lastFilter = filter
 	return nil, nil
@@ -83,6 +94,18 @@ func TestSelfCreateStoresStableOwnerIdentity(t *testing.T) {
 	}
 	if created.OwnerIdentityID != "identity-1" || repository.created.OwnerIdentityID != "identity-1" {
 		t.Fatalf("created=%+v stored=%+v", created, repository.created)
+	}
+}
+
+func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
+	repository := &serviceProjectRepository{}
+	service := &Service{Repo: repository}
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Services != 1 || len(repository.items) != 1 || repository.items[0].ProjectID != created.ID || repository.items[0].Status != "待确认" {
+		t.Fatalf("created=%+v items=%+v", created, repository.items)
 	}
 }
 
