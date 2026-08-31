@@ -364,11 +364,14 @@ func (h *Handler) getProject(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) createProject(c *gin.Context) {
-	var input domain.Project
-	if !decode(c, &input) {
+	var request struct {
+		domain.Project
+		ServiceItems []domain.ContractService `json:"service_items"`
+	}
+	if !decode(c, &request) {
 		return
 	}
-	item, err := h.service.CreateProject(c.Request.Context(), principal(c), input)
+	item, err := h.service.CreateProjectWithServiceItems(c.Request.Context(), principal(c), request.Project, request.ServiceItems)
 	if err != nil {
 		writeServiceError(c, err)
 		return

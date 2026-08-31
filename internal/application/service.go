@@ -34,6 +34,13 @@ type Repository interface {
 	Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error)
 }
 
+// ProjectServiceCreator keeps manual project creation atomic with its initial
+// service-item decomposition. Repositories that do not implement it remain
+// compatible with the legacy project-only API.
+type ProjectServiceCreator interface {
+	CreateProjectWithServiceItems(context.Context, domain.Project, []domain.ServiceItem) error
+}
+
 type WorkflowExecutor interface {
 	ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error)
 }
@@ -80,6 +87,10 @@ func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind stri
 }
 
 func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input domain.Project) (domain.Project, error) {
+	return s.CreateProjectWithServiceItems(ctx, p, input, nil)
+}
+
+func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
 	filter, err := authorizeProjectScope(p, "project.create")
 	if err != nil {
 		return input, err
@@ -121,10 +132,34 @@ func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input
 		input.Manager = "—"
 	}
 	input.CreatedAt, input.UpdatedAt = now, now
-	if err := s.Repo.CreateProject(ctx, input); err != nil {
-		return input, err
+	if len(requested) == 0 {
+		if err := s.Repo.CreateProject(ctx, input); err != nil {
+			return input, err
+		}
+		return input, nil
 	}
-	return input, nil
+	items := make([]domain.ServiceItem, 0, len(requested))
+	for index, source := range requested {
+		mode := strings.ToUpper(firstNonEmpty(source.TestMode, "STANDARD"))
+		if strings.TrimSpace(source.Site) == "" || strings.TrimSpace(source.Batch) == "" || strings.TrimSpace(source.Category) == "" || mode != "STANDARD" && mode != "PENETRATION" {
+			return input, ErrValidation
+		}
+		items = append(items, domain.ServiceItem{
+			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
+			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
+			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category),
+			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
+			Status: "待确认", ConflictStatus: "UNCHECKED",
+		})
+	}
+	input.Services = len(items)
+	if creator, ok := s.Repo.(ProjectServiceCreator); ok {
+		if err := creator.CreateProjectWithServiceItems(ctx, input, items); err != nil {
+			return input, err
+		}
+		return input, nil
+	}
+	return input, errors.New("project repository does not support atomic service-item creation")
 }
 
 func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal, ids []string) ([]domain.ServiceItem, error) {
