@@ -1,0 +1,2012 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>项目服务内容管理子系统 · SPA 原型 V1.1 · 系统管理员视角</title>
+<link rel="stylesheet" href="assets/css/common-pro.css">
+<style>
+  /* SPA 路由 */
+  section[data-page] { display: block; }
+  section[data-page][hidden] { display: none; }
+  .page { animation: fadeInUp 0.3s ease; }
+  /* 浮动操作面板 */
+  .spa-toolbar {
+    position: fixed; bottom: 20px; right: 20px;
+    z-index: 9999; display: flex; flex-direction: column; gap: 8px;
+    align-items: flex-end;
+  }
+  .spa-toolbar a {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 48px; height: 48px; border-radius: 50%;
+    background: #fff; border: 1px solid var(--border-extra);
+    box-shadow: var(--shadow-md); color: var(--text-regular);
+    font-size: 18px; text-decoration: none; transition: all 0.2s;
+  }
+  .spa-toolbar a:hover { background: var(--primary); color: #fff; transform: scale(1.05); }
+  .spa-toolbar a.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .spa-toolbar a.primary:hover { background: var(--primary-light); }
+  /* 快速导航 */
+  .quick-nav {
+    position: fixed; bottom: 20px; left: 230px;
+    z-index: 9999; display: flex; flex-direction: column; gap: 4px;
+    background: #fff; border: 1px solid var(--border-extra); border-radius: var(--radius-md);
+    padding: 10px; box-shadow: var(--shadow-sm);
+    max-height: calc(100vh - 100px); overflow-y: auto;
+    font-size: 11px;
+    min-width: 200px;
+  }
+  .quick-nav .qtitle {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    padding: 4px 8px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .quick-nav a {
+    display: block; padding: 4px 8px; border-radius: 4px;
+    color: var(--text-regular); text-decoration: none;
+    font-size: 11px; transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .quick-nav a:hover { background: var(--primary-l9); color: var(--primary); }
+  .quick-nav a.active { background: var(--primary); color: #fff; font-weight: 500; }
+  .quick-nav .group { padding: 4px 0; border-top: 1px solid var(--border-extra); }
+  .quick-nav .group:first-of-type { border-top: none; }
+  .quick-nav .group-label {
+    font-size: 10px; color: var(--text-muted);
+    padding: 2px 8px; font-weight: 500;
+  }
+  @media (max-width: 1400px) { .quick-nav { display: none; } }
+</style>
+</head>
+<body>
+<div class="app-layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-mark">PS</span>
+      <span>测评业务系统</span>
+    </div><div class="sidebar-group">
+      <div class="sidebar-group-title">系统配置</div>
+      <div class="sidebar-item" data-page="PG-CFG-01">
+        <span class="ico">▯</span>
+        <span class="txt">拆解规则</span>
+        
+      </div>
+      <div class="sidebar-item" data-page="PG-CFG-02">
+        <span class="ico">▰</span>
+        <span class="txt">冲突预警规则</span>
+        
+      </div>
+      <div class="sidebar-item" data-page="PG-CFG-03">
+        <span class="ico">▱</span>
+        <span class="txt">自动化触发</span>
+        
+      </div>
+      <div class="sidebar-item" data-page="PG-CFG-04">
+        <span class="ico">▲</span>
+        <span class="txt">字段级权限</span>
+        
+      </div>
+    </div>
+    <div class="sidebar-foot">v1.0 · 项目服务内容管理</div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="breadcrumb" id="topbarBreadcrumb"></div>
+      <div class="topbar-tools">
+        <span class="tool" data-tooltip="搜索">🔍</span>
+        <span class="tool" data-tooltip="配置">⚙</span>
+        <span class="tool" data-tooltip="通知">🔔<span class="badge-num">9</span></span>
+        <span class="tool-divider"></span>
+        <span class="avatar-wrap" id="topbarUser"></span>
+      </div>
+    </header>
+    <div id="pageContainer">        <!-- PG-DASH-01 项目执行总览看板 -->
+        
+        <!-- PG-DASH-02 在途项目 · 实时监控 -->
+        
+        <!-- PG-PRJ-01 项目列表页 -->
+        
+        <!-- PG-PRJ-02 项目详情页 -->
+        
+        <!-- PG-PRJ-03 服务项拆解确认页 -->
+        
+        <!-- PG-PRJ-04 服务项调整抽屉 -->
+        
+        
+        
+        <!-- PG-RES-01 任务分配至团队负责人 -->
+        
+        <!-- PG-RES-02 任务指派 -->
+        
+        <!-- PG-RES-03 指派抽屉（项目经理/工程师） -->
+        
+        <!-- PG-RES-04 现场实施计划制定 -->
+        
+        <!-- PG-RES-05 实施准备（设备申领/行程） -->
+        
+        <!-- PG-RES-06 资质与能力管理 -->
+        
+        <!-- PG-RES-07 匹配校验与冲突预警 -->
+        
+        <!-- PG-RES-08 特殊方法复核待办 -->
+        
+        <!-- PG-IMP-01 实施看板（进度总览） -->
+        
+        <!-- PG-IMP-06 异常评审页 -->
+        
+        <!-- PG-IMP-07 渗透测试独立流程 -->
+        
+        <!-- PG-IMP-08 现场实施完成确认 -->
+        
+        <!-- PG-IMP-09 标准方法更新影响评估 -->
+        
+        <!-- PG-IMP-10 报告编制状态维护 -->
+        
+        <!-- PG-CFG-01 拆解规则配置 -->
+        <section data-page="PG-CFG-01" hidden>
+          ﻿<div class="page">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">合同拆解规则配置</h1>
+          <div class="page-sub">合同生效后自动生成服务项的分组规则 · 默认规则 + 覆盖规则</div>
+        </div>
+        <div class="actions">
+          <button class="btn">📥 导出</button>
+          <button class="btn">📤 导入</button>
+          <button class="btn primary">+ 新建规则</button>
+        </div>
+      </div>
+
+      <!-- 默认规则 -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head">
+          <div class="title">① 默认分组规则</div>
+          <span class="crm-badge success">已启用</span>
+        </div>
+        <div class="crm-card-body">
+          <div class="alert info mb-16">
+            <span class="ico">ℹ</span>
+            <div class="body">默认规则：<b>同一批次 + 同一检测类别 = 1 个服务项</b>（可在覆盖规则中按客户/合同类型定制）</div>
+          </div>
+          <div class="form-row">
+            <div class="form-item">
+              <div class="label">分组维度 1</div>
+              <div class="select-wrap"><select><option>批次（默认）</option><option>场所</option><option>客户</option><option>合同</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">分组维度 2</div>
+              <div class="select-wrap"><select><option>检测类别（默认）</option><option>体系要求</option><option>项目类型</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">默认进入状态</div>
+              <div class="select-wrap"><select><option>待确认（默认，业务员确认后→待分配）</option><option>待分配（跳过确认）</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">是否生成「技术要求摘要」</div>
+              <div class="select-wrap"><select><option>是 · 自动从合同条款抽取（默认）</option><option>否 · 留空人工填写</option></select></div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-item">
+              <div class="label">分组规则缺失时</div>
+              <div class="select-wrap"><select><option>标记「待人工确认」并通知业务管理员（默认）</option><option>按默认规则生成</option><option>静默失败（不推荐）</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">范围变更检测</div>
+              <div class="select-wrap"><select><option>开启：合同清单与拆解结果勾对（默认）</option><option>关闭</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">技术要求摘要字段</div>
+              <div class="select-wrap"><select><option>生成后默认可编辑（默认）</option><option>锁定（仅技术总监可改）</option></select></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 检测类别域（19 类） -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head">
+          <div class="title">② 检测类别（服务类型）域</div>
+          <span class="text-muted" style="font-size:12px;">Q1 已确认 · 19 类</span>
+          <button class="btn sm">+ 新增</button>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th class="checkbox-cell"><label class="checkbox checked"><span class="box">✓</span></label></th>
+                <th>检测类别</th>
+                <th>默认体系要求</th>
+                <th>必备资质（默认）</th>
+                <th>是否特殊方法</th>
+                <th>关联服务项</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>等保测评</b></td>
+                <td>等保 2.0</td>
+                <td>等级保护测评师（中级+）</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>124 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>商用密码应用安全性评估</b></td>
+                <td>商用密码</td>
+                <td>商用密码评估人员</td>
+                <td><span class="crm-badge purple">可标记</span></td>
+                <td>32 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>软件测试</b></td>
+                <td>ISO 9001</td>
+                <td>软件评测师</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>48 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>源代码审计</b></td>
+                <td>等保 2.0</td>
+                <td>等级保护测评师（中级+）</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>18 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>渗透测试</b></td>
+                <td>ISO 27001</td>
+                <td>CISP-PTE</td>
+                <td><span class="crm-badge purple">必为特殊方法</span></td>
+                <td>23 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td><b>漏洞扫描</b></td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>12 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>APP 安全加固</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>5 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>上线测试</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>8 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>网络安全风险评估</td>
+                <td>ISO 27001</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>15 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>差距分析</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>10 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>机房检测</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>6 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>网络安全巡检服务</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>4 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>安全培训</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>3 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>安全性测试</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>2 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>应急响应服务</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge purple">可标记</span></td>
+                <td>7 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>网络安全攻防演练</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge purple">可标记</span></td>
+                <td>4 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><label class="checkbox checked"><span class="box">✓</span></label></td>
+                <td>安全运维</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">否</span></td>
+                <td>5 项</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="table-pagination">
+            <span>共 19 类</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 覆盖规则（按客户/合同类型） -->
+      <div class="crm-card">
+        <div class="crm-card-head">
+          <div class="title">③ 覆盖规则（按客户 / 合同类型）</div>
+          <button class="btn sm primary">+ 新建覆盖</button>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>规则名称</th>
+                <th>匹配条件</th>
+                <th>覆盖设置</th>
+                <th>优先级</th>
+                <th>状态</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>金融行业批量合同</b></td>
+                <td>客户行业 = 银行/证券/保险</td>
+                <td>分组维度 = 场所 + 批次 + 检测类别（3 维）</td>
+                <td>10</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a> <a class="btn-link" style="color:var(--danger);">停用</a></td>
+              </tr>
+              <tr>
+                <td><b>政务云专项</b></td>
+                <td>客户标签 = 政务云</td>
+                <td>默认进入状态 = 待确认（强制业务管理员确认）</td>
+                <td>20</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a> <a class="btn-link" style="color:var(--danger);">停用</a></td>
+              </tr>
+              <tr>
+                <td><b>小微客户（≤ 3 服务项）</b></td>
+                <td>合同服务项数 ≤ 3</td>
+                <td>跳过待确认，直接进入待分配（简化流程）</td>
+                <td>30</td>
+                <td><span class="crm-badge gray">停用</span></td>
+                <td><a class="btn-link">编辑</a> <a class="btn-link" style="color:var(--accent);">启用</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  
+        </section>
+        <!-- PG-CFG-02 冲突预警规则配置 -->
+        <section data-page="PG-CFG-02" hidden>
+          ﻿<div class="page">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">冲突预警规则配置</h1>
+          <div class="page-sub">指派保存时的实时校验规则 · 阻断 / 警告级别 · 强制通过审批</div>
+        </div>
+        <div class="actions">
+          <button class="btn">📥 导出</button>
+          <button class="btn primary">+ 新建规则</button>
+        </div>
+      </div>
+
+      <!-- 概览 -->
+      <div class="stat-row mb-16" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-card bordered red">
+          <div class="label">阻断级规则</div>
+          <div><span class="value">3</span><span class="suffix">条</span></div>
+        </div>
+        <div class="stat-card bordered orange">
+          <div class="label">警告级规则</div>
+          <div><span class="value">4</span><span class="suffix">条</span></div>
+        </div>
+        <div class="stat-card bordered green">
+          <div class="label">本月阻断触发</div>
+          <div><span class="value">12</span><span class="suffix">次</span></div>
+        </div>
+        <div class="stat-card bordered blue">
+          <div class="label">强制通过率</div>
+          <div><span class="value">8</span><span class="suffix">%</span></div>
+        </div>
+      </div>
+
+      <!-- 阻断级规则 -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head" style="background:#FEF2F2;">
+          <div class="title" style="color:var(--danger);">⛔ 阻断级规则（必须解决或上级审批）</div>
+          <button class="btn sm">+ 新增</button>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>规则名</th>
+                <th>触发条件</th>
+                <th>校验逻辑</th>
+                <th>审批人</th>
+                <th>状态</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>资质硬不满足</b></td>
+                <td>指派时</td>
+                <td>服务项要求 ∩ 人员资质 = ∅（缺失必备资质）</td>
+                <td>技术总监</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>资质已过期</b></td>
+                <td>指派时</td>
+                <td>人员资质有效期 &lt; 当前日期（FR-PJ-204 验收）</td>
+                <td>技术总监</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>计划日期早于合同下限</b></td>
+                <td>指派时</td>
+                <td>计划开始日 &lt; 合同约定最早交付日</td>
+                <td>团队负责人</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 警告级规则 -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head" style="background:var(--warning-bg);">
+          <div class="title" style="color:#B45309;">⚠ 警告级规则（建议处理）</div>
+          <button class="btn sm">+ 新增</button>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>规则名</th>
+                <th>触发条件</th>
+                <th>校验逻辑</th>
+                <th>阈值</th>
+                <th>状态</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>人员时间窗重叠</b></td>
+                <td>指派时</td>
+                <td>同一人同时段多任务</td>
+                <td>
+                  <div class="form-item" style="margin:0;flex:0;">
+                    <input value="重叠 > 2 天" style="width:120px;" />
+                  </div>
+                </td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>人员负载过高</b></td>
+                <td>指派时</td>
+                <td>指派后总负载 &gt; 阈值</td>
+                <td>
+                  <div class="form-item" style="margin:0;flex:0;">
+                    <input value="> 100%" style="width:120px;" />
+                  </div>
+                </td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>设备时间窗冲突</b></td>
+                <td>指派时</td>
+                <td>同一设备同时段被多服务项占用</td>
+                <td>
+                  <div class="form-item" style="margin:0;flex:0;">
+                    <input value="完全重叠" style="width:120px;" />
+                  </div>
+                </td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>资质等级不足</b></td>
+                <td>指派时</td>
+                <td>人员资质等级 &lt; 服务项要求等级（如要求高级但仅中级）</td>
+                <td>
+                  <div class="form-item" style="margin:0;flex:0;">
+                    <input value="差 1 级" style="width:120px;" />
+                  </div>
+                </td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 通用设置 -->
+      <div class="crm-card">
+        <div class="crm-card-head">
+          <div class="title">通用设置</div>
+        </div>
+        <div class="crm-card-body">
+          <div class="form-row">
+            <div class="form-item">
+              <div class="label">阻断时是否允许「带原因强制通过」</div>
+              <div class="select-wrap"><select><option>是 · 需上级审批留痕（默认）</option><option>否 · 必须解决</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">警告时是否允许「带原因强制通过」</div>
+              <div class="select-wrap"><select><option>是 · 仅团队负责人确认（默认）</option><option>否 · 必须解决</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">阻断默认审批人</div>
+              <div class="select-wrap"><select><option>技术总监（资质相关）/ 团队负责人（其他）</option><option>统一为技术总监</option></select></div>
+            </div>
+            <div class="form-item">
+              <div class="label">校验时机</div>
+              <div class="select-wrap"><select><option>保存指派前 + 实时（默认）</option><option>仅保存指派前</option></select></div>
+            </div>
+          </div>
+          <div class="alert info">
+            <span class="ico">ℹ</span>
+            <div class="body">所有强制通过记录将进入审计日志（操作人/原因/时间），满足等保/ISO 27001 记录控制要求。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  
+        </section>
+        <!-- PG-CFG-03 自动化触发配置 -->
+        <section data-page="PG-CFG-03" hidden>
+          ﻿<div class="page">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">自动化触发配置</h1>
+          <div class="page-sub">默认团队指派、特殊方法复核、提醒规则等的自动化触发器</div>
+        </div>
+        <div class="actions">
+          <button class="btn">📥 导出</button>
+          <button class="btn primary">+ 新建触发器</button>
+        </div>
+      </div>
+
+      <!-- 概览 -->
+      <div class="stat-row mb-16" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-card bordered blue">
+          <div class="label">启用触发器</div>
+          <div><span class="value">8</span><span class="suffix">条</span></div>
+        </div>
+        <div class="stat-card bordered gray">
+          <div class="label">停用</div>
+          <div><span class="value">2</span><span class="suffix">条</span></div>
+        </div>
+        <div class="stat-card bordered green">
+          <div class="label">本月触发</div>
+          <div><span class="value">1,287</span><span class="suffix">次</span></div>
+        </div>
+        <div class="stat-card bordered orange">
+          <div class="label">失败重试</div>
+          <div><span class="value">3</span><span class="suffix">次</span></div>
+        </div>
+      </div>
+
+      <!-- 触发器列表 -->
+      <div class="crm-card">
+        <div class="crm-card-head">
+          <div class="title">触发器清单</div>
+          <select class="filter-select" style="padding:5px 10px;font-size:12px;">
+            <option>全部</option>
+            <option>拆解阶段</option>
+            <option>分配阶段</option>
+            <option>实施阶段</option>
+            <option>提醒类</option>
+          </select>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>触发器名</th>
+                <th>阶段</th>
+                <th>触发条件</th>
+                <th>执行动作</th>
+                <th>本月触发</th>
+                <th>状态</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- 拆解阶段 -->
+              <tr>
+                <td><b>合同生效自动拆解</b></td>
+                <td><span class="crm-badge info">拆解</span></td>
+                <td>合同管理事件：合同生效</td>
+                <td>按分组规则自动生成服务项 → 状态=待确认</td>
+                <td>14</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>默认团队自动指派</b></td>
+                <td><span class="crm-badge info">拆解</span></td>
+                <td>业务员确认拆解后</td>
+                <td>按检测类别匹配默认团队负责人（详见下表）</td>
+                <td>14</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>特殊方法自动触发复核</b></td>
+                <td><span class="crm-badge warning">分配</span></td>
+                <td>服务项被标记「特殊检测方法」</td>
+                <td>自动生成技术总监复核待办（PG-RES-08）</td>
+                <td>11</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>实施前 SLA 提醒</b></td>
+                <td><span class="crm-badge warning">分配</span></td>
+                <td>待分配状态超 2 工作日</td>
+                <td>通知业务管理员 + 团队负责人（IM + 系统消息）</td>
+                <td>3</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>现场签到未到提醒</b></td>
+                <td><span class="crm-badge purple">实施</span></td>
+                <td>计划开始日 12:00 仍未签到</td>
+                <td>通知项目经理 + 实施工程师</td>
+                <td>2</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>异常评审超时告警</b></td>
+                <td><span class="crm-badge purple">实施</span></td>
+                <td>异常上报超 1 工作日未评审</td>
+                <td>升级到技术总监（PG-IMP-06）</td>
+                <td>1</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>报告编制完成 → 进度回传</b></td>
+                <td><span class="crm-badge purple">实施</span></td>
+                <td>项目经理确认现场实施完成</td>
+                <td>向报告管理子系统发送进度回传（含原始记录引用）</td>
+                <td>8</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>标准方法版本更新影响</b></td>
+                <td><span class="crm-badge purple">实施</span></td>
+                <td>检测标准方法版本更新</td>
+                <td>匹配受影响在途服务项 + 通知技术总监（PG-IMP-09）</td>
+                <td>1</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>资质过期自动预警</b></td>
+                <td><span class="crm-badge gray">提醒</span></td>
+                <td>资质有效期前 30 天 / 已过期</td>
+                <td>通知技术总监 + 资质持有人</td>
+                <td>4</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>AI 拆解（实验性）</b></td>
+                <td><span class="crm-badge info">拆解</span></td>
+                <td>合同生效</td>
+                <td>AI 语义拆解（实验性，作为人工确认的辅助）</td>
+                <td>—</td>
+                <td><span class="crm-badge gray">停用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 默认团队映射表 -->
+      <div class="crm-card mt-16">
+        <div class="crm-card-head">
+          <div class="title">默认团队映射（按检测类别）</div>
+          <button class="btn sm primary">+ 新增映射</button>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>检测类别</th>
+                <th>默认团队</th>
+                <th>团队负责人</th>
+                <th>特殊方法处理</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>等保测评</td>
+                <td>测评一组 / 二组 / 三组（按客户行业轮询）</td>
+                <td>张磊 / 李娜 / 陈静</td>
+                <td>—</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td>商用密码应用安全性评估</td>
+                <td>密码评估组</td>
+                <td>—（待指派）</td>
+                <td>自动触发技术总监复核</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td>渗透测试</td>
+                <td>渗透测试组</td>
+                <td>王明</td>
+                <td>必为特殊方法，自动触发复核</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td>源代码审计</td>
+                <td>测评二组</td>
+                <td>李娜</td>
+                <td>—</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td>软件测试</td>
+                <td>测评二组</td>
+                <td>李娜</td>
+                <td>—</td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  
+        </section>
+        <!-- PG-CFG-04 字段级权限配置 -->
+        <section data-page="PG-CFG-04" hidden>
+          ﻿<div class="page">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">字段级权限配置</h1>
+          <div class="page-sub">角色 × 字段访问矩阵 · 脱敏 / 明文 / 隐藏 · 满足等保/ISO 27001 数据安全</div>
+        </div>
+        <div class="actions">
+          <button class="btn">📥 导出矩阵</button>
+          <button class="btn">从主文档权限中心同步</button>
+        </div>
+      </div>
+
+      <!-- 概览 -->
+      <div class="stat-row mb-16" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-card bordered blue">
+          <div class="label">配置角色</div>
+          <div><span class="value">8</span><span class="suffix">个</span></div>
+        </div>
+        <div class="stat-card bordered green">
+          <div class="label">受控字段</div>
+          <div><span class="value">42</span><span class="suffix">个</span></div>
+        </div>
+        <div class="stat-card bordered orange">
+          <div class="label">脱敏字段</div>
+          <div><span class="value">12</span><span class="suffix">个</span></div>
+        </div>
+        <div class="stat-card bordered red">
+          <div class="label">本月越权访问拦截</div>
+          <div><span class="value">0</span><span class="suffix">次</span></div>
+        </div>
+      </div>
+
+      <div class="alert info mb-16">
+        <span class="ico">ℹ</span>
+        <div class="body">字段级权限建议与主文档权限中心统一配置入口，避免各子系统重复实现。本页提供本子系统字段规则细化（FR-PJ 第 6 节）。</div>
+      </div>
+
+      <!-- 字段 × 角色 矩阵 -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head">
+          <div class="title">字段访问矩阵（服务项实体）</div>
+          <div class="flex gap-8">
+            <select class="filter-select" style="padding:5px 10px;font-size:12px;">
+              <option>实体：服务项</option>
+              <option>实体：项目</option>
+              <option>实体：任务分配</option>
+              <option>实体：实施记录</option>
+              <option>实体：异常单</option>
+            </select>
+            <button class="btn sm">+ 新增字段</button>
+          </div>
+        </div>
+        <div class="crm-card-body" style="padding:0;overflow-x:auto;">
+          <table class="matrix" style="min-width:1000px;">
+            <thead>
+              <tr>
+                <th rowspan="2" style="min-width:160px;">字段 ↓ \ 角色 →</th>
+                <th>销售</th>
+                <th>业务管理员</th>
+                <th>团队负责人</th>
+                <th>项目经理</th>
+                <th>实施工程师</th>
+                <th>技术总监</th>
+                <th>财务</th>
+                <th>系统管理员</th>
+              </tr>
+              <tr style="font-size:10px;">
+                <th>—</th><th>—</th><th>—</th><th>—</th><th>—</th><th>—</th><th>—</th><th>—</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="label">服务项编号</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+              </tr>
+              <tr>
+                <td class="label">客户名称</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">合同金额 💰</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge warning">脱敏</span></td>
+                <td><span class="crm-badge warning">脱敏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">成本价 💰</td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">检测类别</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">脱敏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+              </tr>
+              <tr>
+                <td class="label">技术要求摘要</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">实施人员资质明细</td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">本人</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">商务条款</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">状态字段（field_xxx）</td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">本人</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+              <tr>
+                <td class="label">现场原始数据</td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge warning">脱敏</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge success">本人</span></td>
+                <td><span class="crm-badge success">明文</span></td>
+                <td><span class="crm-badge danger">隐藏</span></td>
+                <td><span class="crm-badge gray">审计脱敏</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-pagination">
+          <span>共 42 个字段 · 当前显示 10 个</span>
+          <div class="pagination">
+            <button class="pg" disabled>‹</button>
+            <button class="pg active">1</button>
+            <button class="pg">2</button>
+            <button class="pg">3</button>
+            <button class="pg">4</button>
+            <button class="pg">5</button>
+            <button class="pg">›</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 审计日志 -->
+      <div class="crm-card">
+        <div class="crm-card-head">
+          <div class="title">字段访问审计日志（近 7 天）</div>
+          <a class="btn-link">查看全部 →</a>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>用户</th>
+                <th>角色</th>
+                <th>访问字段</th>
+                <th>实体</th>
+                <th>动作</th>
+                <th>结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>07-17 13:25</td>
+                <td>李娜</td>
+                <td>团队负责人</td>
+                <td>合同金额</td>
+                <td>SI-0823-01</td>
+                <td>查看</td>
+                <td><span class="crm-badge warning">已脱敏</span></td>
+              </tr>
+              <tr>
+                <td>07-17 12:08</td>
+                <td>陈静</td>
+                <td>实施工程师</td>
+                <td>合同金额</td>
+                <td>SI-0823-01</td>
+                <td>查看</td>
+                <td><span class="crm-badge danger">已拦截（无权限）</span></td>
+              </tr>
+              <tr>
+                <td>07-17 11:30</td>
+                <td>王晓飞</td>
+                <td>业务管理员</td>
+                <td>成本价</td>
+                <td>SI-0823-04</td>
+                <td>查看</td>
+                <td><span class="crm-badge success">已明文</span></td>
+              </tr>
+              <tr>
+                <td>07-16 16:45</td>
+                <td>李娜</td>
+                <td>团队负责人</td>
+                <td>现场原始数据</td>
+                <td>SI-0823-09</td>
+                <td>导出</td>
+                <td><span class="crm-badge success">已授权（审批通过）</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  
+        </section>
+        <!-- PG-CFG-05 状态 SLA 配置 -->
+        <section data-page="PG-CFG-05" hidden>
+          ﻿<div class="page">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">状态 SLA 配置</h1>
+          <div class="page-sub">各状态节点的最长停留时间 · 阈值告警与升级规则</div>
+        </div>
+        <div class="actions">
+          <button class="btn">📥 导出</button>
+          <button class="btn">📥 从历史数据回填建议</button>
+          <button class="btn primary">+ 新建 SLA</button>
+        </div>
+      </div>
+
+      <!-- 待 Q5 提示 -->
+      <div class="alert warn mb-16" style="background:#FEF3C7;border-left:3px solid var(--warning);">
+        <span class="ico">⏳</span>
+        <div class="body">
+          <b>待 PMO 确认（Q5）：</b>本配置依赖 Q5 各状态 SLA 量化目标。当前配置为<b>建议值</b>，由系统管理员 / PMO 评审后定稿。
+          <div class="text-muted mt-8" style="font-size:12px;">本期先按流程顺畅度观测，不预设硬阈值。基线 [待基线] · PRD 第 10 节</div>
+        </div>
+      </div>
+
+      <!-- 概览 -->
+      <div class="stat-row mb-16" style="grid-template-columns:repeat(4,1fr);">
+        <div class="stat-card bordered blue">
+          <div class="label">已配置 SLA</div>
+          <div><span class="value">5</span><span class="suffix">条</span></div>
+        </div>
+        <div class="stat-card bordered green">
+          <div class="label">本月达标率</div>
+          <div><span class="value">92</span><span class="suffix">%</span></div>
+        </div>
+        <div class="stat-card bordered orange">
+          <div class="label">本月超时</div>
+          <div><span class="value">31</span><span class="suffix">次</span></div>
+        </div>
+        <div class="stat-card bordered red">
+          <div class="label">升级通知</div>
+          <div><span class="value">7</span><span class="suffix">次</span></div>
+        </div>
+      </div>
+
+      <!-- SLA 清单 -->
+      <div class="crm-card mb-16">
+        <div class="crm-card-head">
+          <div class="title">状态 SLA 清单</div>
+        </div>
+        <div class="crm-card-body" style="padding:0;">
+          <table class="crm-table">
+            <thead>
+              <tr>
+                <th>状态 / 阶段</th>
+                <th>SLA 目标</th>
+                <th>建议值（待 Q5 确认）</th>
+                <th>升级阈值</th>
+                <th>本月达标率</th>
+                <th>超时处理</th>
+                <th>状态</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>待确认</b><br><span class="text-muted" style="font-size:11px;">业务员确认拆解</span></td>
+                <td>≤ 2 工作日</td>
+                <td>2 工作日</td>
+                <td>3 工作日升级业务管理员</td>
+                <td>93%</td>
+                <td>IM 通知 + 待办加红</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>待分配 → 待实施</b><br><span class="text-muted" style="font-size:11px;">业务管理员 → 团队负责人 → 项目经理</span></td>
+                <td>≥ 95%</td>
+                <td>2 工作日</td>
+                <td>3 工作日升级业务管理员</td>
+                <td>96.8%</td>
+                <td>看板告警 + 看板统计</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>实施中（按计划日期）</b><br><span class="text-muted" style="font-size:11px;">准时完成率</span></td>
+                <td>≥ 85%</td>
+                <td>—（按计划日期本身）</td>
+                <td>超期 3 天升级项目经理</td>
+                <td>87.4%</td>
+                <td>看板告警 + IM 升级</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>异常评审中</b><br><span class="text-muted" style="font-size:11px;">上报 → 评审结论</span></td>
+                <td>≤ 1 工作日（中位）</td>
+                <td>1 工作日</td>
+                <td>超 1 工作日升级技术总监</td>
+                <td>94%</td>
+                <td>升级 + 看板红牌</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>报告编制</b><br><span class="text-muted" style="font-size:11px;">现场完成 → 报告编制完成</span></td>
+                <td>—（按合同）</td>
+                <td>按合同交付期</td>
+                <td>合同交付期前 7 天</td>
+                <td>—</td>
+                <td>IM 通知项目经理</td>
+                <td><span class="crm-badge success">启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+              <tr>
+                <td><b>整改中</b><br><span class="text-muted" style="font-size:11px;">最长停留</span></td>
+                <td>—（待定）</td>
+                <td>10 工作日（建议）</td>
+                <td>超 10 天升级项目经理</td>
+                <td>—</td>
+                <td>看板告警</td>
+                <td><span class="crm-badge gray">未启用</span></td>
+                <td><a class="btn-link">编辑</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 编辑表单（选中某行展开） -->
+      <div class="crm-card">
+        <div class="crm-card-head">
+          <div class="title">编辑 SLA · 异常评审中</div>
+        </div>
+        <div class="crm-card-body">
+          <div class="form-row">
+            <div class="form-item">
+              <div class="label">SLA 目标值</div>
+              <div class="flex gap-8">
+                <input value="1" style="width:80px;" />
+                <div class="select-wrap" style="flex:1;"><select><option>工作日</option><option>自然日</option><option>小时</option></select></div>
+              </div>
+            </div>
+            <div class="form-item">
+              <div class="label">提醒时机（提前 X 通知）</div>
+              <div class="flex gap-8">
+                <input value="4" style="width:80px;" />
+                <span style="line-height:36px;color:var(--text-muted);">小时</span>
+              </div>
+            </div>
+            <div class="form-item">
+              <div class="label">升级时机（超 X 升级）</div>
+              <div class="flex gap-8">
+                <input value="1" style="width:80px;" />
+                <span style="line-height:36px;color:var(--text-muted);">工作日</span>
+              </div>
+            </div>
+            <div class="form-item">
+              <div class="label">升级通知接收人</div>
+              <input value="技术总监 + 团队负责人" />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-item">
+              <div class="label">通知方式</div>
+              <div class="checkbox checked"><span class="box">✓</span> 站内消息</div>
+              <div class="checkbox checked"><span class="box">✓</span> 企微 IM</div>
+              <div class="checkbox"><span class="box"></span> 邮件</div>
+              <div class="checkbox checked"><span class="box">✓</span> 看板告警</div>
+            </div>
+            <div class="form-item">
+              <div class="label">例外场景（不触发升级）</div>
+              <textarea>· 涉及外部客户审批的异常
+· 等待技术总监本人在场签字</textarea>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-item full">
+              <div class="label">关联指标</div>
+              <div class="alert info">
+                <span class="ico">ℹ</span>
+                <div class="body">此 SLA 对应 KPI：<b>异常闭环时长 ≤ 1 工作日</b>（PRD 第 10 节 驱动指标） · 健康指标：<b>异常闭环数</b></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  
+        </section>
+    </div>
+  </main>
+</div>
+
+<!-- 全局覆盖层 -->
+<div id="overlayContainer">    <!-- Overlay: PG-PRJ-04-drawer -->
+    <div data-overlay="PG-PRJ-04-drawer" hidden>
+      ﻿<div class="drawer-mask"></div>
+<div class="drawer wide">
+  <div class="drawer-head">
+    <div>
+      <div class="title">调整服务项</div>
+      <div class="text-muted" style="font-size:12px;margin-top:2px;">PJ-2026-0833 · 某市公积金 · 范围变更将触发补充协议流程</div>
+    </div>
+    <button class="close">✕</button>
+  </div>
+  <div class="drawer-body">
+    <!-- 操作类型选择 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-body">
+        <div class="text-muted mb-12" style="font-size:12px;font-weight:500;">操作类型</div>
+        <div class="radio-group">
+          <label class="radio checked">
+            <span class="dot"></span>编辑（修改单条字段）
+          </label>
+          <label class="radio">
+            <span class="dot"></span>合并（多条 → 1 条）
+          </label>
+          <label class="radio">
+            <span class="dot"></span>拆分（1 条 → 多条）
+          </label>
+          <label class="radio">
+            <span class="dot"></span>删除
+          </label>
+          <label class="radio">
+            <span class="dot"></span>新增
+          </label>
+        </div>
+        <div class="alert info mt-16" style="font-size:12px;">
+          <span class="ico">ℹ</span>
+          <div class="body">仅 <b>「范围不变的结构性调整」</b> 可直接保存；调整导致合同服务范围变化（增项/减项/改量）时，必须走 <b>补充协议流程</b>。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 已选服务项 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-head">
+        <div class="title">已选服务项（1 项）</div>
+        <button class="btn sm">清空</button>
+      </div>
+      <div class="crm-table-wrap" style="border:none;border-radius:0;">
+        <table class="crm-table">
+          <thead>
+            <tr>
+              <th>服务项编号</th>
+              <th>场所</th>
+              <th>批次</th>
+              <th>检测类别</th>
+              <th>技术要求摘要</th>
+              <th>原数量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:var(--primary-bg);">
+              <td class="mono text-muted">SI-0833-01</td>
+              <td>中心机房</td>
+              <td>第一批次</td>
+              <td>等保测评（三级）</td>
+              <td>核心业务系统 4 套...</td>
+              <td>4 套</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 编辑字段 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-head">
+        <div class="title">编辑字段</div>
+        <span class="text-muted" style="font-size:12px;">所有变更将留痕（操作人/时间/前后值）</span>
+      </div>
+      <div class="crm-card-body">
+        <div class="form-row">
+          <div class="form-item"><div class="label">场所</div><input value="中心机房" /></div>
+          <div class="form-item"><div class="label">批次</div>
+            <div class="select-wrap"><select><option>第一批次</option><option>第二批次</option><option>第三批次</option></select></div>
+          </div>
+          <div class="form-item"><div class="label">检测类别</div>
+            <div class="select-wrap"><select><option>等保测评（三级）</option><option>等保测评（二级）</option></select></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item"><div class="label">原数量</div><input value="4 套" readonly style="background:#F8FAFC;" /></div>
+          <div class="form-item"><div class="label"><span class="req">*</span>新数量</div><input value="6 套" /></div>
+          <div class="form-item"><div class="label">体系要求</div>
+            <div class="select-wrap"><select><option>ISO 27001</option></select></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item full">
+            <div class="label">技术要求摘要</div>
+            <textarea>核心业务系统 4 套 → 调整为 6 套（增加：公积金风控稽核系统 + 跨行结算前置系统）</textarea>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item"><div class="label">计划开始日期</div><input type="date" value="2026-08-01" /></div>
+          <div class="form-item"><div class="label">计划结束日期</div><input type="date" value="2026-09-30" /></div>
+          <div class="form-item"><div class="label">特殊检测方法</div>
+            <div class="select-wrap"><select><option>否</option><option>是</option></select></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item full">
+            <div class="label">调整原因 <span class="req">*</span><span class="hint">用于变更留痕与审计</span></div>
+            <textarea placeholder="请说明本次调整的原因...">客户提出将原合同覆盖的 4 套核心系统扩展为 6 套（含风控稽核 + 跨行结算前置），属于合同范围增量。</textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 范围变更影响（关键拦截） -->
+    <div class="crm-card mb-16" style="border:2px solid var(--danger);">
+      <div class="crm-card-body">
+        <div class="flex items-center gap-12 mb-12">
+          <span style="font-size:24px;">⚠</span>
+          <div style="flex:1;">
+            <div style="font-size:15px;font-weight:600;color:var(--danger);">检测到范围变化：数量 4 套 → 6 套</div>
+            <div class="text-secondary" style="font-size:12px;">系统判定：<b>非范围不变的结构性调整</b>。提交后将强制跳转至补充协议流程，未经补充协议生效前，<b>不可进入分配环节</b>。</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item"><div class="label">原合同金额（引用）</div><input value="¥ 280,000" readonly style="background:#F8FAFC;" /></div>
+          <div class="form-item"><div class="label">预估调整金额</div><input value="¥ 420,000" /></div>
+          <div class="form-item"><div class="label">变更幅度</div><input value="+ 50%" readonly style="background:#F8FAFC;color:var(--danger);font-weight:600;" /></div>
+        </div>
+        <div class="alert warn">
+          <span class="ico">ℹ</span>
+          <div class="body">将自动跳转至 <b>合同管理子系统 · 补充协议流程</b>，完成后再回到本子系统继续分配。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 变更留痕预览 -->
+    <div class="crm-card">
+      <div class="crm-card-head">
+        <div class="title">变更留痕（保存后写入）</div>
+      </div>
+      <div class="crm-card-body">
+        <table class="crm-table">
+          <thead>
+            <tr><th>字段</th><th>原值</th><th>新值</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>数量</td><td>4 套</td><td><span style="color:var(--danger);">6 套</span></td></tr>
+            <tr><td>技术要求摘要</td><td>核心业务系统 4 套...</td><td>核心业务系统 6 套（含风控稽核 + 跨行结算前置）</td></tr>
+            <tr><td>计划日期</td><td>—</td><td>2026-08-01 ~ 2026-09-30</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="drawer-foot">
+    <span class="text-muted" style="font-size:12px;margin-right:auto;">操作人：王晓飞 · 当前时间：2026-07-17 13:25</span>
+    <button class="btn">取消</button>
+    <button class="btn">保存为草稿</button>
+    <button class="btn danger" onclick="toast('跳转补充协议流程（合同管理子系统）')">提交 · 触发补充协议 →</button>
+  </div>
+</div>
+<div class="toast-container"></div>
+<script src="../assets/js/app.js"></script>
+
+    </div>
+    <!-- Overlay: PG-RES-03-drawer -->
+    <div data-overlay="PG-RES-03-drawer" hidden>
+      ﻿<div class="drawer-mask"></div>
+<div class="drawer wide">
+  <div class="drawer-head">
+    <div>
+      <div class="title">指派项目经理 / 实施工程师</div>
+      <div class="text-muted" style="font-size:12px;margin-top:2px;">批次 #A0723-1 · 5 项 · 某省政务云</div>
+    </div>
+    <button class="close">✕</button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- 已选服务项 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-head">
+        <div class="title">已选服务项（5 项）</div>
+        <button class="btn sm">套用模板</button>
+      </div>
+      <div class="crm-table-wrap" style="border:none;border-radius:0;">
+        <table class="crm-table">
+          <thead>
+            <tr>
+              <th>服务项</th>
+              <th>检测类别</th>
+              <th>特殊方法</th>
+              <th>计划日期</th>
+              <th>已指派</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>SI-0826-01 等保3级</td><td>等保测评</td><td><span class="crm-badge gray">无</span></td><td>08-01 ~ 08-15</td><td><span class="crm-badge info">张磊 + 王明</span></td></tr>
+            <tr><td>SI-0826-02 密码评估</td><td>商用密码</td><td><span class="crm-badge purple">特殊方法</span></td><td>08-05 ~ 08-20</td><td><span class="crm-badge info">张磊 + 陈静</span></td></tr>
+            <tr><td>SI-0826-03 渗透测试</td><td>渗透测试</td><td><span class="crm-badge purple">特殊方法</span></td><td>08-10 ~ 08-25</td><td><span class="crm-badge warning">暂存（资质冲突）</span></td></tr>
+            <tr><td>SI-0826-04 源代码</td><td>源代码审计</td><td><span class="crm-badge gray">无</span></td><td>08-12 ~ 08-28</td><td><span class="crm-badge info">陈静</span></td></tr>
+            <tr><td>SI-0826-05 软件测试</td><td>软件测试</td><td><span class="crm-badge gray">无</span></td><td>08-15 ~ 08-30</td><td><span class="crm-badge info">李娜</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 指派字段 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-head"><div class="title">指派信息</div></div>
+      <div class="crm-card-body">
+        <div class="form-row">
+          <div class="form-item">
+            <div class="label"><span class="req">*</span>项目经理</div>
+            <div class="select-wrap"><select><option>张磊（测评一组）</option><option>李娜（测评二组）</option></select></div>
+            <div class="field-help">项目经理将负责本批次 5 项的整体计划与进度管控</div>
+          </div>
+          <div class="form-item">
+            <div class="label"><span class="req">*</span>实施工程师（可多选）</div>
+            <input value="王明、陈静、李娜" />
+            <div class="field-help">已选 3 人 · 系统自动检测资质/时间窗匹配</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item">
+            <div class="label"><span class="req">*</span>计划开始日期</div>
+            <input type="date" value="2026-08-01" />
+          </div>
+          <div class="form-item">
+            <div class="label"><span class="req">*</span>计划结束日期</div>
+            <input type="date" value="2026-08-30" />
+          </div>
+          <div class="form-item">
+            <div class="label">是否标记特殊方法</div>
+            <div class="select-wrap"><select><option>否</option><option>是（提交后自动触发技术总监复核）</option></select></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-item full">
+            <div class="label">指派说明</div>
+            <textarea>SI-03 渗透测试因缺少 CISP-PTE 资质需转派王明（渗透测试组），已与王明沟通确认；其他按原计划。</textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PG-RES-07 匹配校验与冲突预警（内嵌） -->
+    <div class="crm-card mb-16" style="border:2px solid var(--warning);">
+      <div class="crm-card-head" style="background:var(--warning-bg);">
+        <div class="title">⚠ 匹配校验与冲突预警 <span class="crm-badge warning" style="margin-left:8px;">2 项</span></div>
+        <a class="btn-link">查看校验逻辑</a>
+      </div>
+      <div class="crm-card-body">
+        <!-- 阻断级冲突 -->
+        <div class="conflict-block">
+          <div class="head">
+            <span>⛔</span>
+            <span style="color:var(--danger);">阻断级冲突（1 项）</span>
+            <span class="crm-badge block" style="margin-left:auto;">必须解决或上级审批</span>
+          </div>
+          <div class="body">
+            <div class="mb-8">
+              <b>SI-0826-03 渗透测试</b> · 服务项要求 <b>CISP-PTE 资质</b>，已选工程师 <b>李娜</b> 持有 <b>CISSP</b>，<span style="color:var(--danger);">不满足资质要求</span>
+            </div>
+            <div class="flex gap-8" style="font-size:12px;">
+              <span style="color:var(--text-muted);">建议处理：</span>
+              <button class="btn sm">更换为王明（持 CISP-PTE）</button>
+              <button class="btn sm danger" onclick="toast('打开带原因强制通过弹窗')">带原因强制通过（需上级审批）</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 警告级冲突 -->
+        <div class="conflict-warn">
+          <div class="head">
+            <span>⚠</span>
+            <span style="color:#B45309;">警告级冲突（1 项）</span>
+            <span class="crm-badge warn" style="margin-left:auto;">可强制通过</span>
+          </div>
+          <div class="body">
+            <div class="mb-8">
+              <b>SI-0826-02 密码评估（陈静）</b> · <b>2026-08-08 ~ 08-12</b> 与另一在途项目 <b>SI-0825-02（同工程师）</b> 时间窗重叠 4 天，建议调剂或确认是否可并行
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);">陈静本周 8 项任务，预计 76% 负载 · 建议增加 1 名备选工程师</div>
+          </div>
+        </div>
+
+        <!-- 通过的检查项 -->
+        <div style="margin-top:12px;">
+          <div class="text-muted" style="font-size:12px;margin-bottom:8px;">✓ 已通过的校验（3 项）</div>
+          <div class="flex gap-12" style="font-size:12px;flex-wrap:wrap;">
+            <span><span class="crm-badge success">✓</span> SI-01 资质匹配（王明持等级保护测评师）</span>
+            <span><span class="crm-badge success">✓</span> SI-04 设备时间窗无冲突</span>
+            <span><span class="crm-badge success">✓</span> SI-05 计划日期 ≥ 合同交付下限</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 资质清单摘要 -->
+    <div class="crm-card mb-16">
+      <div class="crm-card-head">
+        <div class="title">已选人员资质摘要</div>
+        <a class="btn-link" onclick="toast('跳转 PG-RES-06')">查看完整资质库 →</a>
+      </div>
+      <div class="crm-table-wrap" style="border:none;border-radius:0;">
+        <table class="crm-table">
+          <thead>
+            <tr>
+              <th>人员</th>
+              <th>等级保护测评师</th>
+              <th>CISP-PTE</th>
+              <th>CISSP</th>
+              <th>商用密码评估</th>
+              <th>当前负载</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>张磊（项目经理）</td>
+              <td><span class="crm-badge success">✓ 高级</span></td>
+              <td>—</td>
+              <td><span class="crm-badge success">✓</span></td>
+              <td><span class="crm-badge success">✓</span></td>
+              <td>62%</td>
+            </tr>
+            <tr>
+              <td>王明</td>
+              <td><span class="crm-badge success">✓ 中级</span></td>
+              <td><span class="crm-badge success">✓</span></td>
+              <td>—</td>
+              <td>—</td>
+              <td>74%</td>
+            </tr>
+            <tr>
+              <td>陈静</td>
+              <td><span class="crm-badge success">✓ 初级</span></td>
+              <td>—</td>
+              <td>—</td>
+              <td><span class="crm-badge success">✓</span></td>
+              <td>76%</td>
+            </tr>
+            <tr class="danger">
+              <td>李娜</td>
+              <td><span class="crm-badge success">✓ 中级</span></td>
+              <td><span class="crm-badge danger">✗ 缺失</span></td>
+              <td><span class="crm-badge success">✓</span></td>
+              <td>—</td>
+              <td>58%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 模板套用 -->
+    <div class="alert info">
+      <span class="ico">💡</span>
+      <div class="body">检测到 <b>「某银行 2026 等保测评」</b> 模板（同为等保 3 级，人员结构相似），点击 <a class="text-link">「套用模板」</a> 可一键复用人员配置。</div>
+    </div>
+  </div>
+  <div class="drawer-foot">
+    <span class="text-muted" style="font-size:12px;margin-right:auto;">
+      操作人：张磊 · 2026-07-17 13:35 · 保存后状态 待分配 → <b style="color:var(--primary);">待实施</b>
+    </span>
+    <button class="btn">取消</button>
+    <button class="btn">保存草稿</button>
+    <button class="btn primary" disabled>保存指派（含 1 项阻断需审批）</button>
+  </div>
+</div>
+<div class="toast-container"></div>
+<script src="../assets/js/app.js"></script>
+
+    </div>
+    <!-- Overlay: PG-IMP-06-terminate-dialog -->
+    <div data-overlay="PG-IMP-06-terminate-dialog" hidden>
+      ﻿<div class="dialog-mask">
+  <div class="dialog wide">
+    <div class="dialog-head">
+      <div class="title" style="color:var(--danger);">⚠ 终止服务项 · 必填终止原因</div>
+      <div class="sub">终止后服务项状态变更为「终止（异常）」，并联动合同补充协议 / 结算待办</div>
+    </div>
+    <div class="dialog-body">
+      <div class="form-row">
+        <div class="form-item">
+          <div class="label"><span class="req">*</span>终止原因分类</div>
+          <div class="select-wrap">
+            <select>
+              <option>客户原因（授权撤回/范围变更）</option>
+              <option>客户原因（业务调整）</option>
+              <option>技术原因（无法实施）</option>
+              <option>合规原因（不再适用体系要求）</option>
+              <option>其他</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-item">
+          <div class="label"><span class="req">*</span>影响范围</div>
+          <div class="select-wrap">
+            <select>
+              <option>仅当前服务项</option>
+              <option>影响同批次其他服务项</option>
+              <option>影响整个项目</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-item full">
+          <div class="label"><span class="req">*</span>详细说明</div>
+          <textarea style="min-height:80px;">客户撤回本项渗透测试的书面授权（详见附件），原因为新合规要求限制外网黑盒测试范围。建议联动合同补充协议，调整为远程灰盒测试 + 漏洞扫描替代方案。</textarea>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-item full">
+          <div class="label">终止证明材料</div>
+          <div class="crm-card crm-card-pad-sm" style="padding:12px;">
+            <div class="text-muted" style="font-size:12px;">📎 已上传 1 份：客户撤回授权的邮件截图.pdf</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 联动动作 -->
+      <div class="crm-card" style="background:var(--primary-bg);border-color:var(--primary-light);">
+        <div class="crm-card-body">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px;">联动动作（提交后自动触发）</div>
+          <div class="flex gap-12" style="flex-size:12px;">
+            <span class="crm-badge info">合同补充协议待办</span>
+            <span class="crm-badge info">结算变更待办</span>
+            <span class="crm-badge info">通知相关方</span>
+            <span class="crm-badge info">资源释放</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-foot">
+      <span class="left">操作人：张磊 · 2026-07-15 11:30</span>
+      <button class="btn" data-close="dialog">取消</button>
+      <button class="btn" data-close="dialog">保存草稿</button>
+      <button class="btn danger" data-close="dialog" onclick="toast('已发起终止，将联动合同补充协议 / 结算待办');">确认终止（含联动）</button>
+    </div>
+  </div>
+</div>
+<div class="toast-container"></div>
+<script src="../assets/js/app.js"></script>
+
+    </div>
+    <!-- Overlay: PG-IMP-10-rework-dialog -->
+    <div data-overlay="PG-IMP-10-rework-dialog" hidden>
+      ﻿<div class="dialog-mask">
+  <div class="dialog">
+    <div class="dialog-head">
+      <div class="title">变更为「整改中」</div>
+      <div class="sub">必填变更原因，原因解决后回到「报告编制」</div>
+    </div>
+    <div class="dialog-body">
+      <div class="alert warn mb-16" style="font-size:12px;">
+        <span class="ico">⚠</span>
+        <div class="body">状态变更将通知报告管理子系统，原始记录全留痕。</div>
+      </div>
+      <div class="form-row">
+        <div class="form-item">
+          <div class="label"><span class="req">*</span>变更原因分类</div>
+          <div class="select-wrap">
+            <select>
+              <option>客户补充资料延迟</option>
+              <option>客户要求调整报告结构</option>
+              <option>技术细节需补充验证</option>
+              <option>合规审查待补充</option>
+              <option>报告编制内部返工</option>
+              <option>其他</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-item">
+          <div class="label"><span class="req">*</span>影响</div>
+          <div class="select-wrap">
+            <select>
+              <option>影响报告交付 ≤ 3 天</option>
+              <option>影响报告交付 4-7 天</option>
+              <option>影响报告交付 &gt; 7 天</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-item full">
+          <div class="label"><span class="req">*</span>详细说明</div>
+          <textarea style="min-height:80px;">客户补充材料（含网络架构图最新版 + 主机清单）尚未到位，需延后至 07-25 方可拿到。已与客户王经理沟通确认，预计影响报告交付 5 天。</textarea>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-foot">
+      <span class="left">操作人：张磊 · 2026-07-17 13:55</span>
+      <button class="btn" data-close="dialog">取消</button>
+      <button class="btn warning" data-close="dialog" onclick="toast('已变更为「整改中」，将通知报告管理子系统');">确认变更</button>
+    </div>
+  </div>
+</div>
+<div class="toast-container"></div>
+<script src="../assets/js/app.js"></script>
+
+    </div>
+</div>
+
+<!-- 浮动操作面板 -->
+<div class="spa-toolbar">
+  <a href="#" id="btnPrev" data-tooltip="上一页 (←)">‹</a>
+  <a href="#" id="btnNext" data-tooltip="下一页 (→)">›</a>
+  <a href="#" id="btnHome" class="primary" data-tooltip="回到首页 (Esc)">⌂</a>
+</div>
+
+<!-- 快速导航 -->
+<nav class="quick-nav" id="quickNav">
+</nav>
+
+<div class="toast-container"></div>
+<script src="assets/js/app.js"></script>
+<script>
+  // ===== SPA 路由 =====
+  const PAGES = [{"id":"PG-CFG-01","name":"拆解规则配置","breadcrumb":["项目服务内容管理","系统配置","拆解规则"],"user":{"name":"赵工","role":"系统管理员","avatar":"赵"},"tag":"配置"},{"id":"PG-CFG-02","name":"冲突预警规则配置","breadcrumb":["项目服务内容管理","系统配置","冲突预警规则"],"user":{"name":"赵工","role":"系统管理员","avatar":"赵"},"tag":"配置"},{"id":"PG-CFG-03","name":"自动化触发配置","breadcrumb":["项目服务内容管理","系统配置","自动化触发"],"user":{"name":"赵工","role":"系统管理员","avatar":"赵"},"tag":"配置"},{"id":"PG-CFG-04","name":"字段级权限配置","breadcrumb":["项目服务内容管理","系统配置","字段级权限"],"user":{"name":"赵工","role":"系统管理员","avatar":"赵"},"tag":"配置"},{"id":"PG-CFG-05","name":"状态 SLA 配置","breadcrumb":["项目服务内容管理","系统配置","状态 SLA"],"user":{"name":"赵工","role":"系统管理员","avatar":"赵"},"tag":"配置"}];
+  const DEFAULT_PAGE = 'PG-DASH-01';
+
+  function getCurrentPageId() {
+    return (location.hash || '#' + DEFAULT_PAGE).replace(/^#/, '');
+  }
+
+  function navigate(pageId, options) {
+    options = options || {};
+    if (!PAGES.find(p => p.id === pageId)) {
+      pageId = DEFAULT_PAGE;
+    }
+    document.querySelectorAll('section[data-page]').forEach(el => el.hidden = true);
+    const target = document.querySelector('section[data-page="' + pageId + '"]');
+    if (target) {
+      target.hidden = false;
+      if (!options.skipScroll) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+    document.querySelectorAll('[data-overlay]').forEach(el => el.hidden = true);
+    updateTopbar(pageId);
+    updateSidebar(pageId);
+    updateQuickNav(pageId);
+    if (window.rebind) window.rebind(target);
+    if (location.hash.replace(/^#/, '') !== pageId) {
+      if (options.replace) {
+        history.replaceState(null, '', '#' + pageId);
+      } else {
+        location.hash = pageId;
+      }
+    }
+  }
+
+  function updateTopbar(pageId) {
+    const meta = PAGES.find(p => p.id === pageId);
+    if (!meta) return;
+    const bc = meta.breadcrumb;
+    let bcHtml = '<span>' + bc[0] + '</span>';
+    for (let i = 1; i < bc.length; i++) {
+      bcHtml += '<span class="sep">/</span><span class="current">' + bc[i] + '</span>';
+    }
+    document.getElementById('topbarBreadcrumb').innerHTML = bcHtml;
+    document.getElementById('topbarUser').innerHTML =
+      '<span class="avatar">' + meta.user.avatar + '</span>' +
+      '<span style="font-size:13px;color:var(--text-primary);">' + meta.user.name + '</span>' +
+      '<span style="font-size:11px;color:var(--text-placeholder);">▾</span>';
+  }
+
+  function updateSidebar(pageId) {
+    document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+    const sbItem = document.querySelector('.sidebar-item[data-page="' + pageId + '"]');
+    if (sbItem) sbItem.classList.add('active');
+  }
+
+  function buildQuickNav() {
+    const groups = {};
+    PAGES.forEach(p => {
+      const grp = p.breadcrumb.slice(1, -1).join(' > ') || '其他';
+      if (!groups[grp]) groups[grp] = [];
+      groups[grp].push(p);
+    });
+    let html = '<div class="qtitle">📍 快速导航</div>';
+    for (const g in groups) {
+      html += '<div class="group">';
+      html += '<div class="group-label">' + g + '</div>';
+      groups[g].forEach(p => {
+        html += '<a href="#' + p.id + '" data-page="' + p.id + '">' + p.name + '</a>';
+      });
+      html += '</div>';
+    }
+    document.getElementById('quickNav').innerHTML = html;
+  }
+
+  function updateQuickNav(pageId) {
+    document.querySelectorAll('.quick-nav a').forEach(a => {
+      a.classList.toggle('active', a.getAttribute('data-page') === pageId);
+    });
+  }
+
+  // 拦截所有内部链接
+  document.addEventListener('click', e => {
+    // 侧边栏点击
+    const sbItem = e.target.closest('.sidebar-item[data-page]');
+    if (sbItem) {
+      e.preventDefault();
+      navigate(sbItem.getAttribute('data-page'));
+      return;
+    }
+    // Hash 链接
+    const hashLink = e.target.closest('a[href^="#"]');
+    if (hashLink) {
+      e.preventDefault();
+      navigate(hashLink.getAttribute('href').slice(1));
+      return;
+    }
+    // 内部页面链接
+    const pageLink = e.target.closest('a[href*="pages/PG-"]');
+    if (pageLink) {
+      e.preventDefault();
+      const href = pageLink.getAttribute('href');
+      const m = href.match(/PG-[A-Z]+-\d+/);
+      if (m) navigate(m[0]);
+      return;
+    }
+    // 打开 overlay
+    const openBtn = e.target.closest('[data-open-overlay]');
+    if (openBtn) {
+      e.preventDefault();
+      const overlayId = openBtn.getAttribute('data-open-overlay');
+      const overlay = document.querySelector('[data-overlay="' + overlayId + '"]');
+      if (overlay) overlay.hidden = false;
+      return;
+    }
+    // data-close 关闭
+    const closeBtn = e.target.closest('[data-close]');
+    if (closeBtn) {
+      e.preventDefault();
+      const target = closeBtn.getAttribute('data-close');
+      if (target === 'drawer' || target === 'dialog' || target === 'mask') {
+        const ov = closeBtn.closest('[data-overlay]');
+        if (ov) ov.hidden = true;
+      }
+      return;
+    }
+    // ✕ 关闭按钮
+    if (e.target.classList && e.target.classList.contains('close')) {
+      const ov = e.target.closest('[data-overlay]');
+      if (ov) ov.hidden = true;
+      return;
+    }
+    // 抽屉/弹窗遮罩点击关闭
+    if (e.target.classList && (e.target.classList.contains('drawer-mask') || e.target.classList.contains('dialog-mask'))) {
+      const ov = e.target.closest('[data-overlay]');
+      if (ov) ov.hidden = true;
+      return;
+    }
+  });
+
+  // Hash 变化
+  window.addEventListener('hashchange', () => navigate(getCurrentPageId(), { skipScroll: true }));
+
+  // 键盘导航
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    const current = getCurrentPageId();
+    const idx = PAGES.findIndex(p => p.id === current);
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = PAGES[Math.min(idx + 1, PAGES.length - 1)].id;
+      navigate(next);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = PAGES[Math.max(idx - 1, 0)].id;
+      navigate(prev);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      const openOverlay = document.querySelector('[data-overlay]:not([hidden])');
+      if (openOverlay) {
+        openOverlay.hidden = true;
+      } else {
+        navigate(DEFAULT_PAGE);
+      }
+    }
+  });
+
+  // 浮动按钮
+  document.getElementById('btnPrev').addEventListener('click', e => {
+    e.preventDefault();
+    const current = getCurrentPageId();
+    const idx = PAGES.findIndex(p => p.id === current);
+    if (idx > 0) navigate(PAGES[idx - 1].id);
+  });
+  document.getElementById('btnNext').addEventListener('click', e => {
+    e.preventDefault();
+    const current = getCurrentPageId();
+    const idx = PAGES.findIndex(p => p.id === current);
+    if (idx < PAGES.length - 1) navigate(PAGES[idx + 1].id);
+  });
+  document.getElementById('btnHome').addEventListener('click', e => {
+    e.preventDefault();
+    navigate(DEFAULT_PAGE);
+  });
+
+  // 初始化
+  buildQuickNav();
+  navigate(getCurrentPageId(), { replace: true });
+</script>
+</body>
+</html>
