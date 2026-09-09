@@ -37,10 +37,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer temporalClient.Close()
-	workerOptions, err := temporalworker.WorkerOptions(temporalworker.VersioningConfig{
+	versioning := temporalworker.VersioningConfig{
 		Enabled: cfg.TemporalWorkerVersioning, DeploymentName: cfg.TemporalWorkerDeploymentName,
 		BuildID: cfg.TemporalWorkerBuildID, Policy: cfg.TemporalWorkerVersioningPolicy,
-	})
+	}
+	workerOptions, err := temporalworker.WorkerOptions(versioning)
 	if err != nil {
 		logger.Error("configure Temporal worker versioning", "error", err)
 		os.Exit(1)
@@ -48,6 +49,9 @@ func main() {
 	w := worker.New(temporalClient, cfg.TemporalTaskQueue, workerOptions)
 	workflows.Register(w, &workflows.Activities{Store: store.NewRepository(db)})
 	logger.Info("project workflow worker started", "task_queue", cfg.TemporalTaskQueue, "deployment", cfg.TemporalWorkerDeploymentName, "build_id", cfg.TemporalWorkerBuildID, "versioning", cfg.TemporalWorkerVersioning)
+	// 版本路由开启时 Worker 只消费自身版本队列；Deployment 的 Current 版本为空会让新工作流
+	// 以 UNVERSIONED 入队且无人领取，因此启动时主动收敛，不再依赖人工 PROMOTE。
+	temporalworker.EnsureCurrentVersionOnStartup(ctx, temporalClient, logger, versioning)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Error("worker failed", "error", err)
 		os.Exit(1)

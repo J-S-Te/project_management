@@ -46,10 +46,11 @@ func main() {
 	repository := store.NewRepository(db)
 	var embeddedWorker worker.Worker
 	if cfg.RunWorkerWithAPI {
-		workerOptions, optionsErr := temporalworker.WorkerOptions(temporalworker.VersioningConfig{
+		versioning := temporalworker.VersioningConfig{
 			Enabled: cfg.TemporalWorkerVersioning, DeploymentName: cfg.TemporalWorkerDeploymentName,
 			BuildID: cfg.TemporalWorkerBuildID, Policy: cfg.TemporalWorkerVersioningPolicy,
-		})
+		}
+		workerOptions, optionsErr := temporalworker.WorkerOptions(versioning)
 		if optionsErr != nil {
 			logger.Error("configure embedded Temporal worker versioning", "error", optionsErr)
 			os.Exit(1)
@@ -61,6 +62,9 @@ func main() {
 			os.Exit(1)
 		}
 		defer embeddedWorker.Stop()
+		// 版本路由开启时 Worker 只消费自身版本队列；Deployment 的 Current 版本为空会让新工作流
+		// 以 UNVERSIONED 入队且无人领取，因此启动时主动收敛，不再依赖人工 PROMOTE。
+		temporalworker.EnsureCurrentVersionOnStartup(ctx, temporalClient, logger, versioning)
 	}
 	startupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
