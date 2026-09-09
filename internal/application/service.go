@@ -22,6 +22,8 @@ var (
 	// ErrServiceTimeout 表示同步等待后端工作流在约定时间内没有完成。
 	// 前端应提示用户稍后重试，而不是让网关吞掉请求并返回 504。
 	ErrServiceTimeout = errors.New("service processing timeout")
+	// ErrPersonnelUnavailable 表示项目子系统尚未开通基础平台人员目录集成。
+	ErrPersonnelUnavailable = errors.New("platform personnel directory is unavailable")
 )
 
 type Repository interface {
@@ -52,6 +54,9 @@ type Service struct {
 	Repo      Repository
 	Temporal  WorkflowExecutor
 	TaskQueue string
+	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
+	// ErrPersonnelUnavailable，不影响其余项目功能。
+	Personnel platform.OwnerDirectory
 }
 
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {
@@ -81,6 +86,29 @@ func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, pr
 		return nil, err
 	}
 	return s.Repo.ListServiceItems(ctx, filter, projectID)
+}
+
+// ListPersonnel 从基础平台负责人目录读取可选人员，供服务项操作台选择团队负责人、
+// 项目经理和工程师。只有具备分配权限的角色能读取，避免把平台人员清单暴露给纯查看角色。
+func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keyword, userID string, page, pageSize int) (platform.OwnerDirectoryPage, error) {
+	if !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
+		return platform.OwnerDirectoryPage{}, ErrForbidden
+	}
+	if s.Personnel == nil {
+		return platform.OwnerDirectoryPage{}, ErrPersonnelUnavailable
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 50 {
+		pageSize = 50
+	}
+	result, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{Keyword: strings.TrimSpace(keyword), UserID: strings.TrimSpace(userID), Page: page, PageSize: pageSize})
+	if err != nil {
+		// 目录不可用时对上层统一暴露“未配置/不可用”，不把平台内部错误细节透给浏览器。
+		return platform.OwnerDirectoryPage{}, fmt.Errorf("%w: %v", ErrPersonnelUnavailable, err)
+	}
+	return result, nil
 }
 func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind string) ([]domain.Rule, error) {
 	if err := requireApplicationAuthorization(p, "project.read"); err != nil {

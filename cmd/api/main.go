@@ -114,7 +114,18 @@ func main() {
 	} else {
 		logger.Warn("platform audit reporting disabled; write operations will not be sent to the platform audit service", "missing_configuration", auditConfig.MissingFields)
 	}
-	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue}
+	var personnel platform.OwnerDirectory
+	if cfg.OwnerDirectoryEnabled {
+		personnel = platform.NewOwnerDirectory(cfg.PlatformBaseURL, cfg.PlatformOwnerDirectoryURL, cfg.PlatformOwnerDirectoryClientID, cfg.PlatformOwnerDirectorySecret, cfg.PlatformOwnerDirectoryScope)
+		if personnel == nil {
+			logger.Error("platform owner directory is enabled but the client could not be configured")
+			os.Exit(1)
+		}
+		logger.Info("platform owner directory integration enabled")
+	} else {
+		logger.Warn("platform owner directory integration disabled; personnel pickers will be unavailable")
+	}
+	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue, Personnel: personnel}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,

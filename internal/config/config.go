@@ -46,6 +46,11 @@ type Config struct {
 	PlatformApplicationID            string
 	PlatformAuditClientID            string
 	PlatformAuditClientSecret        string
+	OwnerDirectoryEnabled            bool
+	PlatformOwnerDirectoryURL        string
+	PlatformOwnerDirectoryClientID   string
+	PlatformOwnerDirectorySecret     string
+	PlatformOwnerDirectoryScope      string
 	PlatformCatalogSync              bool
 	PlatformCatalogClientID          string
 	PlatformCatalogClientSecret      string
@@ -78,16 +83,20 @@ func Load() (Config, error) {
 		PlatformApplicationCode: strings.TrimSpace(os.Getenv("PLATFORM_APPLICATION_CODE")), PlatformEnvironmentCode: strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")),
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
-		PlatformCatalogClientSecret:   os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
-		ContractIntegrationClientID:   strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
-		ContractIntegrationAudience:   strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
-		DashboardMachineClientID:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
-		DashboardMachineAudience:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
-		DashboardMachineIssuer:        strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_ISSUER")),
-		DashboardMachinePublicKeyPath: strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH")),
-		DashboardMachineCallerApp:     strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
-		DashboardMachineCallerEnv:     strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
-		DashboardMachineScope:         strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
+		PlatformCatalogClientSecret:    os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
+		PlatformOwnerDirectoryURL:      strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_URL")),
+		PlatformOwnerDirectoryClientID: strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_ID")),
+		PlatformOwnerDirectorySecret:   os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"),
+		PlatformOwnerDirectoryScope:    strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_SCOPE")),
+		ContractIntegrationClientID:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
+		ContractIntegrationAudience:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		DashboardMachineClientID:       strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
+		DashboardMachineAudience:       strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
+		DashboardMachineIssuer:         strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_ISSUER")),
+		DashboardMachinePublicKeyPath:  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH")),
+		DashboardMachineCallerApp:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
+		DashboardMachineCallerEnv:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
+		DashboardMachineScope:          strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -110,6 +119,9 @@ func Load() (Config, error) {
 	}
 	if c.PlatformCatalogSync, err = strconv.ParseBool(env("PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: %w", err)
+	}
+	if c.OwnerDirectoryEnabled, err = strconv.ParseBool(env("OWNER_DIRECTORY_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("OWNER_DIRECTORY_ENABLED: %w", err)
 	}
 	if c.TemporalTLS, err = strconv.ParseBool(env("TEMPORAL_TLS", "false")); err != nil {
 		return c, fmt.Errorf("TEMPORAL_TLS: %w", err)
@@ -199,6 +211,23 @@ func (c Config) validate() error {
 	}
 	if c.PlatformCatalogSync && (c.PlatformApplicationID == "" || c.PlatformCatalogClientID == "" || c.PlatformCatalogClientSecret == "") {
 		return fmt.Errorf("catalog sync requires application ID, client ID and secret")
+	}
+	if c.OwnerDirectoryEnabled {
+		for name, value := range map[string]string{
+			"PLATFORM_OWNER_DIRECTORY_URL":           c.PlatformOwnerDirectoryURL,
+			"PLATFORM_OWNER_DIRECTORY_CLIENT_ID":     c.PlatformOwnerDirectoryClientID,
+			"PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET": c.PlatformOwnerDirectorySecret,
+		} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when OWNER_DIRECTORY_ENABLED=true", name)
+			}
+		}
+		if !validHTTPURL(c.PlatformOwnerDirectoryURL) {
+			return fmt.Errorf("PLATFORM_OWNER_DIRECTORY_URL must be a valid HTTP(S) URL")
+		}
+		if c.PlatformOwnerDirectoryScope != "" && c.PlatformOwnerDirectoryScope != "owner_directory.read" {
+			return fmt.Errorf("PLATFORM_OWNER_DIRECTORY_SCOPE must be owner_directory.read")
+		}
 	}
 	if c.ContractIntegrationRequireBearer {
 		if !c.ContractIntegrationEnabled {
