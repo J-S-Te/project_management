@@ -12,6 +12,8 @@
     ,{"code":"project.resource.read","name":"查看人员资质与设备能力","action":"read","resource_code":"project_resource","resource_name":"项目资源","risk_level":"LOW"}
     ,{"code":"project.resource.manage","name":"管理人员资质与设备能力","action":"manage","resource_code":"project_resource","resource_name":"项目资源","risk_level":"HIGH"}
     ,{"code":"project.resource.assign","name":"分配项目团队、人员和设备","action":"assign","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.device.read","name":"查看设备基础信息与能力","action":"read","resource_code":"equipment","resource_name":"设备","risk_level":"LOW"}
+    ,{"code":"project.device.manage","name":"维护设备、停用与检定信息","action":"manage","resource_code":"equipment","resource_name":"设备","risk_level":"HIGH"}
     ,{"code":"project.team.assign","name":"业务管理员分配团队负责人","action":"assign_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.execution.assign","name":"团队负责人指派项目经理和实施工程师","action":"assign_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.implementation.plan","name":"制定实施计划与准备事项","action":"plan","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"}
@@ -28,6 +30,7 @@
     {"code":"project_manager","name":"项目经理","permissions":["project.read","service_item.confirm","project.resource.read","project.implementation.plan","project.field.complete"]},
     {"code":"engineer","name":"实施工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
     {"code":"penetration_engineer","name":"渗透测试工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
-    {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage","project.resource.read","project.resource.manage"]}
+    {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage","project.resource.read","project.resource.manage"]},
+    {"code":"device_admin","name":"设备管理员","permissions":["project.read","project.device.read","project.device.manage","project.resource.read","project.resource.manage"]}
   ]
 }

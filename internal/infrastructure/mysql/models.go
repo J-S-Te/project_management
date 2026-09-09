@@ -37,6 +37,7 @@ type serviceItemRecord struct {
 	Category         string `gorm:"size:255"`
 	Requirement      string `gorm:"type:text"`
 	System           string `gorm:"size:128"`
+	SystemLevel      string `gorm:"size:64"`
 	Special          string `gorm:"size:16"`
 	TestMode         string `gorm:"size:32;not null"`
 	TeamLeadID       string `gorm:"size:64"`

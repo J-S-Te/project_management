@@ -46,3 +46,13 @@ func TestBackchannelLogoutMigrationAddsSIDAndReplayBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceItemSystemLevelMigration(t *testing.T) {
+	body, err := Files.ReadFile("000007_project_service_system_level.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "ADD COLUMN system_level VARCHAR(64) NOT NULL DEFAULT ''") {
+		t.Fatal("system level migration is missing")
+	}
+}

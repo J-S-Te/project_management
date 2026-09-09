@@ -87,6 +87,9 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/auth/backchannel-logout` | OIDC Provider 以 `application/x-www-form-urlencoded` 投递标准 `logout_token`；不接受浏览器 Cookie |
 | GET | `/api/v1/auth/me` | 当前项目系统主体与权限 |
 | GET | `/api/v1/dashboard` | 汇总指标 |
+| GET | `/api/v1/navigation` | 按当前角色返回项目管理工作区可见页面；前端不得自行扩展页面权限 |
+| GET | `/api/v1/equipment` | 设备管理员查询设备基础信息、能力和检定状态 |
+| PUT | `/api/v1/equipment` | 设备管理员新增、更新、停用或维护设备检定信息 |
 | GET/POST | `/api/v1/projects` | 查询/创建项目 |
 | GET | `/api/v1/projects/{id}` | 项目详情 |
 | GET | `/api/v1/service-items` | 查询服务项 |
