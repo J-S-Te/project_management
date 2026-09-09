@@ -20,6 +20,7 @@ type ContractService struct {
 	Batch       string `json:"batch"`
 	Category    string `json:"category"`
 	System      string `json:"system"`
+	SystemLevel string `json:"system_level"`
 	Requirement string `json:"requirement"`
 	TestMode    string `json:"test_mode"`
 }

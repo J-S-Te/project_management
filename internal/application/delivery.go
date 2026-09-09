@@ -105,7 +105,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return domain.Project{}, ErrValidation
 		}
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: "待确认", ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: "待确认", ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
@@ -131,7 +131,7 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return ErrValidation
 		}
-		items = append(items, domain.ServiceItem{ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(projectID, "PJ-"), index+1), ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: "待确认", ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(projectID, "PJ-"), index+1), ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: "待确认", ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items}))
 }
@@ -331,6 +331,33 @@ func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, ty
 	}
 	return repo.ListCapabilities(ctx, p.TenantID, typ)
 }
+
+func (s *Service) ListEquipment(ctx context.Context, p platform.Principal) ([]domain.Capability, error) {
+	if err := requireApplicationAuthorization(p, "project.device.read"); err != nil {
+		return nil, err
+	}
+	repo, e := s.deliveryRepo()
+	if e != nil {
+		return nil, e
+	}
+	return repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+}
+
+func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, item domain.Capability) (domain.Capability, error) {
+	if err := requireApplicationAuthorization(p, "project.device.manage"); err != nil {
+		return item, err
+	}
+	if item.ResourceType != "EQUIPMENT" || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
+		return item, ErrValidation
+	}
+	repo, e := s.deliveryRepo()
+	if e != nil {
+		return item, e
+	}
+	item.TenantID = p.TenantID
+	item.Status = firstNonEmpty(item.Status, "ACTIVE")
+	return repo.UpsertCapability(ctx, item, p.UserID)
+}
 func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) error {
 	repo, e := s.deliveryRepo()
 	if e != nil {
@@ -398,6 +425,7 @@ func groupContractServices(sources []domain.ContractService) ([]domain.ContractS
 			current.SourceID = joinUnique(current.SourceID, source.SourceID)
 			current.Requirement = joinUnique(current.Requirement, strings.TrimSpace(source.Requirement))
 			current.System = joinUnique(current.System, strings.TrimSpace(source.System))
+			current.SystemLevel = joinUnique(current.SystemLevel, strings.TrimSpace(source.SystemLevel))
 			current.Name = joinUnique(current.Name, strings.TrimSpace(source.Name))
 			groups[key] = current
 		} else {

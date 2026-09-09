@@ -194,7 +194,7 @@ func perform(handler http.Handler, method, path, body string) *httptest.Response
 
 func TestProjectCreationAndRead(t *testing.T) {
 	handler := router(t, map[string]bool{"project.create": true, "project.read": true}, nil)
-	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"示例客户","contract":"HT-1"}`)
+	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"示例客户","contract":"HT-1","contract_id":"approved-1"}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -210,6 +210,30 @@ func TestProjectCreationAndRead(t *testing.T) {
 	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestRoleNavigationMatchesPrototypeWorkspaces(t *testing.T) {
+	tests := []struct {
+		role string
+		want string
+	}{
+		{"business_admin", "projects"},
+		{"team_lead", "assignments"},
+		{"technical_director", "standards"},
+		{"project_manager", "reports"},
+		{"admin", "permissions"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.role, func(t *testing.T) {
+			repository := &repo{}
+			service := &application.Service{Repo: repository}
+			id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{tc.role}, Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: tc.role, ScopeType: "APPLICATION"}}}}
+			response := perform(httpapi.NewRouter(service, id, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), http.MethodGet, "/api/v1/navigation", "")
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), tc.want) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 func TestServiceItemConfirmationUsesWorkflow(t *testing.T) {
@@ -420,7 +444,7 @@ func TestFieldCheckInRejectsInvalidGPS(t *testing.T) {
 	}
 }
 func TestMissingPermissionIsForbidden(t *testing.T) {
-	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodPost, "/api/v1/projects", `{"name":"越权","customer":"客户","contract":"HT-1"}`)
+	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodPost, "/api/v1/projects", `{"name":"越权","customer":"客户","contract":"HT-1","contract_id":"approved-1"}`)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status=%d", response.Code)
 	}
@@ -449,7 +473,7 @@ func TestMeReturnsStableIdentityAndDataScopes(t *testing.T) {
 }
 func TestWriteIsReportedToAudit(t *testing.T) {
 	reporter := &audit{}
-	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1"}`)
+	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1","contract_id":"approved-1"}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d", response.Code)
 	}

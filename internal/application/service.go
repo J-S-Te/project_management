@@ -141,14 +141,14 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	items := make([]domain.ServiceItem, 0, len(requested))
 	for index, source := range requested {
 		mode := strings.ToUpper(firstNonEmpty(source.TestMode, "STANDARD"))
-		if strings.TrimSpace(source.Site) == "" || strings.TrimSpace(source.Batch) == "" || strings.TrimSpace(source.Category) == "" || mode != "STANDARD" && mode != "PENETRATION" {
+		if strings.TrimSpace(source.Site) == "" || mode != "STANDARD" && mode != "PENETRATION" {
 			return input, ErrValidation
 		}
 		items = append(items, domain.ServiceItem{
 			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
 			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category),
-			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
+			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
 			Status: "待确认", ConflictStatus: "UNCHECKED",
 		})
 	}

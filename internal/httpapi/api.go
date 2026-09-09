@@ -88,6 +88,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api := router.Group("/api/v1")
 	api.Use(h.authenticate(), h.auditWrites())
 	api.GET("/auth/me", h.me)
+	api.GET("/navigation", require("project.read"), h.navigation)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.POST("/projects", require("project.create"), h.createProject)
@@ -109,6 +110,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
 	api.GET("/capabilities", require("project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
+	api.GET("/equipment", require("project.device.read"), h.listEquipment)
+	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
@@ -336,6 +339,48 @@ func (h *Handler) me(c *gin.Context) {
 	sort.Strings(permissions)
 	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
 }
+
+// navigation is the server-owned workbench contract. The browser may hide or order
+// navigation items, but it must not infer a role from display labels or expand permissions.
+func (h *Handler) navigation(c *gin.Context) {
+	p := principal(c)
+	sections := navigationSections(p.Roles)
+	writeData(c, http.StatusOK, map[string]any{
+		"roles":                  p.Roles,
+		"sections":               sections,
+		"default_section":        sections[0],
+		"authorization_revision": p.AuthorizationRevision,
+		"catalog_version":        p.CatalogVersion,
+	})
+}
+
+func navigationSections(roles []string) []string {
+	profiles := map[string][]string{
+		"admin":              {"split-rules", "warning-rules", "automations", "permissions"},
+		"system_admin":       {"split-rules", "warning-rules", "automations", "permissions"},
+		"business_admin":     {"projects", "decomposition", "allocation"},
+		"team_lead":          {"projects", "allocation", "assignments", "implementation", "exceptions"},
+		"technical_director": {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
+		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
+		"device_admin":       {"equipment"},
+	}
+	seen := map[string]bool{}
+	sections := make([]string, 0, 10)
+	for _, role := range roles {
+		for _, section := range profiles[strings.ToLower(strings.TrimSpace(role))] {
+			if !seen[section] {
+				seen[section] = true
+				sections = append(sections, section)
+			}
+		}
+	}
+	if len(sections) == 0 {
+		// Unknown roles receive the least-privileged read-only entry point; endpoint
+		// authorization remains the final enforcement boundary.
+		return []string{"dashboard", "projects"}
+	}
+	return sections
+}
 func (h *Handler) dashboard(c *gin.Context) {
 	currentPrincipal := principal(c)
 	item, err := h.service.Dashboard(c.Request.Context(), currentPrincipal)
@@ -366,11 +411,18 @@ func (h *Handler) getProject(c *gin.Context) {
 func (h *Handler) createProject(c *gin.Context) {
 	var request struct {
 		domain.Project
-		ServiceItems []domain.ContractService `json:"service_items"`
+		ContractID      string                   `json:"contract_id"`
+		ContractVersion string                   `json:"contract_version"`
+		ServiceItems    []domain.ContractService `json:"service_items"`
 	}
 	if !decode(c, &request) {
 		return
 	}
+	if strings.TrimSpace(request.ContractID) == "" {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	request.Project.ContractVersion = strings.TrimSpace(request.ContractVersion)
 	item, err := h.service.CreateProjectWithServiceItems(c.Request.Context(), principal(c), request.Project, request.ServiceItems)
 	if err != nil {
 		writeServiceError(c, err)
@@ -554,6 +606,26 @@ func (h *Handler) upsertCapability(c *gin.Context) {
 		return
 	}
 	item, err := h.service.UpsertCapability(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+func (h *Handler) listEquipment(c *gin.Context) {
+	items, err := h.service.ListEquipment(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) upsertEquipment(c *gin.Context) {
+	var input domain.Capability
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.UpsertEquipment(c.Request.Context(), principal(c), input)
 	if err != nil {
 		writeServiceError(c, err)
 		return

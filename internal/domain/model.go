@@ -35,6 +35,7 @@ type ServiceItem struct {
 	Category         string   `json:"category"`
 	Requirement      string   `json:"requirement"`
 	System           string   `json:"system"`
+	SystemLevel      string   `json:"system_level"`
 	Special          string   `json:"special"`
 	TestMode         string   `json:"test_mode"`
 	TeamLeadID       string   `json:"team_lead_id,omitempty"`
