@@ -98,6 +98,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
+	api.GET("/personnel", requireAny("project.team.assign", "project.execution.assign"), h.listPersonnel)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
 	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
@@ -187,6 +188,22 @@ func require(permission string) gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+// requireAny 允许持有任一列出的权限的角色访问。用于同一份数据被多个分配角色复用
+// 的只读接口（例如服务项操作台读取基础平台人员目录）。
+func requireAny(permissions ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := principal(c)
+		for _, permission := range permissions {
+			if p.Has(permission) {
+				c.Next()
+				return
+			}
+		}
+		writeError(c, http.StatusForbidden, "PM_FORBIDDEN", "当前用户没有执行此操作的权限")
+		c.Abort()
 	}
 }
 func principal(c *gin.Context) platform.Principal {
@@ -476,6 +493,38 @@ func (h *Handler) listServiceItems(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, items)
 }
+
+// listPersonnel 把基础平台负责人目录代理给服务项操作台，前端据此渲染人员下拉框，
+// 不再要求业务用户手工填写平台用户 ID。
+func (h *Handler) listPersonnel(c *gin.Context) {
+	page, err := optionalPositiveInt(c.Query("page"))
+	if err != nil {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	pageSize, err := optionalPositiveInt(c.Query("page_size"))
+	if err != nil || pageSize > 50 {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	result, err := h.service.ListPersonnel(c.Request.Context(), principal(c), c.Query("keyword"), c.Query("user_id"), page, pageSize)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
+}
+
+func optionalPositiveInt(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0, application.ErrValidation
+	}
+	return parsed, nil
+}
 func (h *Handler) confirmServiceItems(c *gin.Context) {
 	var input struct {
 		IDs []string `json:"ids"`
@@ -696,6 +745,8 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):
 		writeError(c, http.StatusServiceUnavailable, "PM_SERVICE_TIMEOUT", "服务处理超时，请稍后重试")
+	case errors.Is(err, application.ErrPersonnelUnavailable):
+		writeError(c, http.StatusServiceUnavailable, "PM_PERSONNEL_UNAVAILABLE", "基础平台人员目录尚未配置或暂不可用")
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}

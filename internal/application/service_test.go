@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/j-s-te/project-management/internal/domain"
@@ -156,5 +157,32 @@ func TestFullDataScopeCanManageTenantWideRules(t *testing.T) {
 	principal := principalWith("project_rule.manage", platform.DataScope{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"})
 	if _, err := service.CreateRule(context.Background(), principal, domain.Rule{Name: "规则", Scope: "tenant"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type personnelStub struct {
+	page platform.OwnerDirectoryPage
+	err  error
+}
+
+func (stub personnelStub) List(context.Context, platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	return stub.page, stub.err
+}
+
+func TestListPersonnelRequiresAssignmentPermissionAndConfiguredDirectory(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}}
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "", "", 0, 0); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ListPersonnel() without assignment permission error = %v, want %v", err, ErrForbidden)
+	}
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "", "", 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
+		t.Fatalf("ListPersonnel() without directory error = %v, want %v", err, ErrPersonnelUnavailable)
+	}
+	service.Personnel = personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "user-1", DisplayName: "张三"}}, Page: 1, PageSize: 50, Total: 1}}
+	page, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "张", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].UserID != "user-1" {
+		t.Fatalf("unexpected page: %#v", page)
 	}
 }
