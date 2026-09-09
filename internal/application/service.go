@@ -19,6 +19,9 @@ var (
 	ErrValidation = errors.New("validation failed")
 	ErrConflict   = errors.New("resource state conflict")
 	ErrForbidden  = errors.New("operation is outside the authorized project scope")
+	// ErrServiceTimeout 表示同步等待后端工作流在约定时间内没有完成。
+	// 前端应提示用户稍后重试，而不是让网关吞掉请求并返回 504。
+	ErrServiceTimeout = errors.New("service processing timeout")
 )
 
 type Repository interface {
@@ -180,12 +183,23 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 	}
 	input := workflows.ConfirmServiceItemsInput{TenantID: p.TenantID, IDs: ids, ActorUserID: p.UserID}
 	workflowID := fmt.Sprintf("project-service-items-confirm:%s:%s", p.TenantID, ulid.Make().String())
-	run, err := s.Temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: workflowID, TaskQueue: s.TaskQueue}, workflows.ConfirmServiceItemsWorkflowName, input)
+	// 为工作流设置明确的执行超时：确认拆解会被 API 同步等待，若 Worker 未就绪或活动持续失败，
+	// 该超时会终止工作流，避免它在后台无限期运行（进一步从根上杜绝网关 504）。
+	run, err := s.Temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: workflowID, TaskQueue: s.TaskQueue, WorkflowExecutionTimeout: 2 * time.Minute}, workflows.ConfirmServiceItemsWorkflowName, input)
 	if err != nil {
 		return nil, err
 	}
+	// 确认拆解本应是秒级的事务性写入，却在请求路径上同步等待 Temporal 工作流。
+	// 若工作流因 Worker 未就绪、活动重试或数据库锁等待而长时间不返回，会被网关默认的
+	// proxy_read_timeout(60s) 直接打成 504。这里给等待加一个硬超时并返回明确错误，
+	// 让用户看到“处理超时请重试”而不是网关错误页；工作流随后由自身的执行超时收敛。
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	var result workflows.ConfirmServiceItemsResult
-	if err := run.Get(ctx, &result); err != nil {
+	if err := run.Get(waitCtx, &result); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrServiceTimeout
+		}
 		return nil, err
 	}
 	return result.Items, nil
