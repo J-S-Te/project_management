@@ -694,6 +694,8 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "请求参数不合法")
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
+	case errors.Is(err, application.ErrServiceTimeout):
+		writeError(c, http.StatusServiceUnavailable, "PM_SERVICE_TIMEOUT", "服务处理超时，请稍后重试")
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}
