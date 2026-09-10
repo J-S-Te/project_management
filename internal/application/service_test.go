@@ -172,16 +172,20 @@ func (stub personnelStub) List(context.Context, platform.OwnerDirectoryQuery) (p
 	return stub.page, stub.err
 }
 
-func TestListPersonnelRequiresAssignmentPermissionAndConfiguredDirectory(t *testing.T) {
+// 人员目录是操作台表单的下拉数据源：project.read 即可读取，assign 权限继续保留兼容；
+// 未配置目录时返回“目录不可用”，完全没有目录读权限时才是越权。
+func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *testing.T) {
 	service := &Service{Repo: &scopeRepository{}}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "", "", 0, 0); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("ListPersonnel() without assignment permission error = %v, want %v", err, ErrForbidden)
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", 0, 0); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ListPersonnel() without directory read permission error = %v, want %v", err, ErrForbidden)
 	}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "", "", 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
-		t.Fatalf("ListPersonnel() without directory error = %v, want %v", err, ErrPersonnelUnavailable)
+	for _, permission := range []string{"project.read", "project.team.assign", "project.execution.assign"} {
+		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
+			t.Fatalf("ListPersonnel() with %s and no directory error = %v, want %v", permission, err, ErrPersonnelUnavailable)
+		}
 	}
 	service.Personnel = personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "user-1", DisplayName: "张三"}}, Page: 1, PageSize: 50, Total: 1}}
-	page, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "张", "", 0, 0)
+	page, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "张", "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
