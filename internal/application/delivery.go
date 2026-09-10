@@ -494,7 +494,7 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 	return result, nil
 }
 func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, typ string) ([]domain.Capability, error) {
-	if err := requireApplicationAuthorization(p, "project.resource.read"); err != nil {
+	if err := requireDirectoryRead(p, "project.read", "project.resource.read"); err != nil {
 		return nil, err
 	}
 	repo, e := s.deliveryRepo()
@@ -505,7 +505,7 @@ func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, ty
 }
 
 func (s *Service) ListEquipment(ctx context.Context, p platform.Principal) ([]domain.Capability, error) {
-	if err := requireApplicationAuthorization(p, "project.device.read"); err != nil {
+	if err := requireDirectoryRead(p, "project.read", "project.device.read"); err != nil {
 		return nil, err
 	}
 	repo, e := s.deliveryRepo()

@@ -496,6 +496,29 @@ func TestMissingPermissionIsForbidden(t *testing.T) {
 		t.Fatalf("status=%d", response.Code)
 	}
 }
+// 人员、设备与能力码是操作台表单的下拉数据源。这些只读接口以 project.read 为基线：
+// 除超级管理员外，项目经理等角色同样需要渲染表单，历史上用 assign/manage 权限把守会
+// 让非管理员角色整体加载失败。
+func TestDirectoryReadsAreAvailableToProjectReaders(t *testing.T) {
+	projectManager := map[string]bool{
+		"project.read": true, "project.resource.read": true, "project.implementation.plan": true,
+		"project.field.complete": true, "service_item.confirm": true,
+	}
+	paths := []string{"/api/v1/personnel?page=1&page_size=50", "/api/v1/capabilities", "/api/v1/equipment"}
+	handler := router(t, projectManager, nil)
+	for _, path := range paths {
+		if response := perform(handler, http.MethodGet, path, ""); response.Code == http.StatusForbidden {
+			t.Fatalf("project reader denied on %s: %s", path, response.Body.String())
+		}
+	}
+	reader := router(t, map[string]bool{}, nil)
+	for _, path := range paths {
+		if response := perform(reader, http.MethodGet, path, ""); response.Code != http.StatusForbidden {
+			t.Fatalf("principal without project.read reached %s: status=%d", path, response.Code)
+		}
+	}
+}
+
 func TestPermissionWithoutDataScopeIsForbidden(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}

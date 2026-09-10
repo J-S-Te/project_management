@@ -98,7 +98,10 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
-	api.GET("/personnel", requireAny("project.team.assign", "project.execution.assign"), h.listPersonnel)
+	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
+	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
+	// 这些表单，而分配、指派、维护等写操作仍由各自的 assign/manage 权限单独把守。
+	api.GET("/personnel", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.listPersonnel)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
 	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
@@ -109,11 +112,11 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
 	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
-	api.GET("/capabilities", require("project.resource.read"), h.listCapabilities)
+	api.GET("/capabilities", requireAny("project.read", "project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
 	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
 	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
-	api.GET("/equipment", require("project.device.read"), h.listEquipment)
+	api.GET("/equipment", requireAny("project.read", "project.device.read"), h.listEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)

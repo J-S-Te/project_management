@@ -92,7 +92,9 @@ func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, pr
 // ListPersonnel 从基础平台负责人目录读取可选人员，供服务项操作台选择团队负责人、
 // 项目经理和工程师。只有具备分配权限的角色能读取，避免把平台人员清单暴露给纯查看角色。
 func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keyword, userID string, page, pageSize int) (platform.OwnerDirectoryPage, error) {
-	if !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
+	// 人员目录只读，与 /personnel 路由守卫保持一致：project.read 是基线，保留 assign 权限
+	// 是为了兼容只授予分配权限的角色定义。
+	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
 		return platform.OwnerDirectoryPage{}, ErrForbidden
 	}
 	if s.Personnel == nil {
@@ -315,6 +317,21 @@ func requireApplicationAuthorization(p platform.Principal, permission string) er
 		return ErrForbidden
 	}
 	return nil
+}
+
+// requireDirectoryRead 授权只读目录接口（人员目录、设备、能力码）。这些接口只提供操作台
+// 表单的下拉数据源，凡是参与项目工作的角色都要能渲染表单，因此统一以 project.read 为基线；
+// 分配、指派、维护等写操作仍由各自的 assign/manage 权限把守。数据范围约束保持不变。
+func requireDirectoryRead(p platform.Principal, permissions ...string) error {
+	if !p.HasFullDataScope() {
+		return ErrForbidden
+	}
+	for _, permission := range permissions {
+		if p.Has(permission) {
+			return nil
+		}
+	}
+	return ErrForbidden
 }
 
 func contains(values []string, expected string) bool {
