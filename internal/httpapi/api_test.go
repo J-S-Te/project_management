@@ -87,11 +87,11 @@ func (r *repo) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent)
 func (r *repo) ListDeliveryEvents(_ context.Context, _ platform.ScopeFilter, project string) ([]domain.DeliveryEvent, error) {
 	return r.events, nil
 }
-func (r *repo) FindProjectForDeviation(_ context.Context, _ platform.ScopeFilter, _ string) (string, error) {
+func (r *repo) FindProjectForDeviation(_ context.Context, _ platform.ScopeFilter, _ string) (string, string, error) {
 	if len(r.projects) == 0 {
-		return "", application.ErrNotFound
+		return "", "", application.ErrNotFound
 	}
-	return r.projects[0].ID, nil
+	return r.projects[0].ID, "", nil
 }
 func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
 	r.capabilities = append(r.capabilities, item)

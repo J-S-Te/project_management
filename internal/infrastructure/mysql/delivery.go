@@ -267,16 +267,16 @@ func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.Sco
 	return out, nil
 }
 
-func (r *Repository) FindProjectForDeviation(ctx context.Context, filter platform.ScopeFilter, deviationID string) (string, error) {
+func (r *Repository) FindProjectForDeviation(ctx context.Context, filter platform.ScopeFilter, deviationID string) (string, string, error) {
 	projects := applyProjectScope(r.db.WithContext(ctx).Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
 	var record deliveryEventRecord
 	err := r.db.WithContext(ctx).
 		Where("tenant_id = ? AND project_id IN (?) AND event_type = ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.deviation_id')) = ?", filter.TenantID, projects, application.EventDeviationReported, deviationID).
 		Take(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", application.ErrNotFound
+		return "", "", application.ErrNotFound
 	}
-	return record.ProjectID, err
+	return record.ProjectID, record.ServiceItemID, err
 }
 
 func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capability, actor string) (domain.Capability, error) {

@@ -35,7 +35,7 @@ type DeliveryRepository interface {
 	SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error
 	ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error
 	ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error)
-	FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, error)
+	FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error)
 	UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error)
 	ListCapabilities(context.Context, string, string) ([]domain.Capability, error)
 	FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error)
@@ -278,14 +278,15 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 	if err != nil {
 		return err
 	}
-	if _, err := repo.FindProjectForDeviation(ctx, filter, deviationID); err != nil {
+	projectID, itemID, err := repo.FindProjectForDeviation(ctx, filter, deviationID)
+	if err != nil {
 		return err
 	}
 	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
 	if decision != "RELEASE" && decision != "TERMINATE" && decision != "RETEST" {
 		return ErrValidation
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", "", EventDeviationReviewed, map[string]any{"deviation_id": deviationID, "decision": decision, "comment": input.Comment}))
+	return s.applyEvent(ctx, deliveryEvent(p, projectID, itemID, EventDeviationReviewed, map[string]any{"deviation_id": deviationID, "decision": decision, "comment": input.Comment}))
 }
 
 func (s *Service) CompleteFieldImplementation(ctx context.Context, p platform.Principal, projectID string) error {
