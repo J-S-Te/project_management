@@ -806,8 +806,12 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusForbidden, "PM_SCOPE_FORBIDDEN", "资源不在当前授权数据范围内")
 	case errors.Is(err, application.ErrNotFound):
 		writeError(c, http.StatusNotFound, "PM_NOT_FOUND", "资源不存在")
+	case errors.Is(err, application.ErrPrecondition):
+		// 请求合法但服务项尚未走到该步骤：409 + 具体缺哪一步，而不是让用户以为填错了表单。
+		writeError(c, http.StatusConflict, "PM_PRECONDITION_FAILED", serviceMessage(err, "服务项当前状态不满足该操作的前置条件"))
 	case errors.Is(err, application.ErrValidation):
-		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "请求参数不合法")
+		// 服务层可携带字段级原因（例如缺哪个合规要素），优先展示它。
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", serviceMessage(err, "请求参数不合法"))
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):
@@ -817,6 +821,14 @@ func writeServiceError(c *gin.Context, err error) {
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}
+}
+
+// serviceMessage 优先使用服务层给出的用户可读原因，缺失时回落到固定的通用文案。
+func serviceMessage(err error, fallback string) string {
+	if reason := strings.TrimSpace(application.UserMessage(err)); reason != "" {
+		return reason
+	}
+	return fallback
 }
 func writeData(c *gin.Context, status int, data any) { c.JSON(status, gin.H{"data": data}) }
 func writeError(c *gin.Context, status int, code, message string) {
