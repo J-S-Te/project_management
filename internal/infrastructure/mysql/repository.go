@@ -20,9 +20,6 @@ func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
 func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, q, status string) ([]domain.Project, error) {
 	query := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project")
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
 	if q = strings.TrimSpace(q); q != "" {
 		like := "%" + q + "%"
 		query = query.Where("id LIKE ? OR name LIKE ? OR customer LIKE ? OR contract LIKE ? OR category LIKE ? OR manager LIKE ?", like, like, like, like, like, like)
@@ -31,9 +28,20 @@ func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilt
 	if err := query.Order("id DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
+	inputs, err := r.projectStatusInputs(ctx, filter, projectIDsOf(records))
+	if err != nil {
+		return nil, err
+	}
+	wanted := strings.TrimSpace(status)
 	items := make([]domain.Project, 0, len(records))
 	for _, record := range records {
-		items = append(items, projectFromRecord(record))
+		project := projectFromRecord(record)
+		project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+		// 状态过滤必须作用于唯一的派生状态，而不是可能滞后的存储列。
+		if wanted != "" && project.Status != wanted {
+			continue
+		}
+		items = append(items, project)
 	}
 	return items, nil
 }
@@ -43,7 +51,47 @@ func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
-	return projectFromRecord(record), err
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project := projectFromRecord(record)
+	inputs, err := r.projectStatusInputs(ctx, filter, []string{record.ID})
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+	return project, nil
+}
+
+// projectIDsOf 提取项目主键，供后续按项目聚合服务项状态。
+func projectIDsOf(records []projectRecord) []string {
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.ID)
+	}
+	return ids
+}
+
+// projectStatusInputs 按项目聚合服务项状态，作为派生项目唯一状态的输入。
+// 复用服务项数据范围，确保与列表查询处于同一可见边界。
+func (r *Repository) projectStatusInputs(ctx context.Context, filter platform.ScopeFilter, projectIDs []string) (map[string][]domain.ProjectStatusItem, error) {
+	result := map[string][]domain.ProjectStatusItem{}
+	if len(projectIDs) == 0 {
+		return result, nil
+	}
+	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
+	var rows []struct {
+		ProjectID    string
+		Status       string
+		ReportStatus string
+	}
+	if err := query.Select("project_id, status, report_status").Where("project_id IN ?", projectIDs).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		result[row.ProjectID] = append(result[row.ProjectID], domain.ProjectStatusItem{Status: row.Status, ReportStatus: row.ReportStatus})
+	}
+	return result, nil
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
 	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
@@ -331,18 +379,21 @@ func ruleRecordFor(item domain.Rule, now time.Time) (any, error) {
 }
 func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
 	result := domain.Dashboard{StatusCounts: map[string]int{}}
-	var records []struct {
-		Status string
-		Count  int
-	}
-	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Select("status, COUNT(*) AS count").Group("status").Scan(&records).Error; err != nil {
+	// 统计口径必须与列表/详情一致：先派生唯一状态，再计数，避免仪表盘与项目列表对不上。
+	var projects []projectRecord
+	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Select("id, status, supplement_status").Find(&projects).Error; err != nil {
 		return result, err
 	}
-	for _, row := range records {
-		result.StatusCounts[row.Status] = row.Count
-		result.ProjectCount += row.Count
-		if row.Status != "已完成" {
-			result.InFlightProjects += row.Count
+	inputs, err := r.projectStatusInputs(ctx, filter, projectIDsOf(projects))
+	if err != nil {
+		return result, err
+	}
+	for _, project := range projects {
+		status := domain.DeriveProjectStatus(inputs[project.ID], project.SupplementStatus, project.Status)
+		result.StatusCounts[status]++
+		result.ProjectCount++
+		if status != domain.ProjectStatusCompleted {
+			result.InFlightProjects++
 		}
 	}
 	var riskCount int64

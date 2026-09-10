@@ -21,7 +21,16 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
-	return projectFromRecord(record), err
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project := projectFromRecord(record)
+	inputs, err := r.projectStatusInputs(ctx, filter, []string{record.ID})
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+	return project, nil
 }
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {

@@ -490,7 +490,7 @@ func (h *Handler) adjustDecomposition(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusAccepted, map[string]string{"status": "SUPPLEMENT_REQUIRED"})
+	h.writeProjectStatus(c, http.StatusAccepted, c.Param("id"))
 }
 func (h *Handler) listDeliveryEvents(c *gin.Context) {
 	items, err := h.service.ListDeliveryEvents(c.Request.Context(), principal(c), c.Query("project_id"))
@@ -505,7 +505,17 @@ func (h *Handler) completeFieldImplementation(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
+	h.writeProjectStatus(c, http.StatusOK, c.Param("id"))
+}
+
+// writeProjectStatus 返回项目的唯一派生状态，避免写接口另起一套状态词汇。
+func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string) {
+	project, err := h.service.GetProject(c.Request.Context(), principal(c), projectID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
 	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
