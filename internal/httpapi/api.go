@@ -376,18 +376,32 @@ func (h *Handler) navigation(c *gin.Context) {
 	})
 }
 
+// allNavigationSections 是本子系统前端已实现的全部工作区栏目，顺序与页面分组一致。
+var allNavigationSections = []string{
+	"dashboard", "monitoring",
+	"projects", "decomposition",
+	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
+	"implementation", "exceptions", "standards", "reports",
+	"split-rules", "warning-rules", "automations", "permissions", "sla",
+}
+
 func navigationSections(roles []string) []string {
 	profiles := map[string][]string{
-		"admin":              {"split-rules", "warning-rules", "automations", "permissions"},
-		"system_admin":       {"split-rules", "warning-rules", "automations", "permissions"},
-		"business_admin":     {"projects", "decomposition", "allocation"},
-		"team_lead":          {"projects", "allocation", "assignments", "implementation", "exceptions"},
-		"technical_director": {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
-		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
-		"device_admin":       {"equipment"},
+		// 拥有全部应用权限的管理员必须看到完整功能模块，而不是只有配置页。
+		"admin":        allNavigationSections,
+		"system_admin": allNavigationSections,
+		// 各业务角色只看与本职责相关的栏目；服务端仍是最终授权边界。
+		"business_admin":       {"projects", "decomposition", "allocation"},
+		"team_lead":            {"projects", "allocation", "assignments", "implementation", "exceptions"},
+		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
+		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
+		"device_admin":         {"dashboard", "projects", "equipment"},
+		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "permissions", "sla"},
+		"engineer":             {"projects", "implementation", "exceptions"},
+		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
 	}
 	seen := map[string]bool{}
-	sections := make([]string, 0, 10)
+	sections := make([]string, 0, len(allNavigationSections))
 	for _, role := range roles {
 		for _, section := range profiles[strings.ToLower(strings.TrimSpace(role))] {
 			if !seen[section] {
