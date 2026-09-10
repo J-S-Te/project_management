@@ -73,25 +73,34 @@ func projectIDsOf(records []projectRecord) []string {
 }
 
 // projectStatusInputs 按项目聚合服务项状态，作为派生项目唯一状态的输入。
-// 复用服务项数据范围，确保与列表查询处于同一可见边界。
 func (r *Repository) projectStatusInputs(ctx context.Context, filter platform.ScopeFilter, projectIDs []string) (map[string][]domain.ProjectStatusItem, error) {
 	result := map[string][]domain.ProjectStatusItem{}
 	if len(projectIDs) == 0 {
 		return result, nil
 	}
-	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
-	var rows []struct {
-		ProjectID    string
-		Status       string
-		ReportStatus string
-	}
-	if err := query.Select("project_id, status, report_status").Where("project_id IN ?", projectIDs).Scan(&rows).Error; err != nil {
+	var rows []projectStatusRow
+	if err := projectStatusInputQuery(r.db.WithContext(ctx), filter, projectIDs).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
 		result[row.ProjectID] = append(result[row.ProjectID], domain.ProjectStatusItem{Status: row.Status, ReportStatus: row.ReportStatus})
 	}
 	return result, nil
+}
+
+// projectStatusRow 是派生唯一状态所需的最小服务项投影。
+type projectStatusRow struct {
+	ProjectID    string
+	Status       string
+	ReportStatus string
+}
+
+// projectStatusInputQuery 构造服务项状态投影查询，复用服务项数据范围，
+// 保证派生结果与列表查询处于同一可见边界。
+func projectStatusInputQuery(db *gorm.DB, filter platform.ScopeFilter, projectIDs []string) *gorm.DB {
+	return applyServiceItemScope(db.Model(&serviceItemRecord{}), db, filter).
+		Select("project_id, status, report_status").
+		Where("project_id IN ?", projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
 	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error

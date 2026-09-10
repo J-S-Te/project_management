@@ -50,3 +50,16 @@ func TestEmptyBusinessScopeFailsClosedInSQL(t *testing.T) {
 		t.Fatalf("empty scope SQL did not fail closed: %s", sql)
 	}
 }
+
+// 派生项目状态的输入查询必须复用服务项数据范围，否则不同角色会看到不一致或越权的派生结果。
+func TestProjectStatusInputQueryAppliesServiceItemScope(t *testing.T) {
+	filter := platform.ScopeFilter{TenantID: "tenant-1", IdentityID: "identity-1", AllowSelf: true}
+	var rows []projectStatusRow
+	statement := projectStatusInputQuery(dryRunDB(t), filter, []string{"PJ-1"}).Find(&rows).Statement
+	sql := statement.SQL.String()
+	for _, expected := range []string{"report_status", "pm_service_item.tenant_id = ?", "pm_service_item.project_id IN", "scope_item.team_lead_id = ?"} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("project status input SQL missing %q: %s", expected, sql)
+		}
+	}
+}
