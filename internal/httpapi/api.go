@@ -111,6 +111,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
 	api.GET("/capabilities", require("project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
+	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
+	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
 	api.GET("/equipment", require("project.device.read"), h.listEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
 	api.GET("/rules", require("project.read"), h.listRules)

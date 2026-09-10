@@ -307,12 +307,26 @@ func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, 
 	}
 	return repo.ListDeliveryEvents(ctx, filter, projectID)
 }
+// CapabilityImportResult 汇总一次能力记录导出的导入结果。
+type CapabilityImportResult struct {
+	Imported int      `json:"imported"`
+	Skipped  int      `json:"skipped"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+func validateCapability(item domain.Capability) error {
+	if (item.ResourceType != "PERSON" && item.ResourceType != "EQUIPMENT") || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
+		return ErrValidation
+	}
+	return nil
+}
+
 func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, item domain.Capability) (domain.Capability, error) {
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
 		return item, err
 	}
-	if item.ResourceType != "PERSON" && item.ResourceType != "EQUIPMENT" || item.ResourceID == "" || item.ResourceName == "" || len(item.Codes) == 0 {
-		return item, ErrValidation
+	if err := validateCapability(item); err != nil {
+		return item, err
 	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
@@ -321,6 +335,36 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	item.TenantID = p.TenantID
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	return repo.UpsertCapability(ctx, item, p.UserID)
+}
+
+// ImportCapabilities 批量写入能力记录（人员资质或设备能力）。逐行校验并独立写入，
+// 单行失败只累计跳过原因，不影响其余行，避免一条脏数据阻塞整批导入。
+func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, rows []domain.Capability) (CapabilityImportResult, error) {
+	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
+		return CapabilityImportResult{}, err
+	}
+	repo, e := s.deliveryRepo()
+	if e != nil {
+		return CapabilityImportResult{}, e
+	}
+	result := CapabilityImportResult{}
+	for i := range rows {
+		line := fmt.Sprintf("数据行 %d", i+1)
+		if err := validateCapability(rows[i]); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": 资源类型、编号、名称或能力码不完整")
+			continue
+		}
+		rows[i].TenantID = p.TenantID
+		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
+		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": "+err.Error())
+			continue
+		}
+		result.Imported++
+	}
+	return result, nil
 }
 func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, typ string) ([]domain.Capability, error) {
 	if err := requireApplicationAuthorization(p, "project.resource.read"); err != nil {
