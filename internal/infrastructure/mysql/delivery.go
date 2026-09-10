@@ -154,12 +154,49 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if item.ProjectManagerID == "" || item.ConflictStatus != "PASSED" {
 			return application.ErrValidation
 		}
+		if item.Special == "是" && item.TechReviewStatus != "APPROVED" {
+			return application.ErrValidation
+		}
 		if item.TestMode == "PENETRATION" && stringValue(event.Payload, "penetration_test_plan") == "" {
 			return application.ErrValidation
 		}
 		updates["planned_start"] = rfc3339Value(event.Payload, "planned_start")
 		updates["planned_end"] = rfc3339Value(event.Payload, "planned_end")
 		updates["status"] = "待实施"
+		if err := upsertImplPlan(tx, item, event); err != nil {
+			return err
+		}
+	case application.EventSpecialMethodReviewed:
+		if item.Special != "是" {
+			return application.ErrValidation
+		}
+		decision := strings.ToUpper(stringValue(event.Payload, "decision"))
+		if decision != "APPROVED" && decision != "REJECTED" {
+			return application.ErrValidation
+		}
+		if item.TechReviewStatus != "PENDING" && item.TechReviewStatus != "REJECTED" {
+			return application.ErrValidation
+		}
+		updates["tech_review_status"] = decision
+		updates["tech_reviewed_at"] = event.CreatedAt
+		updates["tech_reviewed_by"] = event.ActorUserID
+		updates["tech_review_comment"] = stringValue(event.Payload, "comment")
+	case application.EventReportStatusUpdated:
+		if item.Status != "现场实施完成" {
+			return application.ErrValidation
+		}
+		phase := strings.ToUpper(stringValue(event.Payload, "phase"))
+		if !allowedReportPhase(phase) {
+			return application.ErrValidation
+		}
+		current := reportPhaseRank(item.ReportStatus)
+		next := reportPhaseRank(phase)
+		if next <= current {
+			return application.ErrValidation
+		}
+		updates["report_status"] = phase
+		updates["report_updated_at"] = event.CreatedAt
+		updates["report_updated_by"] = event.ActorUserID
 	case application.EventPreparationStarted:
 		if item.Status != "待实施" {
 			return application.ErrValidation
@@ -215,6 +252,19 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		if err := json.Unmarshal(encoded, &items); err != nil || len(items) == 0 {
 			return application.ErrValidation
 		}
+		var oldItems []serviceItemRecord
+		if err := tx.Where("tenant_id=? AND project_id=?", project.TenantID, project.ID).Find(&oldItems).Error; err != nil {
+			return err
+		}
+		oldIDs := make([]string, 0, len(oldItems))
+		for _, old := range oldItems {
+			oldIDs = append(oldIDs, old.ID)
+		}
+		if len(oldIDs) > 0 {
+			if err := tx.Where("tenant_id=? AND service_item_id IN ?", project.TenantID, oldIDs).Delete(&implPlanRecord{}).Error; err != nil {
+				return err
+			}
+		}
 		if err := tx.Where("tenant_id=? AND project_id=?", project.TenantID, project.ID).Delete(&serviceItemRecord{}).Error; err != nil {
 			return err
 		}
@@ -238,7 +288,7 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		}
 		updates["status"] = "现场实施完成"
 		updates["progress"] = 80
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status=?", project.TenantID, project.ID, "实施中").Updates(map[string]any{"status": "现场实施完成", "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error; err != nil {
+		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status=?", project.TenantID, project.ID, "实施中").Updates(map[string]any{"status": "现场实施完成", "report_status": "COMPILING", "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error; err != nil {
 			return err
 		}
 	}
@@ -330,6 +380,59 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 		return err
 	}
 	return tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, Payload: payload, CreatedAt: event.CreatedAt}).Error
+}
+
+// upsertImplPlan 把实施计划（含渗透测试专项合规要素）落到 pm_impl_plan，与服务项 1:1。
+// 同名唯一键冲突时原地刷新，保证重复发布实施计划不会产生脏数据。
+func upsertImplPlan(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	record := implPlanRecord{
+		ID:                  ulid.Make().String(),
+		TenantID:            item.TenantID,
+		ServiceItemID:       item.ID,
+		PlannedStart:        rfc3339Time(event.Payload, "planned_start"),
+		PlannedEnd:          rfc3339Time(event.Payload, "planned_end"),
+		SitePlan:            stringValue(event.Payload, "site_plan"),
+		PenetrationTestPlan: stringValue(event.Payload, "penetration_test_plan"),
+		AuthDocNo:           stringValue(event.Payload, "auth_doc_no"),
+		AuthStart:           rfc3339Time(event.Payload, "auth_start"),
+		AuthEnd:             rfc3339Time(event.Payload, "auth_end"),
+		AuthScope:           stringValue(event.Payload, "auth_scope"),
+		TestScope:           stringValue(event.Payload, "test_scope"),
+		TestWindow:          stringValue(event.Payload, "test_window"),
+		EmergencyContact:    stringValue(event.Payload, "emergency_contact"),
+		RollbackPlan:        stringValue(event.Payload, "rollback_plan"),
+		UpdatedAt:           event.CreatedAt,
+		UpdatedBy:           event.ActorUserID,
+	}
+	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "service_item_id"}}, DoUpdates: clause.AssignmentColumns([]string{"planned_start", "planned_end", "site_plan", "penetration_test_plan", "auth_doc_no", "auth_start", "auth_end", "auth_scope", "test_scope", "test_window", "emergency_contact", "rollback_plan", "updated_at", "updated_by"})}).Create(&record).Error
+}
+
+func rfc3339Time(values map[string]any, key string) *time.Time {
+	value := stringValue(values, key)
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+// allowedReportPhase 报告从编制到归档的推进序列；每个阶段只允许向后推进。
+func allowedReportPhase(phase string) bool {
+	return reportPhaseRank(phase) > 0
+}
+func reportPhaseRank(phase string) int {
+	switch strings.ToUpper(strings.TrimSpace(phase)) {
+	case "COMPILING":
+		return 1
+	case "REVIEWED":
+		return 2
+	case "ISSUED":
+		return 3
+	case "ARCHIVED":
+		return 4
+	default:
+		return 0
+	}
 }
 func jsonValue(v any) []byte { b, _ := json.Marshal(v); return b }
 func stringValue(values map[string]any, key string) string {

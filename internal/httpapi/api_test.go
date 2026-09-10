@@ -139,7 +139,11 @@ func (r *repo) CreateRule(_ context.Context, item domain.Rule) (domain.Rule, err
 	r.rules = append(r.rules, item)
 	return item, nil
 }
-func (r *repo) SetRuleEnabled(_ context.Context, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
+func (r *repo) UpdateRule(_ context.Context, _ string, _ string, id int64, item domain.Rule) (domain.Rule, error) {
+	item.ID = id
+	return item, nil
+}
+func (r *repo) SetRuleEnabled(_ context.Context, _ string, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
 	return domain.Rule{ID: id, Enabled: enabled}, nil
 }
 func (r *repo) Dashboard(_ context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
