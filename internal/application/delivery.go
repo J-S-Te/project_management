@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -387,11 +388,54 @@ func validateCapability(item domain.Capability) error {
 	return nil
 }
 
+// resourceIDPrefix 区分人员与设备的资源编号前缀，避免两类编号混用。
+func resourceIDPrefix(resourceType string) string {
+	if resourceType == "EQUIPMENT" {
+		return "EQ-"
+	}
+	return "P-"
+}
+
+// nextResourceID 依据现有记录为人员/设备生成下一个可用编号（P-0001 / EQ-0001）。
+// 已占用的编号会被跳过，兼容历史手工编号与同批次导入。
+func nextResourceID(existing []domain.Capability, resourceType string) string {
+	prefix := resourceIDPrefix(resourceType)
+	used := map[string]bool{}
+	maxSequence := 0
+	for _, item := range existing {
+		if item.ResourceType != resourceType {
+			continue
+		}
+		used[item.ResourceID] = true
+		if !strings.HasPrefix(item.ResourceID, prefix) {
+			continue
+		}
+		if sequence, err := strconv.Atoi(strings.TrimPrefix(item.ResourceID, prefix)); err == nil && sequence > maxSequence {
+			maxSequence = sequence
+		}
+	}
+	for {
+		maxSequence++
+		candidate := fmt.Sprintf("%s%04d", prefix, maxSequence)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+// assignResourceID 在调用方未提供编号时自动生成，保证人员与设备编号各自独立且可读。
+func assignResourceID(existing []domain.Capability, item *domain.Capability) {
+	if strings.TrimSpace(item.ResourceID) != "" {
+		return
+	}
+	if item.ResourceType != "PERSON" && item.ResourceType != "EQUIPMENT" {
+		return
+	}
+	item.ResourceID = nextResourceID(existing, item.ResourceType)
+}
+
 func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, item domain.Capability) (domain.Capability, error) {
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
-		return item, err
-	}
-	if err := validateCapability(item); err != nil {
 		return item, err
 	}
 	repo, e := s.deliveryRepo()
@@ -399,6 +443,16 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, e
 	}
 	item.TenantID = p.TenantID
+	if strings.TrimSpace(item.ResourceID) == "" {
+		existing, err := repo.ListCapabilities(ctx, p.TenantID, item.ResourceType)
+		if err != nil {
+			return item, err
+		}
+		assignResourceID(existing, &item)
+	}
+	if err := validateCapability(item); err != nil {
+		return item, err
+	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
@@ -414,13 +468,20 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 		return CapabilityImportResult{}, e
 	}
 	result := CapabilityImportResult{}
+	// 导入同样支持编号留空：按类型顺延生成，且本批次内逐行消耗，避免整批手工编号。
+	known, err := repo.ListCapabilities(ctx, p.TenantID, "")
+	if err != nil {
+		return CapabilityImportResult{}, err
+	}
 	for i := range rows {
 		line := fmt.Sprintf("数据行 %d", i+1)
+		assignResourceID(known, &rows[i])
 		if err := validateCapability(rows[i]); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": 资源类型、编号、名称或能力码不完整")
 			continue
 		}
+		known = append(known, rows[i])
 		rows[i].TenantID = p.TenantID
 		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
 		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
