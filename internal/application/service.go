@@ -24,7 +24,36 @@ var (
 	ErrServiceTimeout = errors.New("service processing timeout")
 	// ErrPersonnelUnavailable 表示项目子系统尚未开通基础平台人员目录集成。
 	ErrPersonnelUnavailable = errors.New("platform personnel directory is unavailable")
+	// ErrPrecondition 表示请求本身合法，但服务项尚未满足该操作的前置状态，
+	// 例如未完成执行指派、能力校验未通过、特殊方法未复核。它与 ErrValidation
+	// 必须区分：前者要告诉用户"先去哪一步"，后者才提示"检查输入"。
+	ErrPrecondition = errors.New("service item precondition is not satisfied")
 )
+
+// ReasonError 携带可直接展示给用户的原因说明，并保留底层错误类型，
+// 使 errors.Is 仍能匹配 ErrValidation / ErrPrecondition 等语义。
+type ReasonError struct {
+	Kind   error
+	Reason string
+}
+
+func (e ReasonError) Error() string { return e.Reason }
+func (e ReasonError) Unwrap() error { return e.Kind }
+
+// ValidationError 构造字段级参数错误，并把"哪个字段不合法"一并带给用户。
+func ValidationError(reason string) error { return ReasonError{Kind: ErrValidation, Reason: reason} }
+
+// PreconditionError 构造前置状态错误，用于提示用户还缺哪一步。
+func PreconditionError(reason string) error { return ReasonError{Kind: ErrPrecondition, Reason: reason} }
+
+// UserMessage 返回 ReasonError 中可直接展示的原因；其他错误返回空串。
+func UserMessage(err error) string {
+	var reason ReasonError
+	if errors.As(err, &reason) {
+		return reason.Reason
+	}
+	return ""
+}
 
 type Repository interface {
 	ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error)

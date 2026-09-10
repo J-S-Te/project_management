@@ -623,3 +623,49 @@ func TestRequestIDPreservesValidClientULID(t *testing.T) {
 		t.Fatalf("X-Request-ID = %q, want %q", got, id)
 	}
 }
+
+// 前置状态不满足时不能用 422「请求参数不合法」打发用户：必须 409 + 具体缺哪一步。
+func TestImplementationPlanPreconditionReturnsActionableConflict(t *testing.T) {
+	handler := router(t, map[string]bool{"project.read": true, "project.implementation.plan": true}, nil)
+	body := `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-16T02:00:00Z","site_plan":"现场实施步骤"}`
+	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", body)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	payload := response.Body.String()
+	if !strings.Contains(payload, "PM_PRECONDITION_FAILED") {
+		t.Fatalf("expected PM_PRECONDITION_FAILED, got %s", payload)
+	}
+	if !strings.Contains(payload, "指派项目经理") {
+		t.Fatalf("message must name the missing step, got %s", payload)
+	}
+	if strings.Contains(payload, "请求参数不合法") {
+		t.Fatalf("precondition must not be reported as a field error: %s", payload)
+	}
+}
+
+// 真正的字段级错误仍为 422，但必须点名具体字段。
+func TestImplementationPlanValidationNamesTheInvalidField(t *testing.T) {
+	repository := &repo{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配", ProjectManagerID: "pm-1", ConflictStatus: "PASSED"}}}
+	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", `{"planned_start":"","planned_end":"","site_plan":"现场实施步骤"}`)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "计划开始与计划结束必须是有效的日期时间") {
+		t.Fatalf("message should name the invalid fields: %s", response.Body.String())
+	}
+
+	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", `{"planned_start":"2026-09-16T02:00:00Z","planned_end":"2026-09-15T02:00:00Z","site_plan":"现场实施步骤"}`)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "计划结束时间必须晚于计划开始时间") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-16T02:00:00Z","site_plan":"   "}`)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "请填写现场计划") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}

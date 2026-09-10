@@ -228,10 +228,24 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 	if err != nil {
 		return err
 	}
+	// 先判前置状态再判字段：两者返回的错误语义不同，前端提示也不同。
+	// 前置状态不满足时用户改表单也没用，必须先去完成缺的那一步。
+	if err := CheckImplementationPlanPrecondition(PlanPrecondition{
+		Status: item.Status, ProjectManagerID: item.ProjectManagerID,
+		ConflictStatus: item.ConflictStatus, Special: item.Special, TechReviewStatus: item.TechReviewStatus,
+	}); err != nil {
+		return err
+	}
 	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
 	end, e2 := time.Parse(time.RFC3339, input.PlannedEnd)
-	if e1 != nil || e2 != nil || !end.After(start) || strings.TrimSpace(input.SitePlan) == "" {
-		return ErrValidation
+	if e1 != nil || e2 != nil {
+		return ValidationError("计划开始与计划结束必须是有效的日期时间")
+	}
+	if !end.After(start) {
+		return ValidationError("计划结束时间必须晚于计划开始时间")
+	}
+	if strings.TrimSpace(input.SitePlan) == "" {
+		return ValidationError("请填写现场计划")
 	}
 	if item.TestMode == "PENETRATION" {
 		if err := validatePenetrationCompliance(input); err != nil {
@@ -254,22 +268,82 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 	}))
 }
 
+// PlanPrecondition 是"发布实施计划"所需的最小服务项状态快照。
+// 服务层用领域对象填充它，仓储层在行锁内用记录填充它，保证两处判定同一套规则。
+type PlanPrecondition struct {
+	Status           string
+	ProjectManagerID string
+	ConflictStatus   string
+	Special          string
+	TechReviewStatus string
+}
+
+// CheckImplementationPlanPrecondition 判定服务项是否已走到"发布实施计划"这一步。
+// 应用层与仓储层共用它，避免两处守卫各自演化；同时把模糊的 422 变成可执行的指引。
+func CheckImplementationPlanPrecondition(item PlanPrecondition) error {
+	switch strings.TrimSpace(item.Status) {
+	case "待分配", "待制定计划":
+	default:
+		return PreconditionError(fmt.Sprintf("服务项当前状态为「%s」，不能发布实施计划。", strings.TrimSpace(item.Status)))
+	}
+	if strings.TrimSpace(item.ProjectManagerID) == "" {
+		return PreconditionError("请先在「任务分配」中指派项目经理。")
+	}
+	if item.ConflictStatus != "PASSED" {
+		return PreconditionError(fmt.Sprintf("请先在「任务分配」中完成能力校验（当前状态：%s）。", conflictStatusLabel(item.ConflictStatus)))
+	}
+	if item.Special == "是" && item.TechReviewStatus != "APPROVED" {
+		return PreconditionError("该服务项为特殊方法，需先通过技术总监复核后才能发布实施计划。")
+	}
+	return nil
+}
+
+// conflictStatusLabel 把排期与能力校验状态翻译成用户能理解的说明。
+func conflictStatusLabel(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "PASSED":
+		return "校验通过"
+	case "CONFLICT":
+		return "存在冲突"
+	case "", "UNCHECKED":
+		return "尚未校验"
+	default:
+		return status
+	}
+}
+
 // validatePenetrationCompliance 渗透测试专项合规要素：必须提供授权书编号、授权范围、
 // 计划测试范围、测试时间窗、应急联系人与回滚方案，且授权有效期内才能发布计划。
+// 逐项指出缺失字段，避免用户只看到笼统的"请求参数不合法"。
 func validatePenetrationCompliance(input domain.ImplementationPlanInput) error {
-	if strings.TrimSpace(input.PenetrationTestPlan) == "" ||
-		strings.TrimSpace(input.AuthDocNo) == "" ||
-		strings.TrimSpace(input.AuthScope) == "" ||
-		strings.TrimSpace(input.TestScope) == "" ||
-		strings.TrimSpace(input.TestWindow) == "" ||
-		strings.TrimSpace(input.EmergencyContact) == "" ||
-		strings.TrimSpace(input.RollbackPlan) == "" {
-		return ErrValidation
+	required := []struct {
+		value string
+		label string
+	}{
+		{input.PenetrationTestPlan, "渗透测试专项计划"},
+		{input.AuthDocNo, "授权书编号"},
+		{input.AuthScope, "授权范围"},
+		{input.TestScope, "计划测试范围"},
+		{input.TestWindow, "测试时间窗"},
+		{input.EmergencyContact, "应急联系人"},
+		{input.RollbackPlan, "回滚方案"},
+	}
+	missing := make([]string, 0, len(required))
+	for _, field := range required {
+		if strings.TrimSpace(field.value) == "" {
+			missing = append(missing, field.label)
+		}
+	}
+	if len(missing) > 0 {
+		return ValidationError("请补充渗透测试专项合规要素：" + strings.Join(missing, "、"))
 	}
 	authStart, e1 := time.Parse(time.RFC3339, input.AuthStart)
 	authEnd, e2 := time.Parse(time.RFC3339, input.AuthEnd)
-	if e1 != nil || e2 != nil || !authEnd.After(authStart) {
-		return ErrValidation
+	if e1 != nil || e2 != nil {
+		return ValidationError("授权生效与授权截止必须是有效的日期时间")
+	}
+	if !authEnd.After(authStart) {
+		return ValidationError("授权截止时间必须晚于授权生效时间")
 	}
 	return nil
 }

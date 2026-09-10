@@ -490,7 +490,7 @@ func (h *Handler) adjustDecomposition(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusAccepted, map[string]string{"status": "SUPPLEMENT_REQUIRED"})
+	h.writeProjectStatus(c, http.StatusAccepted, c.Param("id"))
 }
 func (h *Handler) listDeliveryEvents(c *gin.Context) {
 	items, err := h.service.ListDeliveryEvents(c.Request.Context(), principal(c), c.Query("project_id"))
@@ -505,7 +505,17 @@ func (h *Handler) completeFieldImplementation(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
+	h.writeProjectStatus(c, http.StatusOK, c.Param("id"))
+}
+
+// writeProjectStatus 返回项目的唯一派生状态，避免写接口另起一套状态词汇。
+func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string) {
+	project, err := h.service.GetProject(c.Request.Context(), principal(c), projectID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
 	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
@@ -806,8 +816,12 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusForbidden, "PM_SCOPE_FORBIDDEN", "资源不在当前授权数据范围内")
 	case errors.Is(err, application.ErrNotFound):
 		writeError(c, http.StatusNotFound, "PM_NOT_FOUND", "资源不存在")
+	case errors.Is(err, application.ErrPrecondition):
+		// 请求合法但服务项尚未走到该步骤：409 + 具体缺哪一步，而不是让用户以为填错了表单。
+		writeError(c, http.StatusConflict, "PM_PRECONDITION_FAILED", serviceMessage(err, "服务项当前状态不满足该操作的前置条件"))
 	case errors.Is(err, application.ErrValidation):
-		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "请求参数不合法")
+		// 服务层可携带字段级原因（例如缺哪个合规要素），优先展示它。
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", serviceMessage(err, "请求参数不合法"))
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):
@@ -817,6 +831,14 @@ func writeServiceError(c *gin.Context, err error) {
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}
+}
+
+// serviceMessage 优先使用服务层给出的用户可读原因，缺失时回落到固定的通用文案。
+func serviceMessage(err error, fallback string) string {
+	if reason := strings.TrimSpace(application.UserMessage(err)); reason != "" {
+		return reason
+	}
+	return fallback
 }
 func writeData(c *gin.Context, status int, data any) { c.JSON(status, gin.H{"data": data}) }
 func writeError(c *gin.Context, status int, code, message string) {

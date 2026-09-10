@@ -21,7 +21,16 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
-	return projectFromRecord(record), err
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project := projectFromRecord(record)
+	inputs, err := r.projectStatusInputs(ctx, filter, []string{record.ID})
+	if err != nil {
+		return domain.Project{}, err
+	}
+	project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+	return project, nil
 }
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
@@ -148,17 +157,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			updates["status"] = "待制定计划"
 		}
 	case application.EventImplementationPlanned:
-		if item.Status != "待分配" && item.Status != "待制定计划" {
-			return application.ErrValidation
-		}
-		if item.ProjectManagerID == "" || item.ConflictStatus != "PASSED" {
-			return application.ErrValidation
-		}
-		if item.Special == "是" && item.TechReviewStatus != "APPROVED" {
-			return application.ErrValidation
+		// 与 PlanImplementation 共用同一套前置规则：行锁内复查可覆盖读后状态变化的竞态，
+		// 并且仍然返回可执行的原因而不是笼统的参数错误。
+		if err := application.CheckImplementationPlanPrecondition(application.PlanPrecondition{
+			Status: item.Status, ProjectManagerID: item.ProjectManagerID,
+			ConflictStatus: item.ConflictStatus, Special: item.Special, TechReviewStatus: item.TechReviewStatus,
+		}); err != nil {
+			return err
 		}
 		if item.TestMode == "PENETRATION" && stringValue(event.Payload, "penetration_test_plan") == "" {
-			return application.ErrValidation
+			return application.ValidationError("请填写渗透测试专项计划")
 		}
 		updates["planned_start"] = rfc3339Value(event.Payload, "planned_start")
 		updates["planned_end"] = rfc3339Value(event.Payload, "planned_end")
