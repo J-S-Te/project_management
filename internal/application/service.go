@@ -35,7 +35,8 @@ type Repository interface {
 	ConfirmServiceItems(context.Context, string, []string, string) ([]domain.ServiceItem, error)
 	ListRules(context.Context, string, string) ([]domain.Rule, error)
 	CreateRule(context.Context, domain.Rule) (domain.Rule, error)
-	SetRuleEnabled(context.Context, string, int64, bool, string) (domain.Rule, error)
+	UpdateRule(context.Context, string, string, int64, domain.Rule) (domain.Rule, error)
+	SetRuleEnabled(context.Context, string, string, int64, bool, string) (domain.Rule, error)
 	Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error)
 }
 
@@ -237,21 +238,65 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
 		return input, err
 	}
-	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Scope) == "" {
-		return input, ErrValidation
-	}
-	input.TenantID = p.TenantID
+	input.Kind = strings.TrimSpace(input.Kind)
 	if input.Kind == "" {
 		input.Kind = "split-rules"
 	}
+	if strings.TrimSpace(input.Name) == "" {
+		return input, ErrValidation
+	}
+	switch input.Kind {
+	case "split-rules":
+		if strings.TrimSpace(input.Scope) == "" {
+			return input, ErrValidation
+		}
+	case "warning-rules":
+		if strings.TrimSpace(input.CheckType) == "" {
+			return input, ErrValidation
+		}
+	case "automations":
+		if strings.TrimSpace(input.Trigger) == "" || strings.TrimSpace(input.Target) == "" {
+			return input, ErrValidation
+		}
+	case "permissions":
+		if strings.TrimSpace(input.RoleCode) == "" || strings.TrimSpace(input.FieldName) == "" {
+			return input, ErrValidation
+		}
+	case "sla":
+		if strings.TrimSpace(input.Status) == "" || input.DeadlineHours <= 0 {
+			return input, ErrValidation
+		}
+	default:
+		return input, ErrValidation
+	}
+	input.TenantID = p.TenantID
+	input.UpdatedBy = p.UserID
 	input.Updated = time.Now().Format("2006-01-02 15:04")
+	if input.AccessLevel == "" {
+		input.AccessLevel = "view"
+	}
 	return s.Repo.CreateRule(ctx, input)
 }
-func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, id int64, enabled bool) (domain.Rule, error) {
+
+// UpdateRule 整行更新配置。载荷覆盖该 kind 的专属字段与启停开关。
+func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64, input domain.Rule) (domain.Rule, error) {
 	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
 		return domain.Rule{}, err
 	}
-	return s.Repo.SetRuleEnabled(ctx, p.TenantID, id, enabled, p.UserID)
+	if strings.TrimSpace(input.Name) == "" {
+		return domain.Rule{}, ErrValidation
+	}
+	input.TenantID = p.TenantID
+	input.UpdatedBy = p.UserID
+	input.Updated = time.Now().Format("2006-01-02 15:04")
+	return s.Repo.UpdateRule(ctx, p.TenantID, strings.TrimSpace(input.Kind), id, input)
+}
+
+func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind string, id int64, enabled bool) (domain.Rule, error) {
+	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+		return domain.Rule{}, err
+	}
+	return s.Repo.SetRuleEnabled(ctx, p.TenantID, strings.TrimSpace(kind), id, enabled, p.UserID)
 }
 
 func authorizeProjectScope(p platform.Principal, permission string) (platform.ScopeFilter, error) {

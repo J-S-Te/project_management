@@ -57,9 +57,28 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 	if err := query.Order("id").Find(&records).Error; err != nil {
 		return nil, err
 	}
+	plans := map[string]domain.ImplementationPlan{}
+	if len(records) > 0 {
+		ids := make([]string, 0, len(records))
+		for _, record := range records {
+			ids = append(ids, record.ID)
+		}
+		var rows []implPlanRecord
+		if err := r.db.WithContext(ctx).Where("tenant_id=? AND service_item_id IN ?", filter.TenantID, ids).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			plan := implPlanFromRecord(row)
+			plans[row.ServiceItemID] = plan
+		}
+	}
 	items := make([]domain.ServiceItem, 0, len(records))
 	for _, record := range records {
-		items = append(items, serviceFromRecord(record))
+		item := serviceFromRecord(record)
+		if plan, ok := plans[record.ID]; ok {
+			item.ImplementationPlan = &plan
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -99,6 +118,19 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 			// 条件更新行数不匹配表示锁等待期间状态已变化，不用旧快照覆盖并发操作。
 			return application.ErrConflict
 		}
+		// 特殊方法服务项确认后进入技术总监复核窗口，复核通过前不能发布实施计划。
+		pending := make([]string, 0)
+		for _, record := range records {
+			if record.Special == "是" && record.TechReviewStatus != "APPROVED" {
+				pending = append(pending, record.ID)
+			}
+		}
+		if len(pending) > 0 {
+			if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND id IN ?", tenant, pending).
+				Updates(map[string]any{"tech_review_status": "PENDING", "updated_at": now, "updated_by": actor}).Error; err != nil {
+				return err
+			}
+		}
 		projectIDs := make([]string, 0)
 		seenProjects := map[string]bool{}
 		for _, record := range records {
@@ -121,49 +153,181 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 		result = make([]domain.ServiceItem, 0, len(records))
 		for _, record := range records {
 			record.Status = "待分配"
+			if record.Special == "是" && record.TechReviewStatus != "APPROVED" {
+				record.TechReviewStatus = "PENDING"
+			}
 			result = append(result, serviceFromRecord(record))
 		}
 		return nil
 	})
 	return result, err
 }
+// ruleKinds 五套真实配置表对应的 kind 标识。列表中顺序即 ListRules 不指定 kind 时的合并顺序。
+var ruleKinds = []string{"split-rules", "warning-rules", "automations", "permissions", "sla"}
+
+func ruleTable(kind string) string {
+	switch kind {
+	case "split-rules":
+		return "pm_split_rule"
+	case "warning-rules":
+		return "pm_warning_rule"
+	case "automations":
+		return "pm_automation"
+	case "permissions":
+		return "pm_field_permission"
+	case "sla":
+		return "pm_sla"
+	default:
+		return ""
+	}
+}
+
 func (r *Repository) ListRules(ctx context.Context, tenant, kind string) ([]domain.Rule, error) {
-	query := r.db.WithContext(ctx).Where("tenant_id = ?", tenant)
+	kinds := ruleKinds
 	if kind != "" {
-		query = query.Where("kind = ?", kind)
+		kinds = []string{kind}
 	}
-	var records []ruleRecord
-	if err := query.Order("id").Find(&records).Error; err != nil {
-		return nil, err
-	}
-	items := make([]domain.Rule, 0, len(records))
-	for _, record := range records {
-		items = append(items, ruleFromRecord(record))
+	items := make([]domain.Rule, 0, 8)
+	for _, current := range kinds {
+		table := ruleTable(current)
+		if table == "" {
+			if kind != "" {
+				return nil, application.ErrValidation
+			}
+			continue
+		}
+		var rows []ruleRow
+		if err := r.db.WithContext(ctx).Table(table).Where("tenant_id = ?", tenant).Order("id").Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			items = append(items, ruleFromRow(row))
+		}
 	}
 	return items, nil
 }
+
 func (r *Repository) CreateRule(ctx context.Context, item domain.Rule) (domain.Rule, error) {
-	record := ruleRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Scope: item.Scope, Trigger: item.Trigger, Enabled: item.Enabled, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := r.db.WithContext(ctx).Create(&record).Error; err != nil {
+	if ruleTable(item.Kind) == "" {
+		return item, application.ErrValidation
+	}
+	now := time.Now().UTC()
+	record, err := ruleRecordFor(item, now)
+	if err != nil {
 		return item, err
 	}
-	return ruleFromRecord(record), nil
+	if err := r.db.WithContext(ctx).Create(record).Error; err != nil {
+		return item, err
+	}
+	return r.GetRule(ctx, item.TenantID, item.Kind, item.ID)
 }
-func (r *Repository) SetRuleEnabled(ctx context.Context, tenant string, id int64, enabled bool, actor string) (domain.Rule, error) {
-	var record ruleRecord
+
+// GetRule 按表/租户/ID 重新读取配置行，供创建、编辑、启停后回显。
+func (r *Repository) GetRule(ctx context.Context, tenant, kind string, id int64) (domain.Rule, error) {
+	table := ruleTable(kind)
+	if table == "" {
+		return domain.Rule{}, application.ErrValidation
+	}
+	var row ruleRow
+	if err := r.db.WithContext(ctx).Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Scan(&row).Error; err != nil {
+		return domain.Rule{}, err
+	}
+	if row.ID == 0 {
+		return domain.Rule{}, application.ErrNotFound
+	}
+	return ruleFromRow(row), nil
+}
+
+func (r *Repository) SetRuleEnabled(ctx context.Context, tenant, kind string, id int64, enabled bool, actor string) (domain.Rule, error) {
+	table := ruleTable(kind)
+	if table == "" {
+		return domain.Rule{}, application.ErrValidation
+	}
+	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("tenant_id = ? AND id = ?", tenant, id).First(&record).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return application.ErrNotFound
-			}
+		res := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).
+			Updates(map[string]any{"enabled": enabled, "updated_at": now, "updated_by": actor})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return application.ErrNotFound
+		}
+		var row ruleRow
+		if err := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Scan(&row).Error; err != nil {
 			return err
 		}
-		record.Enabled = enabled
-		record.UpdatedAt = time.Now().UTC()
-		record.UpdatedBy = actor
-		return tx.Save(&record).Error
+		if row.ID == 0 {
+			return application.ErrNotFound
+		}
+		return nil
 	})
-	return ruleFromRecord(record), err
+	if err != nil {
+		return domain.Rule{}, err
+	}
+	return r.GetRule(ctx, tenant, kind, id)
+}
+
+// UpdateRule 整行更新配置：名称、启停开关和该 kind 专属字段。
+func (r *Repository) UpdateRule(ctx context.Context, tenant, kind string, id int64, item domain.Rule) (domain.Rule, error) {
+	now := time.Now().UTC()
+	columns := map[string]any{}
+	switch kind {
+	case "split-rules":
+		columns = map[string]any{"name": item.Name, "scope": item.Scope, "enabled": item.Enabled}
+	case "warning-rules":
+		columns = map[string]any{"name": item.Name, "check_type": item.CheckType, "threshold": item.Threshold, "enabled": item.Enabled}
+	case "automations":
+		columns = map[string]any{"name": item.Name, "trigger": item.Trigger, "target": item.Target, "enabled": item.Enabled}
+	case "permissions":
+		columns = map[string]any{"name": item.Name, "role_code": item.RoleCode, "field_name": item.FieldName, "access_level": item.AccessLevel, "enabled": item.Enabled}
+	case "sla":
+		columns = map[string]any{"name": item.Name, "status": item.Status, "deadline_hours": item.DeadlineHours, "remind_hours": item.RemindHours, "enabled": item.Enabled}
+	default:
+		return domain.Rule{}, application.ErrValidation
+	}
+	columns["updated_at"] = now
+	columns["updated_by"] = item.UpdatedBy
+	table := ruleTable(kind)
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Updates(columns)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return application.ErrNotFound
+		}
+		var row ruleRow
+		if err := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Scan(&row).Error; err != nil {
+			return err
+		}
+		if row.ID == 0 {
+			return application.ErrNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Rule{}, err
+	}
+	return r.GetRule(ctx, tenant, kind, id)
+}
+
+// ruleRecordFor 按 kind 构造对应真实表的插入记录，避免把无关列写入目标表。
+func ruleRecordFor(item domain.Rule, now time.Time) (any, error) {
+	switch item.Kind {
+	case "split-rules":
+		return &splitRuleRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Scope: item.Scope, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "warning-rules":
+		return &warningRuleRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, CheckType: item.CheckType, Threshold: item.Threshold, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "automations":
+		return &automationRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Trigger: item.Trigger, Target: item.Target, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "permissions":
+		return &fieldPermissionRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, RoleCode: item.RoleCode, FieldName: item.FieldName, AccessLevel: item.AccessLevel, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "sla":
+		return &slaRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Status: item.Status, DeadlineHours: item.DeadlineHours, RemindHours: item.RemindHours, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	default:
+		return nil, application.ErrValidation
+	}
 }
 func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
 	result := domain.Dashboard{StatusCounts: map[string]int{}}
@@ -235,7 +399,7 @@ func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilt
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
-	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, Status: r.Status}
+	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, Status: r.Status}
 	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
 	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
 	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)
@@ -245,10 +409,32 @@ func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
 	if r.PlannedEnd != nil {
 		item.PlannedEnd = r.PlannedEnd.Format(time.RFC3339)
 	}
+	if r.TechReviewedAt != nil {
+		item.TechReviewedAt = r.TechReviewedAt.Format(time.RFC3339)
+	}
+	if r.ReportUpdatedAt != nil {
+		item.ReportUpdatedAt = r.ReportUpdatedAt.Format(time.RFC3339)
+	}
 	return item
 }
-func ruleFromRecord(r ruleRecord) domain.Rule {
-	return domain.Rule{TenantID: r.TenantID, ID: r.ID, Kind: r.Kind, Name: r.Name, Scope: r.Scope, Trigger: r.Trigger, Enabled: r.Enabled, Updated: r.UpdatedAt.Format("2006-01-02 15:04")}
+func implPlanFromRecord(r implPlanRecord) domain.ImplementationPlan {
+	plan := domain.ImplementationPlan{SitePlan: r.SitePlan, PenetrationTestPlan: r.PenetrationTestPlan, AuthDocNo: r.AuthDocNo, AuthScope: r.AuthScope, TestScope: r.TestScope, TestWindow: r.TestWindow, EmergencyContact: r.EmergencyContact, RollbackPlan: r.RollbackPlan}
+	if r.PlannedStart != nil {
+		plan.PlannedStart = r.PlannedStart.Format(time.RFC3339)
+	}
+	if r.PlannedEnd != nil {
+		plan.PlannedEnd = r.PlannedEnd.Format(time.RFC3339)
+	}
+	if r.AuthStart != nil {
+		plan.AuthStart = r.AuthStart.Format(time.RFC3339)
+	}
+	if r.AuthEnd != nil {
+		plan.AuthEnd = r.AuthEnd.Format(time.RFC3339)
+	}
+	return plan
+}
+func ruleFromRow(r ruleRow) domain.Rule {
+	return domain.Rule{TenantID: r.TenantID, ID: r.ID, Kind: r.Kind, Name: r.Name, Scope: r.Scope, Trigger: r.Trigger, CheckType: r.CheckType, Threshold: r.Threshold, Target: r.Target, RoleCode: r.RoleCode, FieldName: r.FieldName, AccessLevel: r.AccessLevel, Status: r.Status, DeadlineHours: r.DeadlineHours, RemindHours: r.RemindHours, Enabled: r.Enabled, Updated: r.UpdatedAt.Format("2006-01-02 15:04")}
 }
 func firstValue(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {

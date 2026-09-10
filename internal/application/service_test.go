@@ -54,7 +54,10 @@ func (r *scopeRepository) ListRules(context.Context, string, string) ([]domain.R
 func (r *scopeRepository) CreateRule(_ context.Context, item domain.Rule) (domain.Rule, error) {
 	return item, nil
 }
-func (r *scopeRepository) SetRuleEnabled(_ context.Context, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
+func (r *scopeRepository) UpdateRule(_ context.Context, _ string, _ string, _ int64, item domain.Rule) (domain.Rule, error) {
+	return item, nil
+}
+func (r *scopeRepository) SetRuleEnabled(_ context.Context, _ string, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
 	return domain.Rule{ID: id, Enabled: enabled}, nil
 }
 func (r *scopeRepository) Dashboard(_ context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {

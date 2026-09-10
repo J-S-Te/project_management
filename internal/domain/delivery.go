@@ -79,6 +79,39 @@ type ImplementationPlanInput struct {
 	PlannedEnd          string `json:"planned_end"`
 	SitePlan            string `json:"site_plan"`
 	PenetrationTestPlan string `json:"penetration_test_plan"`
+	AuthDocNo           string `json:"auth_doc_no"`
+	AuthStart           string `json:"auth_start"`
+	AuthEnd             string `json:"auth_end"`
+	AuthScope           string `json:"auth_scope"`
+	TestScope           string `json:"test_scope"`
+	TestWindow          string `json:"test_window"`
+	EmergencyContact    string `json:"emergency_contact"`
+	RollbackPlan        string `json:"rollback_plan"`
+}
+
+// ImplementationPlan 是与服务项绑定的实施计划读写模型，包含渗透测试专项合规要素。
+type ImplementationPlan struct {
+	PlannedStart        string `json:"planned_start,omitempty"`
+	PlannedEnd          string `json:"planned_end,omitempty"`
+	SitePlan            string `json:"site_plan,omitempty"`
+	PenetrationTestPlan string `json:"penetration_test_plan,omitempty"`
+	AuthDocNo           string `json:"auth_doc_no,omitempty"`
+	AuthStart           string `json:"auth_start,omitempty"`
+	AuthEnd             string `json:"auth_end,omitempty"`
+	AuthScope           string `json:"auth_scope,omitempty"`
+	TestScope           string `json:"test_scope,omitempty"`
+	TestWindow          string `json:"test_window,omitempty"`
+	EmergencyContact    string `json:"emergency_contact,omitempty"`
+	RollbackPlan        string `json:"rollback_plan,omitempty"`
+}
+
+type SpecialMethodReviewInput struct {
+	Decision string `json:"decision"`
+	Comment  string `json:"comment"`
+}
+
+type ReportStatusInput struct {
+	Phase string `json:"phase"`
 }
 
 type PreparationInput struct {

@@ -27,6 +27,8 @@ const (
 	EventDeviationReported       = "DEVIATION_REPORTED"
 	EventDeviationReviewed       = "DEVIATION_REVIEWED"
 	EventFieldImplementationDone = "FIELD_IMPLEMENTATION_COMPLETED"
+	EventSpecialMethodReviewed   = "SPECIAL_METHOD_REVIEWED"
+	EventReportStatusUpdated     = "REPORT_STATUS_UPDATED"
 )
 
 type DeliveryRepository interface {
@@ -217,7 +219,12 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	return result, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload))
 }
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
-	if err := s.authorizeServiceItem(ctx, p, "project.implementation.plan", itemID); err != nil {
+	filter, err := authorizeProjectScope(p, "project.implementation.plan")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
 		return err
 	}
 	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
@@ -225,7 +232,66 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 	if e1 != nil || e2 != nil || !end.After(start) || strings.TrimSpace(input.SitePlan) == "" {
 		return ErrValidation
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventImplementationPlanned, map[string]any{"planned_start": input.PlannedStart, "planned_end": input.PlannedEnd, "site_plan": input.SitePlan, "penetration_test_plan": input.PenetrationTestPlan}))
+	if item.TestMode == "PENETRATION" {
+		if err := validatePenetrationCompliance(input); err != nil {
+			return err
+		}
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventImplementationPlanned, map[string]any{
+		"planned_start":         input.PlannedStart,
+		"planned_end":           input.PlannedEnd,
+		"site_plan":             input.SitePlan,
+		"penetration_test_plan": input.PenetrationTestPlan,
+		"auth_doc_no":           strings.TrimSpace(input.AuthDocNo),
+		"auth_start":            strings.TrimSpace(input.AuthStart),
+		"auth_end":              strings.TrimSpace(input.AuthEnd),
+		"auth_scope":            strings.TrimSpace(input.AuthScope),
+		"test_scope":            strings.TrimSpace(input.TestScope),
+		"test_window":           strings.TrimSpace(input.TestWindow),
+		"emergency_contact":     strings.TrimSpace(input.EmergencyContact),
+		"rollback_plan":         strings.TrimSpace(input.RollbackPlan),
+	}))
+}
+
+// validatePenetrationCompliance 渗透测试专项合规要素：必须提供授权书编号、授权范围、
+// 计划测试范围、测试时间窗、应急联系人与回滚方案，且授权有效期内才能发布计划。
+func validatePenetrationCompliance(input domain.ImplementationPlanInput) error {
+	if strings.TrimSpace(input.PenetrationTestPlan) == "" ||
+		strings.TrimSpace(input.AuthDocNo) == "" ||
+		strings.TrimSpace(input.AuthScope) == "" ||
+		strings.TrimSpace(input.TestScope) == "" ||
+		strings.TrimSpace(input.TestWindow) == "" ||
+		strings.TrimSpace(input.EmergencyContact) == "" ||
+		strings.TrimSpace(input.RollbackPlan) == "" {
+		return ErrValidation
+	}
+	authStart, e1 := time.Parse(time.RFC3339, input.AuthStart)
+	authEnd, e2 := time.Parse(time.RFC3339, input.AuthEnd)
+	if e1 != nil || e2 != nil || !authEnd.After(authStart) {
+		return ErrValidation
+	}
+	return nil
+}
+
+// ReviewSpecialMethod 技术总监对特殊方法（渗透测试专项）服务项的适用性与风险控制复核。
+// 复核通过后才能发布实施计划；驳回后可在修正后再次提交复核。
+func (s *Service) ReviewSpecialMethod(ctx context.Context, p platform.Principal, itemID string, input domain.SpecialMethodReviewInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.deviation.review", itemID); err != nil {
+		return err
+	}
+	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
+	if decision != "APPROVED" && decision != "REJECTED" {
+		return ErrValidation
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventSpecialMethodReviewed, map[string]any{"decision": decision, "comment": strings.TrimSpace(input.Comment)}))
+}
+
+// UpdateReportStatus 服务项报告从编制中逐级推进：编制中→已审核→已签发→已归档。
+func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, itemID string, input domain.ReportStatusInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
+		return err
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": strings.ToUpper(strings.TrimSpace(input.Phase))}))
 }
 
 func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PreparationInput) error {

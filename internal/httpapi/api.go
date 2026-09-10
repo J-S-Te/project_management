@@ -118,6 +118,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
+	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
+	api.POST("/service-items/:id/special-method-review", require("project.deviation.review"), h.reviewSpecialMethod)
+	api.POST("/service-items/:id/report-status", require("project.field.complete"), h.updateReportStatus)
 	return router
 }
 
@@ -719,12 +722,57 @@ func (h *Handler) updateRule(c *gin.Context) {
 		writeServiceError(c, application.ErrValidation)
 		return
 	}
-	item, err := h.service.SetRuleEnabled(c.Request.Context(), principal(c), id, *input.Enabled)
+	item, err := h.service.SetRuleEnabled(c.Request.Context(), principal(c), c.Query("kind"), id, *input.Enabled)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+
+// updateConfigRule 整行更新五套配置中的某一条（名称、启停开关与 kind 专属字段）。
+func (h *Handler) updateConfigRule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_ID", "规则编号不合法")
+		return
+	}
+	var input domain.Rule
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.UpdateRule(c.Request.Context(), principal(c), id, input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+// reviewSpecialMethod 技术总监对特殊方法服务项复核，通过后才能发布渗透测试专项计划。
+func (h *Handler) reviewSpecialMethod(c *gin.Context) {
+	var input domain.SpecialMethodReviewInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.ReviewSpecialMethod(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(strings.TrimSpace(input.Decision))})
+}
+
+// updateReportStatus 推进服务项报告状态（编制中→已审核→已签发→已归档）。
+func (h *Handler) updateReportStatus(c *gin.Context) {
+	var input domain.ReportStatusInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.UpdateReportStatus(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(strings.TrimSpace(input.Phase))})
 }
 
 func decode(c *gin.Context, target any) bool {

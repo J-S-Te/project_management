@@ -56,3 +56,29 @@ func TestServiceItemSystemLevelMigration(t *testing.T) {
 		t.Fatal("system level migration is missing")
 	}
 }
+
+func TestProjectGovernanceMigrationAddsReviewReportAndComplianceStructures(t *testing.T) {
+	body, err := Files.ReadFile("000008_project_governance.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"tech_review_status VARCHAR(32) NOT NULL DEFAULT 'NONE'",
+		"report_status VARCHAR(32) NOT NULL DEFAULT 'NONE'",
+		"CREATE TABLE IF NOT EXISTS pm_impl_plan",
+		"auth_doc_no VARCHAR(128)",
+		"auth_scope TEXT",
+		"emergency_contact VARCHAR(128)",
+		"rollback_plan TEXT",
+		"CREATE TABLE IF NOT EXISTS pm_split_rule",
+		"CREATE TABLE IF NOT EXISTS pm_warning_rule",
+		"CREATE TABLE IF NOT EXISTS pm_automation",
+		"CREATE TABLE IF NOT EXISTS pm_field_permission",
+		"CREATE TABLE IF NOT EXISTS pm_sla",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("governance migration missing %q", required)
+		}
+	}
+}
