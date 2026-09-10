@@ -217,6 +217,49 @@ func TestProjectCreationAndRead(t *testing.T) {
 	}
 }
 
+func navigationBodyForRole(t *testing.T, role string) string {
+	t.Helper()
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{role}, Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: role, ScopeType: "APPLICATION"}}}}
+	response := perform(httpapi.NewRouter(service, id, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), http.MethodGet, "/api/v1/navigation", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("role %s status=%d body=%s", role, response.Code, response.Body.String())
+	}
+	return response.Body.String()
+}
+
+// 超级管理员（项目系统管理员 / 平台系统管理员）持有全部应用权限，必须看到所有功能模块；
+// 业务角色仍然只看到各自职责范围内的栏目。
+func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
+	all := []string{
+		"dashboard", "monitoring", "projects", "decomposition",
+		"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
+		"implementation", "exceptions", "standards", "reports",
+		"split-rules", "warning-rules", "automations", "permissions", "sla",
+	}
+	for _, role := range []string{"admin", "system_admin"} {
+		body := navigationBodyForRole(t, role)
+		for _, section := range all {
+			if !strings.Contains(body, `"`+section+`"`) {
+				t.Fatalf("role %s navigation missing %q: %s", role, section, body)
+			}
+		}
+	}
+	// 业务管理员只看项目/拆解/分配，不应看到系统配置模块。
+	businessAdmin := navigationBodyForRole(t, "business_admin")
+	for _, section := range []string{"split-rules", "permissions", "sla", "equipment"} {
+		if strings.Contains(businessAdmin, `"`+section+`"`) {
+			t.Fatalf("business_admin must not see %q: %s", section, businessAdmin)
+		}
+	}
+	// 设备管理员默认进入设备能力页，而不是被兜底到 dashboard/projects。
+	deviceAdmin := navigationBodyForRole(t, "device_admin")
+	if !strings.Contains(deviceAdmin, `"equipment"`) || !strings.Contains(deviceAdmin, `"projects"`) {
+		t.Fatalf("device_admin navigation = %s", deviceAdmin)
+	}
+}
+
 func TestRoleNavigationMatchesPrototypeWorkspaces(t *testing.T) {
 	tests := []struct {
 		role string
