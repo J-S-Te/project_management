@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/j-s-te/project-management/internal/domain"
@@ -191,5 +192,73 @@ func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *t
 	}
 	if len(page.Items) != 1 || page.Items[0].UserID != "user-1" {
 		t.Fatalf("unexpected page: %#v", page)
+	}
+}
+
+// personnelDirectoryStub 按 user_id 精确应答，模拟平台负责人目录的查询语义。
+type personnelDirectoryStub struct {
+	names map[string]string
+	err   error
+}
+
+func (stub personnelDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	if stub.err != nil {
+		return platform.OwnerDirectoryPage{}, stub.err
+	}
+	display, ok := stub.names[query.UserID]
+	if !ok {
+		return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}, Page: 1, PageSize: 1}, nil
+	}
+	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}, Page: 1, PageSize: 1}, nil
+}
+
+// 界面必须显示姓名而不是 ULID：批量解析要能一次拿到多名人员，并跳过已离职的 ID。
+func TestResolvePersonnelNamesBatchesAndSkipsUnknown(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}, Personnel: personnelDirectoryStub{names: map[string]string{"u-1": "张三", "u-2": "李四"}}}
+	names, err := service.ResolvePersonnelNames(context.Background(), principalWith("project.read"), []string{"u-1", " u-2 ", "u-1", "", "u-404"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names["u-1"] != "张三" || names["u-2"] != "李四" {
+		t.Fatalf("unexpected names: %v", names)
+	}
+	if _, exists := names["u-404"]; exists {
+		t.Fatalf("unknown id must not be resolved: %v", names)
+	}
+	if len(names) != 2 {
+		t.Fatalf("duplicate ids must be collapsed: %v", names)
+	}
+}
+
+func TestResolvePersonnelNamesFailsClosedWhenDirectoryIsDown(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}, Personnel: personnelDirectoryStub{err: errors.New("directory unavailable")}}
+	if _, err := service.ResolvePersonnelNames(context.Background(), principalWith("project.read"), []string{"u-1", "u-2"}); !errors.Is(err, ErrPersonnelUnavailable) {
+		t.Fatalf("err = %v, want ErrPersonnelUnavailable", err)
+	}
+}
+
+func TestResolvePersonnelNamesRequiresReadPermission(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}, Personnel: personnelDirectoryStub{}}
+	if _, err := service.ResolvePersonnelNames(context.Background(), principalWith("project.create"), []string{"u-1"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+// 目录只支持单个 user_id 查询，必须给扇出设上限，避免把目录接口当成自由查询入口。
+func TestResolvePersonnelNamesCapsLookupCount(t *testing.T) {
+	names := map[string]string{}
+	ids := make([]string, 0, maximumPersonnelNameLookups+20)
+	for index := 0; index < maximumPersonnelNameLookups+20; index++ {
+		id := fmt.Sprintf("u-%03d", index)
+		ids = append(ids, id)
+		names[id] = id
+	}
+	service := &Service{Repo: &scopeRepository{}, Personnel: personnelDirectoryStub{names: names}}
+	resolved, err := service.ResolvePersonnelNames(context.Background(), principalWith("project.read"), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != maximumPersonnelNameLookups {
+		t.Fatalf("resolved %d names, want the cap %d", len(resolved), maximumPersonnelNameLookups)
 	}
 }
