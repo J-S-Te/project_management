@@ -64,13 +64,18 @@ func TestProjectGovernanceMigrationAddsReviewReportAndComplianceStructures(t *te
 	}
 	sql := string(body)
 	for _, required := range []string{
-		"tech_review_status VARCHAR(32) NOT NULL DEFAULT 'NONE'",
-		"report_status VARCHAR(32) NOT NULL DEFAULT 'NONE'",
+		// 服务项治理列必须幂等补齐：先查 information_schema 再执行 ALTER，
+		// 因为 MySQL 的 DDL 会隐式提交，早期失败的库可能已经加过这些列。
+		"information_schema.columns",
+		"ADD COLUMN tech_review_status VARCHAR(32) NOT NULL DEFAULT ''NONE'' AFTER conflict_status",
+		"ADD COLUMN report_status VARCHAR(32) NOT NULL DEFAULT ''NONE'' AFTER tech_review_comment",
 		"CREATE TABLE IF NOT EXISTS pm_impl_plan",
 		"auth_doc_no VARCHAR(128)",
 		"auth_scope TEXT",
 		"emergency_contact VARCHAR(128)",
 		"rollback_plan TEXT",
+		// TEXT 列不能用字面量默认值（MySQL 1101），必须使用表达式默认值。
+		"penetration_test_plan TEXT NOT NULL DEFAULT ('')",
 		"CREATE TABLE IF NOT EXISTS pm_split_rule",
 		"CREATE TABLE IF NOT EXISTS pm_warning_rule",
 		"CREATE TABLE IF NOT EXISTS pm_automation",
@@ -80,5 +85,8 @@ func TestProjectGovernanceMigrationAddsReviewReportAndComplianceStructures(t *te
 		if !strings.Contains(sql, required) {
 			t.Fatalf("governance migration missing %q", required)
 		}
+	}
+	if strings.Contains(sql, "TEXT NOT NULL DEFAULT ''") {
+		t.Fatal("governance migration uses a literal TEXT default, which MySQL rejects with error 1101")
 	}
 }

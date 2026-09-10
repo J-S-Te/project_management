@@ -1,16 +1,34 @@
 -- 000008 项目治理扩展：特殊方法技术复核、报告状态、渗透测试专项合规要素与五套真实配置表。
+--
+-- 该迁移必须可重跑：MySQL 的 DDL 会隐式提交，早期版本在 CREATE TABLE 阶段失败时已经
+-- 追加了服务项治理列却没有写入迁移记录。因此追加列前先查 information_schema，避免
+-- 重跑时因 “Duplicate column name” 永远无法补齐剩余结构。
 
-ALTER TABLE pm_service_item
-  ADD COLUMN tech_review_status VARCHAR(32) NOT NULL DEFAULT 'NONE' AFTER conflict_status,
-  ADD COLUMN tech_reviewed_at DATETIME(3) NULL AFTER tech_review_status,
-  ADD COLUMN tech_reviewed_by VARCHAR(64) NOT NULL DEFAULT '' AFTER tech_reviewed_at,
-  ADD COLUMN tech_review_comment VARCHAR(512) NOT NULL DEFAULT '' AFTER tech_reviewed_by,
-  ADD COLUMN report_status VARCHAR(32) NOT NULL DEFAULT 'NONE' AFTER tech_review_comment,
-  ADD COLUMN report_updated_at DATETIME(3) NULL AFTER report_status,
-  ADD COLUMN report_updated_by VARCHAR(64) NOT NULL DEFAULT '' AFTER report_updated_at;
+SET @pm_governance_columns := (
+  SELECT IF(
+    COUNT(*) = 0,
+    'ALTER TABLE pm_service_item
+       ADD COLUMN tech_review_status VARCHAR(32) NOT NULL DEFAULT ''NONE'' AFTER conflict_status,
+       ADD COLUMN tech_reviewed_at DATETIME(3) NULL AFTER tech_review_status,
+       ADD COLUMN tech_reviewed_by VARCHAR(64) NOT NULL DEFAULT '''' AFTER tech_reviewed_at,
+       ADD COLUMN tech_review_comment VARCHAR(512) NOT NULL DEFAULT '''' AFTER tech_reviewed_by,
+       ADD COLUMN report_status VARCHAR(32) NOT NULL DEFAULT ''NONE'' AFTER tech_review_comment,
+       ADD COLUMN report_updated_at DATETIME(3) NULL AFTER report_status,
+       ADD COLUMN report_updated_by VARCHAR(64) NOT NULL DEFAULT '''' AFTER report_updated_at',
+    'DO 0'
+  )
+  FROM information_schema.columns
+  WHERE table_schema = DATABASE()
+    AND table_name = 'pm_service_item'
+    AND column_name = 'tech_review_status'
+);
+PREPARE pm_governance_columns_stmt FROM @pm_governance_columns;
+EXECUTE pm_governance_columns_stmt;
+DEALLOCATE PREPARE pm_governance_columns_stmt;
 
 -- 渗透测试专项/实施计划：与服务项 1:1，保存完整合规要素（授权书、白名单范围、
 -- 测试时间窗、应急联系人、回滚方案等），不再只是校验不入库的文本。
+-- TEXT 列不能使用字面量默认值（MySQL 错误 1101），这里使用表达式默认值 DEFAULT ('')。
 CREATE TABLE IF NOT EXISTS pm_impl_plan (
   id VARCHAR(32) NOT NULL,
   tenant_id VARCHAR(64) NOT NULL,
@@ -18,15 +36,15 @@ CREATE TABLE IF NOT EXISTS pm_impl_plan (
   planned_start DATETIME(3) NULL,
   planned_end DATETIME(3) NULL,
   site_plan TEXT NOT NULL,
-  penetration_test_plan TEXT NOT NULL DEFAULT '',
+  penetration_test_plan TEXT NOT NULL DEFAULT (''),
   auth_doc_no VARCHAR(128) NOT NULL DEFAULT '',
   auth_start DATETIME(3) NULL,
   auth_end DATETIME(3) NULL,
-  auth_scope TEXT NOT NULL DEFAULT '',
-  test_scope TEXT NOT NULL DEFAULT '',
+  auth_scope TEXT NOT NULL DEFAULT (''),
+  test_scope TEXT NOT NULL DEFAULT (''),
   test_window VARCHAR(128) NOT NULL DEFAULT '',
   emergency_contact VARCHAR(128) NOT NULL DEFAULT '',
-  rollback_plan TEXT NOT NULL DEFAULT '',
+  rollback_plan TEXT NOT NULL DEFAULT (''),
   updated_at DATETIME(3) NOT NULL,
   updated_by VARCHAR(64) NOT NULL DEFAULT '',
   PRIMARY KEY (id),
