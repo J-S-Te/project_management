@@ -102,6 +102,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
 	// 这些表单，而分配、指派、维护等写操作仍由各自的 assign/manage 权限单独把守。
 	api.GET("/personnel", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.listPersonnel)
+	// 批量把已保存的 user_id 翻译成姓名：团队负责人 / 项目经理 / 工程师在界面上不得显示 ULID。
+	api.GET("/personnel/names", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.resolvePersonnelNames)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
 	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
@@ -545,6 +547,17 @@ func (h *Handler) listPersonnel(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, result)
+}
+
+// resolvePersonnelNames 批量解析人员显示名。user_ids 为逗号分隔的平台 user_id，
+// 单次上限由应用层约束；解析不到的 ID 不会出现在结果中，由前端回落到占位文案。
+func (h *Handler) resolvePersonnelNames(c *gin.Context) {
+	names, err := h.service.ResolvePersonnelNames(c.Request.Context(), principal(c), strings.Split(c.Query("user_ids"), ","))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]any{"names": names})
 }
 
 func optionalPositiveInt(value string) (int, error) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/j-s-te/project-management/internal/domain"
@@ -142,6 +143,79 @@ func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keywo
 	}
 	return result, nil
 }
+// maximumPersonnelNameLookups 限制一次批量解析的人员数量：负责人目录只支持按单个
+// user_id 精确查询，必须给子系统的扇出设上限，避免把目录接口当成自由查询入口。
+const maximumPersonnelNameLookups = 50
+
+// personnelNameLookupConcurrency 限制对负责人目录的并发查询数，兼顾时延与平台侧压力。
+const personnelNameLookupConcurrency = 8
+
+// ResolvePersonnelNames 把服务项里保存的平台 user_id 批量翻译成显示名。
+// 团队负责人、项目经理、工程师在界面上必须显示姓名而不是 ULID；目录只支持单个
+// user_id 查询，所以在服务端聚合并限制并发，让浏览器一次请求就能拿到全部姓名。
+// 单个 ID 解析不到（例如人员已离职）不算错误，界面回落到占位文案；
+// 只有整批都失败时才返回 ErrPersonnelUnavailable，让前端明确提示目录不可用。
+func (s *Service) ResolvePersonnelNames(ctx context.Context, p platform.Principal, ids []string) (map[string]string, error) {
+	if !p.Has("project.read") {
+		return nil, ErrForbidden
+	}
+	if s.Personnel == nil {
+		return nil, ErrPersonnelUnavailable
+	}
+	wanted := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		wanted = append(wanted, id)
+		if len(wanted) >= maximumPersonnelNameLookups {
+			break
+		}
+	}
+	names := make(map[string]string, len(wanted))
+	if len(wanted) == 0 {
+		return names, nil
+	}
+	var (
+		mutex    sync.Mutex
+		group    sync.WaitGroup
+		tokens   = make(chan struct{}, personnelNameLookupConcurrency)
+		failures int
+	)
+	for _, userID := range wanted {
+		group.Add(1)
+		go func(target string) {
+			defer group.Done()
+			tokens <- struct{}{}
+			defer func() { <-tokens }()
+			page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{UserID: target, Page: 1, PageSize: 1})
+			mutex.Lock()
+			defer mutex.Unlock()
+			if err != nil {
+				failures++
+				return
+			}
+			for _, item := range page.Items {
+				if strings.TrimSpace(item.UserID) == target && strings.TrimSpace(item.DisplayName) != "" {
+					names[target] = strings.TrimSpace(item.DisplayName)
+					return
+				}
+			}
+		}(userID)
+	}
+	group.Wait()
+	if failures == len(wanted) {
+		return nil, fmt.Errorf("%w: owner directory lookup failed", ErrPersonnelUnavailable)
+	}
+	return names, nil
+}
+
 func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind string) ([]domain.Rule, error) {
 	if err := requireApplicationAuthorization(p, "project.read"); err != nil {
 		return nil, err

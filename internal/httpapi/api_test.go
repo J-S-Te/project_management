@@ -669,3 +669,44 @@ func TestImplementationPlanValidationNamesTheInvalidField(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+// 人员姓名批量解析：目录未开通时明确返回 503，而不是让界面显示一串 ULID。
+func TestPersonnelNamesEndpointReportsUnavailableDirectory(t *testing.T) {
+	handler := router(t, map[string]bool{"project.read": true}, nil)
+	response := perform(handler, http.MethodGet, "/api/v1/personnel/names?user_ids=u-1,u-2", "")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "PM_PERSONNEL_UNAVAILABLE") {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+
+// 目录可用时返回 user_id → 显示名 的映射，供界面把团队负责人/项目经理/工程师渲染成姓名。
+func TestPersonnelNamesEndpointResolvesNames(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test", Personnel: ownerDirectoryStub{names: map[string]string{"u-1": "张三"}}}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/personnel/names?user_ids=u-1,u-404", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "张三") || !strings.Contains(body, `"u-1"`) {
+		t.Fatalf("body=%s", body)
+	}
+	if strings.Contains(body, "u-404") {
+		t.Fatalf("unresolvable id must be omitted: %s", body)
+	}
+}
+
+type ownerDirectoryStub struct{ names map[string]string }
+
+func (stub ownerDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	display, ok := stub.names[query.UserID]
+	if !ok {
+		return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}}, nil
+	}
+	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
+}
