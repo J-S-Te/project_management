@@ -95,7 +95,11 @@ func main() {
 	} else {
 		logger.Warn("platform owner directory integration disabled; personnel pickers will be unavailable")
 	}
-	service := &application.Service{Repo: repository, Personnel: personnel, Logger: logger}
+	notifications := platform.NewNotificationPublisher(cfg.PlatformBaseURL, cfg.PlatformNotificationURL, cfg.PlatformNotificationClientID, cfg.PlatformNotificationSecret, cfg.PlatformNotificationScope)
+	if notifications != nil {
+		logger.Info("platform notification integration enabled")
+	}
+	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Logger: logger}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,

@@ -27,9 +27,9 @@ const (
 	EventDeviationReviewed     = "DEVIATION_REVIEWED"
 	// EventFieldCompleted 是单服务项的现场完成事件：服务项进入报告编制，
 	// 全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切完成。
-	EventFieldCompleted         = "FIELD_COMPLETED"
-	EventSpecialMethodReviewed  = "SPECIAL_METHOD_REVIEWED"
-	EventReportStatusUpdated    = "REPORT_STATUS_UPDATED"
+	EventFieldCompleted        = "FIELD_COMPLETED"
+	EventSpecialMethodReviewed = "SPECIAL_METHOD_REVIEWED"
+	EventReportStatusUpdated   = "REPORT_STATUS_UPDATED"
 	// EventEquipmentReturned 记录设备归还：写回设备行的归还时间，释放占用。
 	EventEquipmentReturned = "EQUIPMENT_RETURNED"
 	// EventAutomationTriggered 是配置驱动的派生事件：事件落库后有启用的
@@ -65,10 +65,10 @@ func (s *Service) deliveryRepo() (DeliveryRepository, error) {
 }
 
 // ListSlaOverdue 返回两类超期/临近超期口径的合并列表：
-// 1. 计划完成时间已过且尚未终结的服务项（与配置无关的固定口径）；
-// 2. 启用的 pm_sla 规则判定：服务项停留在规则状态超过 deadline_hours（超期），
-//    或剩余时间不足 remind_hours（临近提醒）。停留时长以服务项 updated_at 为准，
-//    每次状态推进都会刷新该时间。
+//  1. 计划完成时间已过且尚未终结的服务项（与配置无关的固定口径）；
+//  2. 启用的 pm_sla 规则判定：服务项停留在规则状态超过 deadline_hours（超期），
+//     或剩余时间不足 remind_hours（临近提醒）。停留时长以服务项 updated_at 为准，
+//     每次状态推进都会刷新该时间。
 func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]domain.SlaOverdueItem, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
@@ -993,10 +993,10 @@ type PersonnelIdentitySyncResult struct {
 	Total int `json:"total"`
 	// Active / Missing / Unlinked 是复核后的分布；Unverified 是目录本次未能回答、
 	// 因而保持原状的档案数——平台抖动绝不能被写成"离职"。
-	Active     int `json:"active"`
-	Missing    int `json:"missing"`
-	Unlinked   int `json:"unlinked"`
-	Unverified int `json:"unverified"`
+	Active     int    `json:"active"`
+	Missing    int    `json:"missing"`
+	Unlinked   int    `json:"unlinked"`
+	Unverified int    `json:"unverified"`
 	CheckedAt  string `json:"checked_at"`
 }
 
@@ -1194,6 +1194,64 @@ func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEven
 	triggered.CreatedAt = time.Now().UTC().Add(time.Millisecond)
 	triggered.Payload = map[string]any{"trigger": event.Type, "targets": targets}
 	s.persistDerivedEvent(ctx, "automation", event, triggered, repo)
+	s.notifyAutomationTargets(ctx, event, targets)
+}
+
+// notifyAutomationTargets 把自动化规则的 target 解析成平台用户并投递站内信。
+// target 约定为项目系统的应用角色码（例如 technical_director / quality_manager），
+// 通过负责人目录按 role_code 解析成具体人员；不引入自由文本收件人，
+// 避免"配了目标却没人收到"。未开通站内信集成、目录不可用或该角色下无人时静默跳过：
+// 通知是派生副作用，绝不能影响已提交的主事件。
+func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.DeliveryEvent, targets []string) {
+	if s.Notifications == nil || s.Personnel == nil || len(targets) == 0 {
+		return
+	}
+	recipients := make([]string, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		roleCode := strings.TrimSpace(target)
+		if roleCode == "" {
+			continue
+		}
+		page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{RoleCodes: []string{roleCode}, Page: 1, PageSize: maximumPersonnelNameLookups})
+		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Warn("resolve automation notification recipients failed", "role_code", roleCode, "error", err)
+			}
+			continue
+		}
+		for _, person := range page.Items {
+			userID := strings.TrimSpace(person.UserID)
+			if userID == "" {
+				continue
+			}
+			if _, exists := seen[userID]; exists {
+				continue
+			}
+			seen[userID] = struct{}{}
+			recipients = append(recipients, userID)
+		}
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	notification := platform.NotificationEvent{
+		EventID:       ulid.Make().String(),
+		EventType:     EventAutomationTriggered,
+		Scope:         "application",
+		Priority:      "NORMAL",
+		Title:         "项目自动化规则触发",
+		Content:       fmt.Sprintf("规则命中的事件：%s。项目 %s，服务项 %s。", event.Type, event.ProjectID, event.ServiceItemID),
+		ReferenceType: "service_item",
+		ReferenceID:   event.ServiceItemID,
+		Recipients:    recipients,
+		OccurredAt:    time.Now().UTC(),
+		// 同一源事件只投递一次，平台按幂等键去重。
+		IdempotencyKey: event.ID + "-automation-notification",
+	}
+	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("publish automation notification failed", "event_id", event.ID, "error", err)
+	}
 }
 
 // persistDerivedEvent 写入派生事件。派生事件是主事件提交后的 best-effort 副作用，

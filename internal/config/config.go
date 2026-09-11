@@ -11,46 +11,53 @@ import (
 )
 
 type Config struct {
-	HTTPAddress                      string
-	MySQLDSN                         string
-	TemporalAddress                  string
-	TemporalNamespace                string
-	TemporalTaskQueue                string
-	TemporalAPIKey                   string
-	TemporalTLS                      bool
-	TemporalWorkerBuildID            string
-	TemporalWorkerDeploymentName     string
-	TemporalWorkerVersioning         bool
-	TemporalWorkerVersioningPolicy   string
-	TemporalMetricsAddress           string
-	RunWorkerWithAPI                 bool
-	PlatformBaseURL                  string
-	OIDCIssuer                       string
-	OIDCBackchannelBaseURL           string
-	OIDCClientID                     string
-	OIDCClientSecret                 string
-	OIDCIDPHint                      string
-	OIDCRedirectURI                  string
-	OIDCPostLogoutRedirectURI        string
-	OIDCTenantID                     string
-	OIDCSessionCookieName            string
-	OIDCSessionTTL                   time.Duration
-	OIDCAuthorizationRefresh         time.Duration
-	OIDCAuthorizationMaxStale        time.Duration
-	OIDCAuthorizationTimeout         time.Duration
-	OIDCSessionEncryptionKey         []byte
-	OIDCSessionSecure                bool
-	AppPathPrefix                    string
-	PlatformApplicationCode          string
-	PlatformEnvironmentCode          string
-	PlatformApplicationID            string
-	PlatformAuditClientID            string
-	PlatformAuditClientSecret        string
-	OwnerDirectoryEnabled            bool
-	PlatformOwnerDirectoryURL        string
-	PlatformOwnerDirectoryClientID   string
-	PlatformOwnerDirectorySecret     string
-	PlatformOwnerDirectoryScope      string
+	HTTPAddress                    string
+	MySQLDSN                       string
+	TemporalAddress                string
+	TemporalNamespace              string
+	TemporalTaskQueue              string
+	TemporalAPIKey                 string
+	TemporalTLS                    bool
+	TemporalWorkerBuildID          string
+	TemporalWorkerDeploymentName   string
+	TemporalWorkerVersioning       bool
+	TemporalWorkerVersioningPolicy string
+	TemporalMetricsAddress         string
+	RunWorkerWithAPI               bool
+	PlatformBaseURL                string
+	OIDCIssuer                     string
+	OIDCBackchannelBaseURL         string
+	OIDCClientID                   string
+	OIDCClientSecret               string
+	OIDCIDPHint                    string
+	OIDCRedirectURI                string
+	OIDCPostLogoutRedirectURI      string
+	OIDCTenantID                   string
+	OIDCSessionCookieName          string
+	OIDCSessionTTL                 time.Duration
+	OIDCAuthorizationRefresh       time.Duration
+	OIDCAuthorizationMaxStale      time.Duration
+	OIDCAuthorizationTimeout       time.Duration
+	OIDCSessionEncryptionKey       []byte
+	OIDCSessionSecure              bool
+	AppPathPrefix                  string
+	PlatformApplicationCode        string
+	PlatformEnvironmentCode        string
+	PlatformApplicationID          string
+	PlatformAuditClientID          string
+	PlatformAuditClientSecret      string
+	OwnerDirectoryEnabled          bool
+	PlatformOwnerDirectoryURL      string
+	PlatformOwnerDirectoryClientID string
+	PlatformOwnerDirectorySecret   string
+	PlatformOwnerDirectoryScope    string
+
+	// Notification 集成：自动化规则命中后把站内信投递给基础平台的统一 outbox。
+	NotificationEnabled              bool
+	PlatformNotificationURL          string
+	PlatformNotificationClientID     string
+	PlatformNotificationSecret       string
+	PlatformNotificationScope        string
 	PlatformCatalogSync              bool
 	PlatformCatalogClientID          string
 	PlatformCatalogClientSecret      string
@@ -88,6 +95,10 @@ func Load() (Config, error) {
 		PlatformOwnerDirectoryClientID: strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_ID")),
 		PlatformOwnerDirectorySecret:   os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"),
 		PlatformOwnerDirectoryScope:    strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_SCOPE")),
+		PlatformNotificationURL:        strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_URL")),
+		PlatformNotificationClientID:   strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_CLIENT_ID")),
+		PlatformNotificationSecret:     os.Getenv("PLATFORM_NOTIFICATION_CLIENT_SECRET"),
+		PlatformNotificationScope:      strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
 		ContractIntegrationClientID:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
 		ContractIntegrationAudience:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
 		DashboardMachineClientID:       strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
@@ -119,6 +130,9 @@ func Load() (Config, error) {
 	}
 	if c.PlatformCatalogSync, err = strconv.ParseBool(env("PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: %w", err)
+	}
+	if c.NotificationEnabled, err = strconv.ParseBool(env("NOTIFICATION_ENABLED", "false")); err != nil {
+		return Config{}, fmt.Errorf("NOTIFICATION_ENABLED: %w", err)
 	}
 	if c.OwnerDirectoryEnabled, err = strconv.ParseBool(env("OWNER_DIRECTORY_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("OWNER_DIRECTORY_ENABLED: %w", err)
@@ -227,6 +241,23 @@ func (c Config) validate() error {
 		}
 		if c.PlatformOwnerDirectoryScope != "" && c.PlatformOwnerDirectoryScope != "owner_directory.read" {
 			return fmt.Errorf("PLATFORM_OWNER_DIRECTORY_SCOPE must be owner_directory.read")
+		}
+	}
+	if c.NotificationEnabled {
+		for name, value := range map[string]string{
+			"PLATFORM_NOTIFICATION_URL":           c.PlatformNotificationURL,
+			"PLATFORM_NOTIFICATION_CLIENT_ID":     c.PlatformNotificationClientID,
+			"PLATFORM_NOTIFICATION_CLIENT_SECRET": c.PlatformNotificationSecret,
+		} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when NOTIFICATION_ENABLED=true", name)
+			}
+		}
+		if !validHTTPURL(c.PlatformNotificationURL) {
+			return fmt.Errorf("PLATFORM_NOTIFICATION_URL must be a valid HTTP(S) URL")
+		}
+		if c.PlatformNotificationScope != "" && c.PlatformNotificationScope != "notification.ingest" {
+			return fmt.Errorf("PLATFORM_NOTIFICATION_SCOPE must be notification.ingest")
 		}
 	}
 	if c.ContractIntegrationRequireBearer {

@@ -662,3 +662,70 @@ func (stub directoryStub) List(_ context.Context, query platform.OwnerDirectoryQ
 	}
 	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
 }
+
+// notificationStub 记录被投递的站内信，供自动化通知用例断言。
+type notificationStub struct{ published []platform.NotificationEvent }
+
+func (stub *notificationStub) Publish(_ context.Context, event platform.NotificationEvent) error {
+	stub.published = append(stub.published, event)
+	return nil
+}
+
+// 自动化规则的 target 是应用角色码：命中后按角色解析出人员并投递站内信，
+// 而不是只写一条没人消费的派生事件。
+func TestAutomationNotificationResolvesRoleTargets(t *testing.T) {
+	notifications := &notificationStub{}
+	repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}
+	service := &Service{
+		Repo: repo, Notifications: notifications,
+		Personnel: roleDirectoryStub{byRole: map[string][]string{"technical_director": {"u-lead", "u-lead2"}}},
+	}
+	principal := platform.Principal{TenantID: "t1", UserID: "u1"}
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 1 {
+		t.Fatalf("expected one notification, got %+v", notifications.published)
+	}
+	event := notifications.published[0]
+	if len(event.Recipients) != 2 || event.Recipients[0] != "u-lead" {
+		t.Fatalf("recipients must come from the role directory: %+v", event.Recipients)
+	}
+	if event.EventType != EventAutomationTriggered || event.IdempotencyKey == "" {
+		t.Fatalf("notification payload = %+v", event)
+	}
+}
+
+// 未开通站内信集成、目录不可用或角色下无人时静默跳过：通知是派生副作用，
+// 既不能回滚主事件，也不应因此丢失派生事件本身。
+func TestAutomationNotificationDegradesQuietly(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		service *Service
+	}{
+		{"no notification integration", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}}},
+		{"no directory", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}}},
+		{"role has nobody", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}, Personnel: roleDirectoryStub{}}},
+	} {
+		principal := platform.Principal{TenantID: "t1", UserID: "u1"}
+		if err := testCase.service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{})); err != nil {
+			t.Fatalf("%s: applyEvent failed: %v", testCase.name, err)
+		}
+		if stub, ok := testCase.service.Notifications.(*notificationStub); ok && len(stub.published) != 0 {
+			t.Fatalf("%s: must not publish: %+v", testCase.name, stub.published)
+		}
+	}
+}
+
+// roleDirectoryStub 按 role_code 应答负责人目录查询。
+type roleDirectoryStub struct{ byRole map[string][]string }
+
+func (stub roleDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	items := []platform.OwnerDirectoryUser{}
+	for _, role := range query.RoleCodes {
+		for _, userID := range stub.byRole[role] {
+			items = append(items, platform.OwnerDirectoryUser{UserID: userID, DisplayName: userID})
+		}
+	}
+	return platform.OwnerDirectoryPage{Items: items, Page: 1, PageSize: len(items)}, nil
+}
