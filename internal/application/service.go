@@ -295,6 +295,18 @@ func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind stri
 	return s.Repo.ListRules(ctx, p.TenantID, kind)
 }
 
+// ruleKindPermission 返回管理某一类配置所需的权限码。
+// 六类配置共用 domain.Rule 结构、按 kind 分表存储，但职责并不相同：
+// 字段级脱敏是安全策略，与拆解/预警/自动化/SLA/标准等运营参数必须分开授权，
+// 否则"能配 SLA 的人就能改脱敏"。规则按客户端声明的 kind 选择数据表，
+// 因此以 kind 判定权限是可靠的：不声明 permissions 就碰不到脱敏表。
+func ruleKindPermission(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), "permissions") {
+		return "project.field_permission.manage"
+	}
+	return "project_rule.manage"
+}
+
 func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input domain.Project) (domain.Project, error) {
 	return s.CreateProjectWithServiceItems(ctx, p, input, nil)
 }
@@ -394,12 +406,12 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 }
 
 func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input domain.Rule) (domain.Rule, error) {
-	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
-		return input, err
-	}
 	input.Kind = strings.TrimSpace(input.Kind)
 	if input.Kind == "" {
 		input.Kind = "split-rules"
+	}
+	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
+		return input, err
 	}
 	if strings.TrimSpace(input.Name) == "" {
 		return input, ErrValidation
@@ -443,7 +455,7 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 
 // UpdateRule 整行更新配置。载荷覆盖该 kind 的专属字段与启停开关。
 func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64, input domain.Rule) (domain.Rule, error) {
-	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
 		return domain.Rule{}, err
 	}
 	if strings.TrimSpace(input.Name) == "" {
@@ -456,7 +468,7 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 }
 
 func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind string, id int64, enabled bool) (domain.Rule, error) {
-	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+	if err := requireApplicationAuthorization(p, ruleKindPermission(kind)); err != nil {
 		return domain.Rule{}, err
 	}
 	return s.Repo.SetRuleEnabled(ctx, p.TenantID, strings.TrimSpace(kind), id, enabled, p.UserID)

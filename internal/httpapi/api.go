@@ -409,7 +409,7 @@ func navigationSections(roles []string) []string {
 		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
 		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
 		"device_admin":         {"dashboard", "projects", "equipment"},
-		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "permissions", "sla"},
+		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla"},
 		"engineer":             {"projects", "implementation", "exceptions"},
 		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
 	}

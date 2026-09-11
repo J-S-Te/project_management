@@ -1,5 +1,5 @@
 {
-  "catalog_version": "3",
+  "catalog_version": "4",
   "claims_role_config_hash": "project-management-v2-compact-identity-online-authorization",
   "policy": {"max_effective_roles": 16},
   "permissions": [
@@ -24,10 +24,11 @@
     ,{"code":"project.field.complete","name":"确认现场实施完成","action":"complete","resource_code":"project","resource_name":"项目","risk_level":"HIGH"}
     ,{"code":"project.report.manage","name":"编制审核签发项目报告","action":"manage","resource_code":"report","resource_name":"项目报告","risk_level":"MEDIUM"}
     ,{"code":"project.report.archive","name":"归档项目报告","action":"archive","resource_code":"report","resource_name":"项目报告","risk_level":"HIGH"}
+    ,{"code":"project.field_permission.manage","name":"管理字段级脱敏策略","action":"manage","resource_code":"field_permission","resource_name":"字段级权限","risk_level":"HIGH"}
   ],
   "roles": [
-    {"code":"admin","name":"项目系统管理员","description":"详细授权来自 authorization-context；APPLICATION/ENVIRONMENT/TENANT 为全量，ORG/SELF/PROJECT 为行级范围。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive"]},
-    {"code":"system_admin","name":"平台系统管理员","description":"平台级系统管理员，拥有项目管理全量权限；详细授权来自 authorization-context。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive"]},
+    {"code":"admin","name":"项目系统管理员","description":"详细授权来自 authorization-context；APPLICATION/ENVIRONMENT/TENANT 为全量，ORG/SELF/PROJECT 为行级范围。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
+    {"code":"system_admin","name":"平台系统管理员","description":"平台级系统管理员，拥有项目管理全量权限；详细授权来自 authorization-context。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.resource.assign","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
     {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign"]},
     {"code":"team_lead","name":"团队负责人","permissions":["project.read","project.resource.read","project.execution.assign","project.deviation.review"]},
     {"code":"technical_director","name":"技术总监","permissions":["project.read","project.resource.read","project.deviation.review","project.special_method.review","project.report.archive"]},
