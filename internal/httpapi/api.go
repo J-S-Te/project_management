@@ -97,7 +97,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/projects/:id/decomposition-adjustments", require("project.decomposition.manage"), h.adjustDecomposition)
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.GET("/delivery/sla-overdue", require("project.read"), h.listSlaOverdue)
-	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
+	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
+	api.POST("/service-items/:id/field-complete", require("project.field.complete"), h.completeServiceItemField)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
 	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
@@ -106,12 +107,10 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 批量把已保存的 user_id 翻译成姓名：团队负责人 / 项目经理 / 工程师在界面上不得显示 ULID。
 	api.GET("/personnel/names", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.resolvePersonnelNames)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
-	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
 	api.POST("/service-items/:id/execution-assignment", require("project.execution.assign"), h.assignExecutionTeam)
 	api.POST("/service-items/:id/implementation-plan", require("project.implementation.plan"), h.planImplementation)
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
-	api.POST("/service-items/:id/check-in", require("project.field.execute"), h.checkIn)
 	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
 	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
@@ -128,7 +127,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
 	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
 	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
-	api.POST("/service-items/:id/report-status", require("project.field.complete"), h.updateReportStatus)
+	// 报告推进到"已归档"才需要 project.report.archive；现场执行角色不应顺带获得归档权。
+	api.POST("/service-items/:id/report-status", requireAny("project.field.complete", "project.report.archive"), h.updateReportStatus)
 	return router
 }
 
@@ -518,12 +518,12 @@ func (h *Handler) listSlaOverdue(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, items)
 }
-func (h *Handler) completeFieldImplementation(c *gin.Context) {
-	if err := h.service.CompleteFieldImplementation(c.Request.Context(), principal(c), c.Param("id")); err != nil {
+func (h *Handler) completeServiceItemField(c *gin.Context) {
+	if err := h.service.CompleteServiceItemField(c.Request.Context(), principal(c), c.Param("id")); err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	h.writeProjectStatus(c, http.StatusOK, c.Param("id"))
+	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
 }
 
 // writeProjectStatus 返回项目的唯一派生状态，避免写接口另起一套状态词汇。
@@ -617,18 +617,6 @@ func (h *Handler) confirmServiceItems(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, items)
 }
-func (h *Handler) assignServiceItem(c *gin.Context) {
-	var input domain.AssignmentInput
-	if !decode(c, &input) {
-		return
-	}
-	result, err := h.service.AssignServiceItem(c.Request.Context(), principal(c), c.Param("id"), input)
-	if err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	writeData(c, http.StatusOK, result)
-}
 func (h *Handler) assignTeam(c *gin.Context) {
 	var input domain.TeamAssignmentInput
 	if !decode(c, &input) {
@@ -673,17 +661,6 @@ func (h *Handler) startPreparation(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusAccepted, map[string]string{"status": "实施准备中"})
-}
-func (h *Handler) checkIn(c *gin.Context) {
-	var input domain.CheckInInput
-	if !decode(c, &input) {
-		return
-	}
-	if err := h.service.CheckIn(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	writeData(c, http.StatusCreated, map[string]string{"status": "实施中"})
 }
 func (h *Handler) submitFieldRecord(c *gin.Context) {
 	var input domain.FieldRecordInput

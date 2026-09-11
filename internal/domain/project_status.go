@@ -8,7 +8,6 @@ import "strings"
 const (
 	ProjectStatusPendingDecomposition = "待拆解确认"
 	ProjectStatusPendingAllocation    = "待分配"
-	ProjectStatusPendingPlan          = "待制定计划"
 	ProjectStatusPendingExecution     = "待实施"
 	ProjectStatusPreparing            = "实施准备中"
 	ProjectStatusInProgress           = "实施中"
@@ -25,10 +24,10 @@ const (
 )
 
 // projectStatusNodes 是线性推进节点的唯一顺序表，索引即推进等级。
+// 「待制定计划」已移除：任务分配完成即具备计划前置条件，不存在只等排期的独立阶段。
 var projectStatusNodes = []string{
 	ProjectStatusPendingDecomposition,
 	ProjectStatusPendingAllocation,
-	ProjectStatusPendingPlan,
 	ProjectStatusPendingExecution,
 	ProjectStatusPreparing,
 	ProjectStatusInProgress,
@@ -40,15 +39,14 @@ var projectStatusNodes = []string{
 
 // 服务项状态到推进等级的映射；待确认/待复核属于同一「待拆解确认」阶段。
 var serviceItemStatusRank = map[string]int{
-	"待确认":                          0,
-	"待复核":                          0,
+	"待确认":                         0,
+	"待复核":                         0,
 	ProjectStatusPendingAllocation: 1,
-	ProjectStatusPendingPlan:       2,
-	ProjectStatusPendingExecution:  3,
-	ProjectStatusPreparing:         4,
-	ProjectStatusInProgress:        5,
-	ProjectStatusException:         6,
-	ProjectStatusFieldCompleted:    7,
+	ProjectStatusPendingExecution:  2,
+	ProjectStatusPreparing:         3,
+	ProjectStatusInProgress:        4,
+	ProjectStatusException:         5,
+	ProjectStatusFieldCompleted:    6,
 }
 
 // ProjectStatusNodes 返回线性推进节点的副本，供校验与展示使用。
@@ -112,22 +110,41 @@ func DeriveProjectStatus(items []ProjectStatusItem, supplementStatus, storedStat
 	return projectStatusNodes[lowest]
 }
 
-// serviceItemLifecycleRank 把服务项映射到 0..9 的推进等级；
+// serviceItemLifecycleRank 把服务项映射到 0..8 的推进等级；
 // 未知或空状态按最滞后处理，避免把项目误报为已推进。
 func serviceItemLifecycleRank(item ProjectStatusItem) int {
 	status := strings.TrimSpace(item.Status)
 	if status == ProjectStatusFieldCompleted {
 		switch strings.ToUpper(strings.TrimSpace(item.ReportStatus)) {
 		case "COMPILING", "REVIEWED", "ISSUED":
-			return 8
-		case "ARCHIVED":
-			return 9
-		default:
 			return 7
+		case "ARCHIVED":
+			return 8
+		default:
+			return 6
 		}
 	}
 	if rank, ok := serviceItemStatusRank[status]; ok {
 		return rank
 	}
 	return 0
+}
+
+// DeriveProjectProgress 按服务项推进等级派生项目进度百分比：
+// 各服务项等级均值除以最高等级，已终止服务项按 100% 计。
+// 进度不再由事件手工写入固定值，与派生状态共用同一套等级表。
+func DeriveProjectProgress(items []ProjectStatusItem) int {
+	if len(items) == 0 {
+		return 0
+	}
+	maxRank := len(projectStatusNodes) - 1
+	total := 0
+	for _, item := range items {
+		if strings.TrimSpace(item.Status) == ProjectStatusTerminated {
+			total += maxRank
+			continue
+		}
+		total += serviceItemLifecycleRank(item)
+	}
+	return total * 100 / (maxRank * len(items))
 }

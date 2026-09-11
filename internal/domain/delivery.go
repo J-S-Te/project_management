@@ -8,6 +8,8 @@ type ContractActivation struct {
 	ContractVersion         string            `json:"contract_version"`
 	ContractName            string            `json:"contract_name"`
 	Customer                string            `json:"customer"`
+	// CustomerID 是合同系统持有的客户标识；旧版调用方未携带时保持空，项目仍以名称记录客户。
+	CustomerID              string            `json:"customer_id,omitempty"`
 	EffectiveAt             time.Time         `json:"effective_at"`
 	StampedContractUploaded bool              `json:"stamped_contract_uploaded"`
 	Services                []ContractService `json:"services"`
@@ -42,18 +44,22 @@ type Capability struct {
 	ResourceType string    `json:"resource_type"`
 	ResourceID   string    `json:"resource_id"`
 	ResourceName string    `json:"resource_name"`
-	Codes        []string  `json:"codes"`
-	ValidFrom    time.Time `json:"valid_from"`
-	ValidUntil   time.Time `json:"valid_until"`
-	Status       string    `json:"status"`
+	// UserID 是人员能力档案关联的平台 user_id：实施计划的人员行既可按档案编号、
+	// 也可按平台 user_id 提交，服务端统一解析到档案行，消除人员标识双轨制。
+	// 仅 PERSON 类型有意义；设备行保持空。
+	UserID        string    `json:"user_id,omitempty"`
+	Codes         []string  `json:"codes"`
+	ValidFrom     time.Time `json:"valid_from"`
+	ValidUntil    time.Time `json:"valid_until"`
+	Status        string    `json:"status"`
 	// UsageScope 为 ANY（可借出）或 COMPANY_ONLY（仅在公司使用，不可借出）。
 	UsageScope string `json:"usage_scope"`
 	// Presence 是派生状态：IN_COMPANY / OUT_OF_COMPANY（借出中）。仅设备有意义。
 	Presence string `json:"presence,omitempty"`
 	// BorrowedBy 在借出中时说明占用方（项目号）；BorrowedServiceItemID 供设备维护页发起归还。
-	BorrowedBy            string    `json:"borrowed_by,omitempty"`
-	BorrowedServiceItemID string    `json:"borrowed_service_item_id,omitempty"`
-	BorrowedWindow        string    `json:"borrowed_window,omitempty"`
+	BorrowedBy            string `json:"borrowed_by,omitempty"`
+	BorrowedServiceItemID string `json:"borrowed_service_item_id,omitempty"`
+	BorrowedWindow        string `json:"borrowed_window,omitempty"`
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
@@ -75,23 +81,15 @@ type DecompositionAdjustmentInput struct {
 	Items                []ContractService `json:"items"`
 }
 
-type AssignmentInput struct {
-	TeamLeadID       string   `json:"team_lead_id"`
-	ProjectManagerID string   `json:"project_manager_id"`
-	EngineerIDs      []string `json:"engineer_ids"`
-	EquipmentIDs     []string `json:"equipment_ids"`
-	RequiredCodes    []string `json:"required_codes"`
-	PlannedStart     string   `json:"planned_start"`
-	PlannedEnd       string   `json:"planned_end"`
-}
-
 type TeamAssignmentInput struct {
 	TeamLeadID string `json:"team_lead_id"`
 }
+
+// ExecutionAssignmentInput 是团队负责人指派项目经理与实施工程师的输入。
+// 设备清单已在「实施准备」阶段登记，不再随指派提交。
 type ExecutionAssignmentInput struct {
 	ProjectManagerID string   `json:"project_manager_id"`
 	EngineerIDs      []string `json:"engineer_ids"`
-	EquipmentIDs     []string `json:"equipment_ids"`
 	RequiredCodes    []string `json:"required_codes"`
 }
 
@@ -184,12 +182,6 @@ type PreparationInput struct {
 	Notes           string `json:"notes"`
 	// Equipment 是实施准备确定的设备清单；每行带使用时段，服务端按占用区间硬拦重叠。
 	Equipment []PlanResourceInput `json:"equipment"`
-}
-
-type CheckInInput struct {
-	Latitude   float64   `json:"latitude"`
-	Longitude  float64   `json:"longitude"`
-	OccurredAt time.Time `json:"occurred_at"`
 }
 
 type FieldRecordInput struct {

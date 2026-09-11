@@ -467,12 +467,6 @@ func TestDashboardIntegrationUsesVerifiedTenantWithoutRoutingHeader(t *testing.T
 	}
 }
 
-func TestFieldCheckInRejectsInvalidGPS(t *testing.T) {
-	response := perform(router(t, map[string]bool{"project.field.execute": true}, nil), http.MethodPost, "/api/v1/service-items/SI-1/check-in", `{"latitude":120,"longitude":31,"occurred_at":"2026-08-10T00:00:00Z"}`)
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-}
 func TestMissingPermissionIsForbidden(t *testing.T) {
 	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodPost, "/api/v1/projects", `{"name":"越权","customer":"客户","contract":"HT-1","contract_id":"approved-1"}`)
 	if response.Code != http.StatusForbidden {

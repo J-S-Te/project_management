@@ -8,6 +8,7 @@ type Project struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
 	Customer          string    `json:"customer"`
+	CustomerID        string    `json:"customer_id,omitempty"`
 	Contract          string    `json:"contract"`
 	ContractVersion   string    `json:"contract_version,omitempty"`
 	SupplementStatus  string    `json:"supplement_status,omitempty"`
@@ -97,14 +98,28 @@ type Dashboard struct {
 	StatusCounts     map[string]int `json:"status_counts"`
 }
 
-// SlaOverdueItem 是超期服务项的最小投影：超过计划完成时间且未终结的服务项，
-// SLA 超期指标按此口径统一计算（计划完成时间为基准，平台时间 UTC 判定）。
+// SlaOverdueItem 是超期/临近超期服务项的投影。Kind 区分两类口径：
+// PLAN_END_OVERDUE 按计划完成时间判定；STATUS_DEADLINE_* 按 pm_sla 规则对
+// 「停留在某状态的时长」判定（UpdatedAt 即进入当前状态的时间，每次状态推进都会刷新）。
 type SlaOverdueItem struct {
-	ID           string `json:"id"`
-	ProjectID    string `json:"project_id"`
-	Site         string `json:"site"`
-	Category     string `json:"category"`
-	Status       string `json:"status"`
-	PlannedEnd   string `json:"planned_end"`
-	OverdueHours int64  `json:"overdue_hours"`
+	ID            string `json:"id"`
+	ProjectID     string `json:"project_id"`
+	Site          string `json:"site"`
+	Category      string `json:"category"`
+	Status        string `json:"status"`
+	PlannedEnd    string `json:"planned_end,omitempty"`
+	OverdueHours  int64  `json:"overdue_hours"`
+	Kind          string `json:"kind"`
+	RuleName      string `json:"rule_name,omitempty"`
+	RuleStatus    string `json:"rule_status,omitempty"`
+	DeadlineHours int    `json:"deadline_hours,omitempty"`
+	// UpdatedAt 供应用层按 SLA 规则计算停留时长，不对外输出。
+	UpdatedAt time.Time `json:"-"`
 }
+
+// SLA 口径常量。
+const (
+	SlaKindPlanEndOverdue     = "PLAN_END_OVERDUE"
+	SlaKindStatusOverdue      = "STATUS_DEADLINE_OVERDUE"
+	SlaKindStatusApproaching  = "STATUS_DEADLINE_APPROACHING"
+)

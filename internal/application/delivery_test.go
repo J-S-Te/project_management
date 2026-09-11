@@ -71,12 +71,8 @@ func TestImplementationPlanPreconditionGuidesTheUserToTheMissingStep(t *testing.
 	if err := CheckImplementationPlanPrecondition(planPreconditionOf(ready)); err != nil {
 		t.Fatalf("ready item rejected: %v", err)
 	}
-	// 待制定计划同样是合法入口。
-	alsoReady := ready
-	alsoReady.Status = "待制定计划"
-	if err := CheckImplementationPlanPrecondition(planPreconditionOf(alsoReady)); err != nil {
-		t.Fatalf("待制定计划 rejected: %v", err)
-	}
+	// 「待制定计划」已随幽灵指派端点一并移除：任务分配完成即具备计划前置条件，
+	// 该状态在真实流程中不再出现，因此不再作为合法入口（生产库亦无该状态的行）。
 
 	cases := []struct {
 		name     string
@@ -552,56 +548,51 @@ func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
 	})
 }
 
-func TestAssignServiceItemConflictEmitsWarningEventOnlyWhenRuleEnabled(t *testing.T) {
-	principal := principalWith("project.resource.assign", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
-	input := domain.AssignmentInput{
-		TeamLeadID: "TL-1", ProjectManagerID: "PM-1", EngineerIDs: []string{"E-1"},
-		RequiredCodes: []string{"ISO27001"}, PlannedStart: "2026-10-01T00:00:00Z", PlannedEnd: "2026-10-02T00:00:00Z",
-	}
-
-	t.Run("conflict with enabled warning rule appends WARNING_TRIGGERED", func(t *testing.T) {
-		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, CheckType: "能力冲突", Name: "缺资质预警"}}}
-		service := Service{Repo: repo}
-		result, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input)
-		if err != nil {
-			t.Fatalf("AssignServiceItem failed: %v", err)
-		}
-		if result.Passed {
-			t.Fatal("empty capability directory should produce conflicts")
-		}
-		if len(repo.events) != 2 || repo.events[0].Type != EventAssignmentPublished || repo.events[1].Type != EventWarningTriggered {
-			t.Fatalf("expected ASSIGNMENT_PUBLISHED + WARNING_TRIGGERED, got %+v", repo.events)
-		}
-		conflicts, _ := repo.events[1].Payload["conflicts"].([]string)
-		if len(conflicts) == 0 {
-			t.Fatalf("warning event payload must carry conflict list: %+v", repo.events[1].Payload)
-		}
-	})
-
-	t.Run("no warning rules configured appends nothing extra", func(t *testing.T) {
-		repo := &hookRepository{}
-		service := Service{Repo: repo}
-		if _, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input); err != nil {
-			t.Fatalf("AssignServiceItem failed: %v", err)
-		}
-		if len(repo.events) != 1 || repo.events[0].Type != EventAssignmentPublished {
-			t.Fatalf("expected only the assignment event, got %+v", repo.events)
-		}
-	})
-}
-
 func TestListSlaOverdueForwardsScopeFilterToRepository(t *testing.T) {
 	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
-	repo := &hookRepository{overdue: []domain.SlaOverdueItem{{ID: "SI-1", ProjectID: "PJ-1", OverdueHours: 12}}}
+	// 计划完成时间已过才会进入 SLA 口径；OverdueHours 由服务端按当前时间重算，
+	// 不再直接透传仓储给的旧值。
+	plannedEnd := time.Now().UTC().Add(-12 * time.Hour).Format(time.RFC3339)
+	repo := &hookRepository{overdue: []domain.SlaOverdueItem{{ID: "SI-1", ProjectID: "PJ-1", Status: "实施中", PlannedEnd: plannedEnd}}}
 	service := Service{Repo: repo}
 	items, err := service.ListSlaOverdue(context.Background(), principal)
 	if err != nil {
 		t.Fatalf("ListSlaOverdue failed: %v", err)
 	}
-	if len(items) != 1 || items[0].ID != "SI-1" || items[0].OverdueHours != 12 {
+	if len(items) != 1 || items[0].ID != "SI-1" || items[0].Kind != domain.SlaKindPlanEndOverdue {
 		t.Fatalf("overdue items not forwarded: %+v", items)
+	}
+	if items[0].OverdueHours != 12 {
+		t.Fatalf("overdue hours must be recomputed from planned_end, got %d", items[0].OverdueHours)
 	}
 	if repo.lastFilter.TenantID != "tenant-1" {
 		t.Fatalf("scope filter not forwarded, got %+v", repo.lastFilter)
+	}
+}
+
+// 状态停留超期由 pm_sla 规则驱动：只有启用的规则、且状态匹配才产生条目。
+func TestListSlaOverdueConsumesSlaRules(t *testing.T) {
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	candidate := domain.SlaOverdueItem{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施", UpdatedAt: time.Now().UTC().Add(-30 * time.Hour)}
+	repo := &hookRepository{
+		overdue: []domain.SlaOverdueItem{candidate},
+		rules:   []domain.Rule{{Kind: "sla", Enabled: true, Name: "待实施超期", Status: "待实施", DeadlineHours: 24, RemindHours: 4}},
+	}
+	service := Service{Repo: repo}
+	items, err := service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != domain.SlaKindStatusOverdue || items[0].RuleName != "待实施超期" {
+		t.Fatalf("enabled sla rule must produce a status-deadline item: %+v", items)
+	}
+	// 规则停用后不应再产生条目。
+	repo.rules[0].Enabled = false
+	items, err = service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("disabled sla rule must not produce items: %+v", items)
 	}
 }

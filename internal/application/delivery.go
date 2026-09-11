@@ -15,21 +15,21 @@ import (
 )
 
 const (
-	EventContractActivated       = "CONTRACT_ACTIVATED"
-	EventContractStampStatus     = "CONTRACT_STAMP_STATUS_SYNCED"
-	EventDecompositionAdjusted   = "DECOMPOSITION_ADJUSTED"
-	EventAssignmentPublished     = "ASSIGNMENT_PUBLISHED"
-	EventTeamAssigned            = "TEAM_ASSIGNED"
-	EventExecutionTeamAssigned   = "EXECUTION_TEAM_ASSIGNED"
-	EventImplementationPlanned   = "IMPLEMENTATION_PLANNED"
-	EventPreparationStarted      = "PREPARATION_STARTED"
-	EventFieldCheckIn            = "FIELD_CHECK_IN"
-	EventFieldRecordSubmitted    = "FIELD_RECORD_SUBMITTED"
-	EventDeviationReported       = "DEVIATION_REPORTED"
-	EventDeviationReviewed       = "DEVIATION_REVIEWED"
-	EventFieldImplementationDone = "FIELD_IMPLEMENTATION_COMPLETED"
-	EventSpecialMethodReviewed   = "SPECIAL_METHOD_REVIEWED"
-	EventReportStatusUpdated     = "REPORT_STATUS_UPDATED"
+	EventContractActivated     = "CONTRACT_ACTIVATED"
+	EventContractStampStatus   = "CONTRACT_STAMP_STATUS_SYNCED"
+	EventDecompositionAdjusted = "DECOMPOSITION_ADJUSTED"
+	EventTeamAssigned          = "TEAM_ASSIGNED"
+	EventExecutionTeamAssigned = "EXECUTION_TEAM_ASSIGNED"
+	EventImplementationPlanned = "IMPLEMENTATION_PLANNED"
+	EventPreparationStarted    = "PREPARATION_STARTED"
+	EventFieldRecordSubmitted  = "FIELD_RECORD_SUBMITTED"
+	EventDeviationReported     = "DEVIATION_REPORTED"
+	EventDeviationReviewed     = "DEVIATION_REVIEWED"
+	// EventFieldCompleted 是单服务项的现场完成事件：服务项进入报告编制，
+	// 全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切完成。
+	EventFieldCompleted         = "FIELD_COMPLETED"
+	EventSpecialMethodReviewed  = "SPECIAL_METHOD_REVIEWED"
+	EventReportStatusUpdated    = "REPORT_STATUS_UPDATED"
 	// EventEquipmentReturned 记录设备归还：写回设备行的归还时间，释放占用。
 	EventEquipmentReturned = "EQUIPMENT_RETURNED"
 	// EventAutomationTriggered 是配置驱动的派生事件：事件落库后有启用的
@@ -62,8 +62,11 @@ func (s *Service) deliveryRepo() (DeliveryRepository, error) {
 	return repo, nil
 }
 
-// ListSlaOverdue 返回超过计划完成时间且尚未终结的服务项，
-// 超期时长按计划完成时间与当前 UTC 的差额计算（分钟级取整为小时）。
+// ListSlaOverdue 返回两类超期/临近超期口径的合并列表：
+// 1. 计划完成时间已过且尚未终结的服务项（与配置无关的固定口径）；
+// 2. 启用的 pm_sla 规则判定：服务项停留在规则状态超过 deadline_hours（超期），
+//    或剩余时间不足 remind_hours（临近提醒）。停留时长以服务项 updated_at 为准，
+//    每次状态推进都会刷新该时间。
 func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]domain.SlaOverdueItem, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
@@ -73,7 +76,57 @@ func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]d
 	if err != nil {
 		return nil, err
 	}
-	return repo.ListSlaOverdue(ctx, filter)
+	candidates, err := repo.ListSlaOverdue(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := s.Repo.ListRules(ctx, p.TenantID, "sla")
+	if err != nil {
+		return nil, err
+	}
+	return computeSlaItems(candidates, rules, time.Now().UTC()), nil
+}
+
+// computeSlaItems 把未终结服务项展开成 SLA 口径列表：计划完成超期每项一条；
+// 命中启用规则的状态停留超期/临近提醒各一条。
+func computeSlaItems(candidates []domain.SlaOverdueItem, rules []domain.Rule, now time.Time) []domain.SlaOverdueItem {
+	items := make([]domain.SlaOverdueItem, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.PlannedEnd != "" {
+			plannedEnd, err := time.Parse(time.RFC3339, candidate.PlannedEnd)
+			if err == nil && plannedEnd.Before(now) {
+				overdue := candidate
+				overdue.Kind = domain.SlaKindPlanEndOverdue
+				overdue.OverdueHours = int64(now.Sub(plannedEnd).Hours())
+				items = append(items, overdue)
+			}
+		}
+		for _, rule := range rules {
+			if !rule.Enabled || strings.TrimSpace(rule.Status) != candidate.Status {
+				continue
+			}
+			elapsed := int64(now.Sub(candidate.UpdatedAt).Hours())
+			switch {
+			case elapsed > int64(rule.DeadlineHours):
+				breach := candidate
+				breach.Kind = domain.SlaKindStatusOverdue
+				breach.OverdueHours = elapsed - int64(rule.DeadlineHours)
+				breach.RuleName = rule.Name
+				breach.RuleStatus = rule.Status
+				breach.DeadlineHours = rule.DeadlineHours
+				items = append(items, breach)
+			case rule.RemindHours > 0 && int64(rule.DeadlineHours)-elapsed <= int64(rule.RemindHours):
+				breach := candidate
+				breach.Kind = domain.SlaKindStatusApproaching
+				breach.OverdueHours = int64(rule.DeadlineHours) - elapsed
+				breach.RuleName = rule.Name
+				breach.RuleStatus = rule.Status
+				breach.DeadlineHours = rule.DeadlineHours
+				items = append(items, breach)
+			}
+		}
+	}
+	return items
 }
 
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
@@ -102,10 +155,16 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if !filter.AllowAll && !filter.AllowSelf && ownerOrgID == "" {
 		return domain.Project{}, ErrForbidden
 	}
-	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
+	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
 	grouped, groupErr := groupContractServices(input.Services)
 	if groupErr != nil {
 		return domain.Project{}, groupErr
+	}
+	// 拆解规则在合同激活主路径同样生效：存在启用规则时，未命中任何规则的服务项
+	// 直接进入待分配，命中规则的保留待确认以便重点复核；无规则时全部待确认。
+	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
+	if err != nil {
+		return domain.Project{}, err
 	}
 	items := make([]domain.ServiceItem, 0, len(grouped))
 	for index, source := range grouped {
@@ -119,7 +178,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return domain.Project{}, ErrValidation
 		}
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: "待确认", ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: splitRuleItemStatus(splitRules, source), ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
@@ -154,8 +213,12 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
 	}
+	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
+	if err != nil {
+		return err
+	}
 	items := make([]domain.ServiceItem, 0, len(input.Items))
-	for index, source := range input.Items {
+	for _, source := range input.Items {
 		if source.SourceID == "" || source.Site == "" || source.Batch == "" || source.Category == "" {
 			return ErrValidation
 		}
@@ -163,41 +226,21 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return ErrValidation
 		}
-		items = append(items, domain.ServiceItem{ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(projectID, "PJ-"), index+1), ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: "待确认", ConflictStatus: "UNCHECKED"})
+		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突；
+		// 拆解规则与创建/激活路径共用同一语义。
+		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: splitRuleItemStatus(splitRules, source), ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items}))
 }
 
-func (s *Service) AssignServiceItem(ctx context.Context, p platform.Principal, itemID string, input domain.AssignmentInput) (domain.ConflictCheckResult, error) {
-	if err := s.authorizeServiceItem(ctx, p, "project.resource.assign", itemID); err != nil {
-		return domain.ConflictCheckResult{}, err
+// splitRuleItemStatus 决定一个服务项在拆解时的初始状态：存在启用规则且未命中任何
+// 规则的服务项自动确认（待分配，跳过人工确认），命中规则的保留待确认以便重点复核；
+// 未配置规则时全部待确认。三条拆解入口（手工创建、合同激活、拆解调整）共用此语义。
+func splitRuleItemStatus(splitRules []domain.Rule, source domain.ContractService) string {
+	if hasEnabledSplitRule(splitRules) && !matchesSplitRule(splitRules, source.Batch, source.Site, source.Category) {
+		return "待分配"
 	}
-	if strings.TrimSpace(input.TeamLeadID) == "" || strings.TrimSpace(input.ProjectManagerID) == "" || len(input.EngineerIDs) == 0 || input.PlannedStart == "" || input.PlannedEnd == "" {
-		return domain.ConflictCheckResult{}, ErrValidation
-	}
-	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
-	end, e2 := time.Parse(time.RFC3339, input.PlannedEnd)
-	if e1 != nil || e2 != nil || !end.After(start) {
-		return domain.ConflictCheckResult{}, ErrValidation
-	}
-	repo, err := s.deliveryRepo()
-	if err != nil {
-		return domain.ConflictCheckResult{}, err
-	}
-	resourceIDs := append(append([]string{}, input.EngineerIDs...), input.EquipmentIDs...)
-	capabilities, err := repo.FindCapabilities(ctx, p.TenantID, time.Now().UTC().Format(time.RFC3339), resourceIDs)
-	if err != nil {
-		return domain.ConflictCheckResult{}, err
-	}
-	result := checkCapabilities(input.RequiredCodes, resourceIDs, capabilities)
-	payload := map[string]any{"team_lead_id": input.TeamLeadID, "project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "equipment_ids": input.EquipmentIDs, "required_codes": input.RequiredCodes, "planned_start": input.PlannedStart, "planned_end": input.PlannedEnd, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
-	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventAssignmentPublished, payload)); err != nil {
-		return domain.ConflictCheckResult{}, err
-	}
-	if !result.Passed {
-		s.fireConflictWarning(ctx, p, itemID, result.Conflicts)
-	}
-	return result, nil
+	return "待确认"
 }
 
 func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID string, input domain.TeamAssignmentInput) error {
@@ -242,13 +285,13 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
-	ids := append(append([]string{}, input.EngineerIDs...), input.EquipmentIDs...)
+	ids := append([]string{}, input.EngineerIDs...)
 	caps, err := repo.FindCapabilities(ctx, p.TenantID, time.Now().UTC().Format(time.RFC3339), ids)
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
 	result := checkCapabilities(required, ids, caps)
-	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "equipment_ids": input.EquipmentIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
+	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
 	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload)); err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
@@ -445,7 +488,7 @@ type PlanPrecondition struct {
 // 应用层与仓储层共用它，避免两处守卫各自演化；同时把模糊的 422 变成可执行的指引。
 func CheckImplementationPlanPrecondition(item PlanPrecondition) error {
 	switch strings.TrimSpace(item.Status) {
-	case "待分配", "待制定计划":
+	case "待分配":
 	default:
 		return PreconditionError(fmt.Sprintf("服务项当前状态为「%s」，不能发布实施计划。", strings.TrimSpace(item.Status)))
 	}
@@ -525,11 +568,26 @@ func (s *Service) ReviewSpecialMethod(ctx context.Context, p platform.Principal,
 }
 
 // UpdateReportStatus 服务项报告从编制中逐级推进：编制中→已审核→已签发→已归档。
+// 报告推进把项目推向「已完成」，是交付收口动作，使用独立的报告管理权限，
+// 不与现场执行权限（project.field.complete）混用。
 func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, itemID string, input domain.ReportStatusInput) error {
-	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
+	// 报告推进拆成两级职责：编制/审核/签发属于报告编制（project.report.manage），
+	// 归档会把项目推向"已完成"，属于独立治理动作（project.report.archive）。
+	// 现场执行角色不再顺带拥有归档权。
+	phase := strings.ToUpper(strings.TrimSpace(input.Phase))
+	if err := s.authorizeServiceItem(ctx, p, reportPhasePermission(phase), itemID); err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": strings.ToUpper(strings.TrimSpace(input.Phase))}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase}))
+}
+
+// reportPhasePermission 返回推进到目标报告阶段所需的权限码。
+// 归档（ARCHIVED）会把项目推向"已完成"，属于独立治理动作；编制/审核/签发属于报告编制。
+func reportPhasePermission(phase string) string {
+	if strings.EqualFold(strings.TrimSpace(phase), "ARCHIVED") {
+		return "project.report.archive"
+	}
+	return "project.report.manage"
 }
 
 func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PreparationInput) error {
@@ -706,16 +764,6 @@ func windowLabel(row domain.PlanResource, planStart, planEnd time.Time) string {
 	return row.WindowStart + " ~ " + row.WindowEnd
 }
 
-func (s *Service) CheckIn(ctx context.Context, p platform.Principal, itemID string, input domain.CheckInInput) error {
-	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
-		return err
-	}
-	if input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 || input.OccurredAt.IsZero() || time.Since(input.OccurredAt) > 24*time.Hour || time.Until(input.OccurredAt) > 5*time.Minute {
-		return ErrValidation
-	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCheckIn, map[string]any{"latitude": input.Latitude, "longitude": input.Longitude, "occurred_at": input.OccurredAt}))
-}
-
 func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, itemID string, input domain.FieldRecordInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
 		return err
@@ -757,11 +805,14 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, itemID, EventDeviationReviewed, map[string]any{"deviation_id": deviationID, "decision": decision, "comment": input.Comment}))
 }
 
-func (s *Service) CompleteFieldImplementation(ctx context.Context, p platform.Principal, projectID string) error {
-	if err := s.authorizeProject(ctx, p, "project.field.complete", projectID); err != nil {
+// CompleteServiceItemField 确认单个服务项现场实施完成：服务项进入「现场实施完成」
+// 并开启报告编制；全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切
+// 完成入口——多服务项项目里各服务项按自己的节奏收口。
+func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Principal, itemID string) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventFieldImplementationDone, map[string]any{"confirmed_by": p.UserID}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, map[string]any{"confirmed_by": p.UserID}))
 }
 
 func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, projectID string) ([]domain.DeliveryEvent, error) {
@@ -773,7 +824,13 @@ func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, 
 	if e != nil {
 		return nil, e
 	}
-	return repo.ListDeliveryEvents(ctx, filter, projectID)
+	events, err := repo.ListDeliveryEvents(ctx, filter, projectID)
+	if err != nil {
+		return nil, err
+	}
+	// 事件流是审计视图，必须与项目/服务项读路径共用同一套字段级脱敏：
+	// payload 里的指派快照与拆解快照否则会绕开隐藏配置。
+	return s.applyFieldPermissionsToEvents(ctx, p, events)
 }
 
 // CapabilityImportResult 汇总一次能力记录导出的导入结果。
@@ -1040,7 +1097,20 @@ func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEven
 	triggered.Type = EventAutomationTriggered
 	triggered.CreatedAt = time.Now().UTC().Add(time.Millisecond)
 	triggered.Payload = map[string]any{"trigger": event.Type, "targets": targets}
-	_ = repo.ApplyDeliveryEvent(ctx, triggered)
+	if err := repo.ApplyDeliveryEvent(ctx, triggered); err != nil {
+		s.logDerivedEventFailure("automation", event, err)
+	}
+}
+
+// logDerivedEventFailure 记录派生事件写入失败。派生事件不回滚主事件，
+// 但静默吞掉会让"规则配了却没触发"变成无法诊断的问题。
+func (s *Service) logDerivedEventFailure(kind string, source domain.DeliveryEvent, err error) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Warn("derived delivery event was not persisted",
+		"kind", kind, "source_event", source.Type, "project_id", source.ProjectID,
+		"service_item_id", source.ServiceItemID, "error", err)
 }
 
 // fireConflictWarning 在任务分配/执行团队指派产生能力冲突且有启用的「冲突预警规则」时，
@@ -1050,21 +1120,110 @@ func (s *Service) fireConflictWarning(ctx context.Context, p platform.Principal,
 	if err != nil {
 		return
 	}
-	active := false
+	// check_type 决定规则覆盖哪一类冲突，threshold 决定至少要几项命中才告警。
+	// 两个字段都必须参与判定，否则"配了规则就无差别触发"等于配置没有意义。
+	matchedRules := make([]string, 0, len(rules))
+	matchedConflicts := make([]string, 0, len(conflicts))
+	threshold := 0
 	for _, rule := range rules {
-		if rule.Enabled {
-			active = true
-			break
+		if !rule.Enabled {
+			continue
+		}
+		hits := make([]string, 0, len(conflicts))
+		for _, conflict := range conflicts {
+			if warningRuleMatches(rule, conflict) {
+				hits = append(hits, conflict)
+			}
+		}
+		required := warningThreshold(rule)
+		if len(hits) < required {
+			continue
+		}
+		matchedRules = append(matchedRules, rule.Name)
+		matchedConflicts = append(matchedConflicts, hits...)
+		if threshold == 0 || required < threshold {
+			threshold = required
 		}
 	}
-	if !active {
+	if len(matchedRules) == 0 {
 		return
 	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return
 	}
-	_ = repo.ApplyDeliveryEvent(ctx, deliveryEvent(p, "", itemID, EventWarningTriggered, map[string]any{"conflicts": conflicts}))
+	source := deliveryEvent(p, "", itemID, EventWarningTriggered, nil)
+	event := deliveryEvent(p, "", itemID, EventWarningTriggered, map[string]any{
+		"conflicts": uniqueStrings(matchedConflicts),
+		"rules":     matchedRules,
+		"threshold": threshold,
+	})
+	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
+		s.logDerivedEventFailure("warning", source, err)
+	}
+}
+
+// conflictKind 把能力校验产生的冲突描述归类，供预警规则的 check_type 匹配。
+func conflictKind(conflict string) string {
+	switch {
+	case strings.Contains(conflict, "资质"):
+		return "资质能力冲突"
+	case strings.Contains(conflict, "缺少能力"):
+		return "能力缺失"
+	default:
+		return "其他冲突"
+	}
+}
+
+// warningRuleMatches 判断预警规则是否覆盖某条冲突：check_type 为空表示不限类型，
+// 否则按冲突类别名或冲突原文做子串匹配（配置里写"资质能力冲突"或"资质"都能命中）。
+func warningRuleMatches(rule domain.Rule, conflict string) bool {
+	checkType := strings.TrimSpace(rule.CheckType)
+	if checkType == "" {
+		return true
+	}
+	return strings.Contains(conflictKind(conflict), checkType) || strings.Contains(conflict, checkType)
+}
+
+// warningThreshold 解析规则的冲突数量阈值，允许 "3" 或 "连续 3 项冲突" 这类写法；
+// 空值/非法值按 1 处理，保持"配了规则至少一条冲突即告警"的直觉语义。
+func warningThreshold(rule domain.Rule) int {
+	raw := strings.TrimSpace(rule.Threshold)
+	if raw == "" {
+		return 1
+	}
+	digits := strings.Builder{}
+	for _, symbol := range raw {
+		if symbol >= '0' && symbol <= '9' {
+			digits.WriteRune(symbol)
+			continue
+		}
+		if digits.Len() > 0 {
+			break
+		}
+	}
+	if digits.Len() == 0 {
+		return 1
+	}
+	value, err := strconv.Atoi(digits.String())
+	if err != nil || value < 1 {
+		return 1
+	}
+	return value
+}
+
+// uniqueStrings 去重并保持首次出现顺序，避免多条规则命中同一条冲突时重复上报。
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (s *Service) authorizeProject(ctx context.Context, p platform.Principal, permission, projectID string) error {

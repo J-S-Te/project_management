@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,9 @@ type Service struct {
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
 	// ErrPersonnelUnavailable，不影响其余项目功能。
 	Personnel platform.OwnerDirectory
+	// Logger 可选。派生事件（自动化/预警）是主事件提交后的 best-effort 副作用：
+	// 写入失败不会回滚主流程，但必须留下可观测痕迹，否则"配置触发了但没落库"无人知晓。
+	Logger *slog.Logger
 }
 
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {

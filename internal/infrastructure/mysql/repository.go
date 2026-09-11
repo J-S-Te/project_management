@@ -536,7 +536,13 @@ func (r *Repository) ListEquipmentReservations(ctx context.Context, tenantID, ex
 		Select("plan.service_item_id, item.project_id, project.customer, plan.equipment, plan.planned_start, plan.planned_end").
 		Joins("JOIN pm_service_item AS item ON item.tenant_id = plan.tenant_id AND item.id = plan.service_item_id").
 		Joins("LEFT JOIN pm_project AS project ON project.tenant_id = item.tenant_id AND project.id = item.project_id").
-		Where("plan.tenant_id = ? AND plan.equipment IS NOT NULL", tenantID)
+		Where("plan.tenant_id = ? AND plan.equipment IS NOT NULL", tenantID).
+		// 只有真正持有设备的服务项才算占用：被偏离评审打回「待实施」或已终止的项，
+		// 计划里虽然还留着设备清单，但设备已经不该继续被它锁住。
+		Where("item.status IN ?", []string{
+			domain.ProjectStatusPreparing, domain.ProjectStatusInProgress,
+			domain.ProjectStatusException, domain.ProjectStatusFieldCompleted,
+		})
 	if excludeServiceItemID != "" {
 		query = query.Where("plan.service_item_id <> ?", excludeServiceItemID)
 	}

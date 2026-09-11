@@ -154,21 +154,6 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["equipment_ids"] = jsonValue(event.Payload["equipment_ids"])
 		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
 		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
-	case application.EventAssignmentPublished:
-		if item.Status != "待分配" {
-			return application.ErrValidation
-		}
-		updates["team_lead_id"] = stringValue(event.Payload, "team_lead_id")
-		updates["project_manager_id"] = stringValue(event.Payload, "project_manager_id")
-		updates["engineer_ids"] = jsonValue(event.Payload["engineer_ids"])
-		updates["equipment_ids"] = jsonValue(event.Payload["equipment_ids"])
-		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
-		updates["planned_start"] = rfc3339Value(event.Payload, "planned_start")
-		updates["planned_end"] = rfc3339Value(event.Payload, "planned_end")
-		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
-		if updates["conflict_status"] == "PASSED" {
-			updates["status"] = "待制定计划"
-		}
 	case application.EventImplementationPlanned:
 		// 与 PlanImplementation 共用同一套前置规则：行锁内复查可覆盖读后状态变化的竞态，
 		// 并且仍然返回可执行的原因而不是笼统的参数错误。
@@ -230,15 +215,21 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 		updates["status"] = "实施准备中"
-	case application.EventFieldCheckIn:
+	case application.EventFieldRecordSubmitted:
+		// 现场记录（原始数据 / 环境条件）是进入"实施中"的真实动作。
+		// 原先由坐标签到承担这个状态推进，但那份坐标没有任何证明力，已删除；
+		// 这里沿用同一转移，避免服务项停在"实施准备中"再也走不动。
 		if item.Status != "待实施" && item.Status != "实施准备中" && item.Status != "实施中" {
 			return application.ErrValidation
 		}
 		updates["status"] = "实施中"
-	case application.EventFieldRecordSubmitted:
+	case application.EventFieldCompleted:
+		// 按服务项确认现场完成：先做完的项不必等项目里最后一个动作"顺带"完成。
 		if item.Status != "实施中" {
 			return application.ErrValidation
 		}
+		updates["status"] = "现场实施完成"
+		updates["report_status"] = "COMPILING"
 	case application.EventDeviationReported:
 		if item.Status != "实施中" {
 			return application.ErrValidation
@@ -305,19 +296,6 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		updates["services"] = len(items)
 		updates["supplement_status"] = "REQUIRED"
 		updates["status"] = "补充协议处理中"
-	case application.EventFieldImplementationDone:
-		var count int64
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status NOT IN ?", project.TenantID, project.ID, []string{"实施中", "现场实施完成", "已终止"}).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
-			return application.ErrValidation
-		}
-		updates["status"] = "现场实施完成"
-		updates["progress"] = 80
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status=?", project.TenantID, project.ID, "实施中").Updates(map[string]any{"status": "现场实施完成", "report_status": "COMPILING", "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error; err != nil {
-			return err
-		}
 	}
 	if len(updates) == 1 {
 		return nil
@@ -339,7 +317,10 @@ func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
 		return err
 	}
 	derived := domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
-	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", tenantID, projectID).Update("status", derived).Error
+	// 进度与状态同源：两者都由同一次服务项投影派生，避免进度退化成没人写的装饰字段。
+	progress := domain.DeriveProjectProgress(items)
+	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", tenantID, projectID).
+		Updates(map[string]any{"status": derived, "progress": progress}).Error
 }
 
 // ListSlaOverdue 返回超期服务项：计划完成时间早于当前 UTC 且尚未进入终态。
