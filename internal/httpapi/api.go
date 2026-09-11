@@ -69,12 +69,12 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	}
 	if integration := routerOptions.ContractIntegration; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1")
-		internal.Use(h.authenticateContractIntegration(*integration))
+		internal.Use(h.authenticateContractIntegration(*integration), h.auditWrites())
 		internal.POST("/contracts/activate", h.activateContract)
 	}
 	if integration := routerOptions.DashboardIntegration; integration != nil && integration.Enabled {
 		daInternal := router.Group("/internal/v1")
-		daInternal.Use(h.authenticateDashboardIntegration(*integration))
+		daInternal.Use(h.authenticateDashboardIntegration(*integration), h.auditWrites())
 		daInternal.GET("/dashboard", h.dashboard)
 	}
 	if flow, ok := identity.(OIDCFlow); ok {
@@ -96,6 +96,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/projects/:id", require("project.read"), h.getProject)
 	api.POST("/projects/:id/decomposition-adjustments", require("project.decomposition.manage"), h.adjustDecomposition)
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
+	api.GET("/delivery/sla-overdue", require("project.read"), h.listSlaOverdue)
 	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
@@ -163,7 +164,12 @@ func loggedOut(c *gin.Context) {
 }
 func securityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 面向业务控制台的 JSON API 不渲染第三方内容，安全头按"尽可能收紧"配置：
+		// 禁止被任何页面/iframe 内嵌，阻止嗅探、缓存与跨站引用链条。
 		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		c.Header("Cache-Control", "no-store")
 		c.Next()
 	}
@@ -498,6 +504,14 @@ func (h *Handler) adjustDecomposition(c *gin.Context) {
 }
 func (h *Handler) listDeliveryEvents(c *gin.Context) {
 	items, err := h.service.ListDeliveryEvents(c.Request.Context(), principal(c), c.Query("project_id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+func (h *Handler) listSlaOverdue(c *gin.Context) {
+	items, err := h.service.ListSlaOverdue(c.Request.Context(), principal(c))
 	if err != nil {
 		writeServiceError(c, err)
 		return

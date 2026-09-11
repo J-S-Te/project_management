@@ -47,7 +47,7 @@ func (r *scopeRepository) GetServiceItem(_ context.Context, filter platform.Scop
 	r.lastFilter = filter
 	return domain.ServiceItem{ID: id, ProjectID: "PJ-1"}, nil
 }
-func (r *scopeRepository) ConfirmServiceItems(context.Context, string, []string, string) ([]domain.ServiceItem, error) {
+func (r *scopeRepository) ConfirmServiceItems(context.Context, platform.ScopeFilter, []string, string) ([]domain.ServiceItem, error) {
 	return nil, nil
 }
 func (r *scopeRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
@@ -296,6 +296,7 @@ type capabilityRepository struct {
 	scopeRepository
 	capabilities []domain.Capability
 	reservations []domain.EquipmentReservation
+	saved        []domain.Capability
 }
 
 func (r *capabilityRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
@@ -310,14 +311,18 @@ func (r *capabilityRepository) SyncContractStampStatus(context.Context, domain.P
 func (r *capabilityRepository) ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error {
 	return nil
 }
+func (r *capabilityRepository) ListSlaOverdue(context.Context, platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
+	return nil, nil
+}
 func (r *capabilityRepository) ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error) {
 	return nil, nil
 }
 func (r *capabilityRepository) FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error) {
 	return "", "", ErrNotFound
 }
-func (r *capabilityRepository) UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error) {
-	return domain.Capability{}, nil
+func (r *capabilityRepository) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
+	r.saved = append(r.saved, item)
+	return item, nil
 }
 func (r *capabilityRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
 	return r.capabilities, nil
@@ -498,5 +503,52 @@ func TestFieldPermissionIgnoredForOtherRolesAndDisabledRules(t *testing.T) {
 	}
 	if project.Customer != "客户" {
 		t.Fatalf("customer=%q want 客户", project.Customer)
+	}
+}
+
+// confirmScopeRepository 记录确认拆解是否把数据范围过滤转交仓储层（M4）。
+type confirmScopeRepository struct {
+	scopeRepository
+	filter platform.ScopeFilter
+	ids    []string
+	err    error
+	items  []domain.ServiceItem
+}
+
+func (r *confirmScopeRepository) ConfirmServiceItems(_ context.Context, filter platform.ScopeFilter, ids []string, _ string) ([]domain.ServiceItem, error) {
+	r.filter = filter
+	r.ids = ids
+	return r.items, r.err
+}
+
+// 确认拆解不再走同步 Temporal：服务层把范围过滤连同 ids 一起交给仓储事务；
+// 范围外的服务项由事务锁查询直接拒掉，而不是等读后写再校验。
+func TestConfirmServiceItemsForwardsScopeFilterToRepository(t *testing.T) {
+	repository := &confirmScopeRepository{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}}}
+	service := &Service{Repo: repository}
+	principal := principalWith("service_item.confirm", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"})
+
+	items, err := service.ConfirmServiceItems(context.Background(), principal, []string{"SI-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "SI-1" {
+		t.Fatalf("items=%+v", items)
+	}
+	if len(repository.filter.ProjectIDs) != 1 || repository.filter.ProjectIDs[0] != "PJ-1" {
+		t.Fatalf("service must forward the project scope filter, got %+v", repository.filter)
+	}
+	if len(repository.ids) != 1 || repository.ids[0] != "SI-1" {
+		t.Fatalf("ids=%v", repository.ids)
+	}
+}
+
+// 范围外确认请求由仓储层直接返回 ErrNotFound，服务层原样透传而不是包裹成 500。
+func TestConfirmServiceItemsOutOfScopePassthrough(t *testing.T) {
+	repository := &confirmScopeRepository{err: ErrNotFound}
+	service := &Service{Repo: repository}
+	principal := principalWith("service_item.confirm", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-OTHER"})
+	if _, err := service.ConfirmServiceItems(context.Background(), principal, []string{"SI-1"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error=%v", err)
 	}
 }

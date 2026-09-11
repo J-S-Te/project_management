@@ -10,16 +10,17 @@ import (
 
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
-	"github.com/j-s-te/project-management/internal/workflows"
 	"github.com/oklog/ulid/v2"
-	"go.temporal.io/sdk/client"
 )
 
 var (
 	ErrNotFound   = errors.New("resource not found")
 	ErrValidation = errors.New("validation failed")
 	ErrConflict   = errors.New("resource state conflict")
-	ErrForbidden  = errors.New("operation is outside the authorized project scope")
+	// ErrDuplicateContract 表示同一租户下 (contract_id, contract_version) 已被并发请求创建。
+	// 调用方应按幂等处理：回读已存在的项目并同步盖章状态，而不是把唯一键冲突暴露成 500。
+	ErrDuplicateContract = errors.New("contract version already activated")
+	ErrForbidden         = errors.New("operation is outside the authorized project scope")
 	// ErrServiceTimeout 表示同步等待后端工作流在约定时间内没有完成。
 	// 前端应提示用户稍后重试，而不是让网关吞掉请求并返回 504。
 	ErrServiceTimeout = errors.New("service processing timeout")
@@ -72,7 +73,7 @@ type Repository interface {
 	CreateProject(context.Context, domain.Project) error
 	ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error)
 	GetServiceItem(context.Context, platform.ScopeFilter, string) (domain.ServiceItem, error)
-	ConfirmServiceItems(context.Context, string, []string, string) ([]domain.ServiceItem, error)
+	ConfirmServiceItems(context.Context, platform.ScopeFilter, []string, string) ([]domain.ServiceItem, error)
 	ListRules(context.Context, string, string) ([]domain.Rule, error)
 	CreateRule(context.Context, domain.Rule) (domain.Rule, error)
 	UpdateRule(context.Context, string, string, int64, domain.Rule) (domain.Rule, error)
@@ -87,14 +88,8 @@ type ProjectServiceCreator interface {
 	CreateProjectWithServiceItems(context.Context, domain.Project, []domain.ServiceItem) error
 }
 
-type WorkflowExecutor interface {
-	ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error)
-}
-
 type Service struct {
-	Repo      Repository
-	Temporal  WorkflowExecutor
-	TaskQueue string
+	Repo Repository
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
 	// ErrPersonnelUnavailable，不影响其余项目功能。
 	Personnel platform.OwnerDirectory
@@ -388,36 +383,10 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 	if len(ids) == 0 {
 		return nil, ErrValidation
 	}
-	if s.Temporal == nil {
-		return nil, errors.New("temporal client unavailable")
-	}
-	for _, id := range ids {
-		if _, err := s.Repo.GetServiceItem(ctx, filter, id); err != nil {
-			return nil, err
-		}
-	}
-	input := workflows.ConfirmServiceItemsInput{TenantID: p.TenantID, IDs: ids, ActorUserID: p.UserID}
-	workflowID := fmt.Sprintf("project-service-items-confirm:%s:%s", p.TenantID, ulid.Make().String())
-	// 为工作流设置明确的执行超时：确认拆解会被 API 同步等待，若 Worker 未就绪或活动持续失败，
-	// 该超时会终止工作流，避免它在后台无限期运行（进一步从根上杜绝网关 504）。
-	run, err := s.Temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: workflowID, TaskQueue: s.TaskQueue, WorkflowExecutionTimeout: 2 * time.Minute}, workflows.ConfirmServiceItemsWorkflowName, input)
-	if err != nil {
-		return nil, err
-	}
-	// 确认拆解本应是秒级的事务性写入，却在请求路径上同步等待 Temporal 工作流。
-	// 若工作流因 Worker 未就绪、活动重试或数据库锁等待而长时间不返回，会被网关默认的
-	// proxy_read_timeout(60s) 直接打成 504。这里给等待加一个硬超时并返回明确错误，
-	// 让用户看到“处理超时请重试”而不是网关错误页；工作流随后由自身的执行超时收敛。
-	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	var result workflows.ConfirmServiceItemsResult
-	if err := run.Get(waitCtx, &result); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, ErrServiceTimeout
-		}
-		return nil, err
-	}
-	return result.Items, nil
+	// 确认拆解是纯事务性行更新，直接走仓储层加锁事务；不再同步等待 Temporal 工作流，
+	// 避免 Worker 未就绪或活动重试把请求打成网关 504。状态前置校验与数据范围过滤
+	// 都在事务行锁内执行（repository.ConfirmServiceItems）。
+	return s.Repo.ConfirmServiceItems(ctx, filter, ids, p.UserID)
 }
 
 func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input domain.Rule) (domain.Rule, error) {
@@ -450,6 +419,10 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 		}
 	case "sla":
 		if strings.TrimSpace(input.Status) == "" || input.DeadlineHours <= 0 {
+			return input, ErrValidation
+		}
+	case "standards":
+		if strings.TrimSpace(input.Scope) == "" {
 			return input, ErrValidation
 		}
 	default:

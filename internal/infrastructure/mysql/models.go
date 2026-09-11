@@ -27,34 +27,34 @@ type projectRecord struct {
 func (projectRecord) TableName() string { return "pm_project" }
 
 type serviceItemRecord struct {
-	ID               string `gorm:"primaryKey;size:32"`
-	TenantID         string `gorm:"size:64;not null;index:idx_pm_service_tenant_project,priority:1"`
-	ProjectID        string `gorm:"size:32;not null;index:idx_pm_service_tenant_project,priority:2"`
-	SourceServiceID  string `gorm:"type:text;not null"`
-	Batch            string `gorm:"size:64"`
-	Site             string `gorm:"size:255"`
-	Category         string `gorm:"size:255"`
-	Requirement      string `gorm:"type:text"`
-	System           string `gorm:"size:128"`
-	SystemLevel      string `gorm:"size:64"`
-	Special          string `gorm:"size:16"`
-	TestMode         string `gorm:"size:32;not null"`
-	TeamLeadID       string `gorm:"size:64"`
-	ProjectManagerID string `gorm:"size:64"`
-	EngineerIDs      []byte `gorm:"type:json"`
-	EquipmentIDs     []byte `gorm:"type:json"`
-	RequiredCodes    []byte `gorm:"type:json"`
+	ID                string `gorm:"primaryKey;size:32"`
+	TenantID          string `gorm:"size:64;not null;index:idx_pm_service_tenant_project,priority:1"`
+	ProjectID         string `gorm:"size:32;not null;index:idx_pm_service_tenant_project,priority:2"`
+	SourceServiceID   string `gorm:"type:text;not null"`
+	Batch             string `gorm:"size:64"`
+	Site              string `gorm:"size:255"`
+	Category          string `gorm:"size:255"`
+	Requirement       string `gorm:"type:text"`
+	System            string `gorm:"size:128"`
+	SystemLevel       string `gorm:"size:64"`
+	Special           string `gorm:"size:16"`
+	TestMode          string `gorm:"size:32;not null"`
+	TeamLeadID        string `gorm:"size:64"`
+	ProjectManagerID  string `gorm:"size:64"`
+	EngineerIDs       []byte `gorm:"type:json"`
+	EquipmentIDs      []byte `gorm:"type:json"`
+	RequiredCodes     []byte `gorm:"type:json"`
 	PlannedStart      *time.Time
 	PlannedEnd        *time.Time
-	ConflictStatus    string    `gorm:"size:32;not null"`
-	TechReviewStatus  string    `gorm:"size:32;not null"`
+	ConflictStatus    string `gorm:"size:32;not null"`
+	TechReviewStatus  string `gorm:"size:32;not null"`
 	TechReviewedAt    *time.Time
-	TechReviewedBy    string    `gorm:"size:64;not null"`
-	TechReviewComment string    `gorm:"size:512;not null"`
-	ReportStatus      string    `gorm:"size:32;not null"`
+	TechReviewedBy    string `gorm:"size:64;not null"`
+	TechReviewComment string `gorm:"size:512;not null"`
+	ReportStatus      string `gorm:"size:32;not null"`
 	ReportUpdatedAt   *time.Time
-	ReportUpdatedBy   string    `gorm:"size:64;not null"`
-	Status            string    `gorm:"size:32;not null"`
+	ReportUpdatedBy   string `gorm:"size:64;not null"`
+	Status            string `gorm:"size:32;not null"`
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	UpdatedBy         string `gorm:"size:64"`
@@ -65,28 +65,28 @@ func (serviceItemRecord) TableName() string { return "pm_service_item" }
 // implPlanRecord 保存实施计划与渗透测试专项合规要素（授权书、白名单范围、测试时间窗、
 // 应急联系人、回滚方案等），与服务项 1:1 关联，由 EventImplementationPlanned 幂等写入。
 type implPlanRecord struct {
-	ID                string `gorm:"primaryKey;size:32"`
-	TenantID          string `gorm:"size:64;not null"`
-	ServiceItemID     string `gorm:"size:32;not null;index:idx_pm_impl_plan_item,priority:2"`
-	PlannedStart      *time.Time
-	PlannedEnd        *time.Time
-	SitePlan          string `gorm:"type:text;not null"`
+	ID                  string `gorm:"primaryKey;size:32"`
+	TenantID            string `gorm:"size:64;not null"`
+	ServiceItemID       string `gorm:"size:32;not null;index:idx_pm_impl_plan_item,priority:2"`
+	PlannedStart        *time.Time
+	PlannedEnd          *time.Time
+	SitePlan            string `gorm:"type:text;not null"`
 	PenetrationTestPlan string `gorm:"type:text;not null"`
-	AuthDocNo         string `gorm:"size:128;not null"`
-	AuthStart         *time.Time
-	AuthEnd           *time.Time
-	AuthScope         string `gorm:"type:text;not null"`
-	TestScope         string `gorm:"type:text;not null"`
-	TestWindow        string `gorm:"size:128;not null"`
-	EmergencyContact  string `gorm:"size:128;not null"`
-	RollbackPlan      string `gorm:"type:text;not null"`
+	AuthDocNo           string `gorm:"size:128;not null"`
+	AuthStart           *time.Time
+	AuthEnd             *time.Time
+	AuthScope           string `gorm:"type:text;not null"`
+	TestScope           string `gorm:"type:text;not null"`
+	TestWindow          string `gorm:"size:128;not null"`
+	EmergencyContact    string `gorm:"size:128;not null"`
+	RollbackPlan        string `gorm:"type:text;not null"`
 	// Personnel 是实施计划确定的人员清单快照；Equipment 是实施准备确定的设备清单快照
 	// （含使用时段）。两者都随计划行 1:1 保存，没有清单时保持 NULL，
 	// 不用空字符串占位，避免向 JSON 列写入非法值。
 	Personnel []byte `gorm:"type:json"`
 	Equipment []byte `gorm:"type:json"`
-	UpdatedAt         time.Time
-	UpdatedBy         string `gorm:"size:64;not null"`
+	UpdatedAt time.Time
+	UpdatedBy string `gorm:"size:64;not null"`
 }
 
 func (implPlanRecord) TableName() string { return "pm_impl_plan" }
@@ -128,6 +128,20 @@ type splitRuleRecord struct {
 }
 
 func (splitRuleRecord) TableName() string { return "pm_split_rule" }
+
+type standardRecord struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	TenantID  string `gorm:"size:64;not null;index:idx_pm_standard_tenant_kind,priority:1"`
+	Kind      string `gorm:"size:64;not null;index:idx_pm_standard_tenant_kind,priority:2"`
+	Name      string `gorm:"size:255;not null"`
+	Scope     string `gorm:"size:255;not null"`
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UpdatedBy string `gorm:"size:64"`
+}
+
+func (standardRecord) TableName() string { return "pm_standard" }
 
 type warningRuleRecord struct {
 	ID        int64  `gorm:"primaryKey;autoIncrement"`

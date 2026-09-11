@@ -148,12 +148,17 @@ func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFi
 	return serviceFromRecord(record), err
 }
 
-func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids []string, actor string) ([]domain.ServiceItem, error) {
+func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.ScopeFilter, ids []string, actor string) ([]domain.ServiceItem, error) {
+	tenant := filter.TenantID
 	var result []domain.ServiceItem
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var records []serviceItemRecord
 		// 对待确认服务项加排他锁，使状态校验、批量确认和项目状态推进处于同一串行化临界区。
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id IN ?", tenant, ids).Find(&records).Error; err != nil {
+		// 锁查询也套用数据范围过滤：即便范围过滤在事务提交前发生变化，事务内也只能看到
+		// 授权范围内的行，从根上杜绝"读时已校验、写时越界"的 TOCTOU 窗口。
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Scopes(func(db *gorm.DB) *gorm.DB { return applyServiceItemScope(db, tx, filter) }).
+			Where("pm_service_item.id IN ?", ids).Find(&records).Error; err != nil {
 			return err
 		}
 		if len(records) != len(unique(ids)) {
@@ -219,11 +224,14 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, tenant string, ids
 	})
 	return result, err
 }
-// ruleKinds 五套真实配置表对应的 kind 标识。列表中顺序即 ListRules 不指定 kind 时的合并顺序。
-var ruleKinds = []string{"split-rules", "warning-rules", "automations", "permissions", "sla"}
+
+// ruleKinds 六套真实配置表对应的 kind 标识。列表中顺序即 ListRules 不指定 kind 时的合并顺序。
+var ruleKinds = []string{"split-rules", "warning-rules", "automations", "permissions", "sla", "standards"}
 
 func ruleTable(kind string) string {
 	switch kind {
+	case "standards":
+		return "pm_standard"
 	case "split-rules":
 		return "pm_split_rule"
 	case "warning-rules":
@@ -340,6 +348,8 @@ func (r *Repository) UpdateRule(ctx context.Context, tenant, kind string, id int
 		columns = map[string]any{"name": item.Name, "role_code": item.RoleCode, "field_name": item.FieldName, "access_level": item.AccessLevel, "enabled": item.Enabled}
 	case "sla":
 		columns = map[string]any{"name": item.Name, "status": item.Status, "deadline_hours": item.DeadlineHours, "remind_hours": item.RemindHours, "enabled": item.Enabled}
+	case "standards":
+		columns = map[string]any{"name": item.Name, "scope": item.Scope, "enabled": item.Enabled}
 	default:
 		return domain.Rule{}, application.ErrValidation
 	}
@@ -382,6 +392,8 @@ func ruleRecordFor(item domain.Rule, now time.Time) (any, error) {
 		return &fieldPermissionRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, RoleCode: item.RoleCode, FieldName: item.FieldName, AccessLevel: item.AccessLevel, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
 	case "sla":
 		return &slaRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Status: item.Status, DeadlineHours: item.DeadlineHours, RemindHours: item.RemindHours, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "standards":
+		return &standardRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Scope: item.Scope, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
 	default:
 		return nil, application.ErrValidation
 	}

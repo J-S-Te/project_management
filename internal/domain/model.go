@@ -25,47 +25,47 @@ type Project struct {
 }
 
 type ServiceItem struct {
-	TenantID          string   `json:"-"`
-	ID                string   `json:"id"`
-	ProjectID         string   `json:"project_id"`
-	SourceServiceID   string   `json:"source_service_id,omitempty"`
-	Batch             string   `json:"batch"`
-	Site              string   `json:"site"`
-	Category          string   `json:"category"`
-	Requirement       string   `json:"requirement"`
-	System            string   `json:"system"`
-	SystemLevel       string   `json:"system_level"`
-	Special           string   `json:"special"`
-	TestMode          string   `json:"test_mode"`
-	TeamLeadID        string   `json:"team_lead_id,omitempty"`
-	ProjectManagerID  string   `json:"project_manager_id,omitempty"`
-	EngineerIDs       []string `json:"engineer_ids,omitempty"`
-	EquipmentIDs      []string `json:"equipment_ids,omitempty"`
-	RequiredCodes     []string `json:"required_codes,omitempty"`
-	PlannedStart      string   `json:"planned_start,omitempty"`
-	PlannedEnd        string   `json:"planned_end,omitempty"`
-	ConflictStatus    string   `json:"conflict_status,omitempty"`
-	TechReviewStatus  string   `json:"tech_review_status,omitempty"`
-	TechReviewedAt    string   `json:"tech_reviewed_at,omitempty"`
-	TechReviewedBy    string   `json:"tech_reviewed_by,omitempty"`
-	TechReviewComment string   `json:"tech_review_comment,omitempty"`
-	ReportStatus      string   `json:"report_status,omitempty"`
-	ReportUpdatedAt   string   `json:"report_updated_at,omitempty"`
-	ReportUpdatedBy   string   `json:"report_updated_by,omitempty"`
-	Status            string   `json:"status"`
+	TenantID           string              `json:"-"`
+	ID                 string              `json:"id"`
+	ProjectID          string              `json:"project_id"`
+	SourceServiceID    string              `json:"source_service_id,omitempty"`
+	Batch              string              `json:"batch"`
+	Site               string              `json:"site"`
+	Category           string              `json:"category"`
+	Requirement        string              `json:"requirement"`
+	System             string              `json:"system"`
+	SystemLevel        string              `json:"system_level"`
+	Special            string              `json:"special"`
+	TestMode           string              `json:"test_mode"`
+	TeamLeadID         string              `json:"team_lead_id,omitempty"`
+	ProjectManagerID   string              `json:"project_manager_id,omitempty"`
+	EngineerIDs        []string            `json:"engineer_ids,omitempty"`
+	EquipmentIDs       []string            `json:"equipment_ids,omitempty"`
+	RequiredCodes      []string            `json:"required_codes,omitempty"`
+	PlannedStart       string              `json:"planned_start,omitempty"`
+	PlannedEnd         string              `json:"planned_end,omitempty"`
+	ConflictStatus     string              `json:"conflict_status,omitempty"`
+	TechReviewStatus   string              `json:"tech_review_status,omitempty"`
+	TechReviewedAt     string              `json:"tech_reviewed_at,omitempty"`
+	TechReviewedBy     string              `json:"tech_reviewed_by,omitempty"`
+	TechReviewComment  string              `json:"tech_review_comment,omitempty"`
+	ReportStatus       string              `json:"report_status,omitempty"`
+	ReportUpdatedAt    string              `json:"report_updated_at,omitempty"`
+	ReportUpdatedBy    string              `json:"report_updated_by,omitempty"`
+	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
 }
 
 type Rule struct {
-	TenantID string `json:"-"`
-	ID       int64  `json:"id"`
-	Kind     string `json:"kind"`
-	Name     string `json:"name"`
-	Scope    string `json:"scope"`
-	Trigger  string `json:"trigger"`
-	Enabled  bool   `json:"enabled"`
-	Updated  string `json:"updated"`
-	Notes    string `json:"notes,omitempty"`
+	TenantID  string `json:"-"`
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	Trigger   string `json:"trigger"`
+	Enabled   bool   `json:"enabled"`
+	Updated   string `json:"updated"`
+	Notes     string `json:"notes,omitempty"`
 	UpdatedBy string `json:"-"`
 	// CheckType / Threshold 用于预警规则。
 	CheckType string `json:"check_type,omitempty"`
@@ -95,4 +95,16 @@ type Dashboard struct {
 	RiskProjects     int            `json:"risk_projects"`
 	ServiceItems     int            `json:"service_items"`
 	StatusCounts     map[string]int `json:"status_counts"`
+}
+
+// SlaOverdueItem 是超期服务项的最小投影：超过计划完成时间且未终结的服务项，
+// SLA 超期指标按此口径统一计算（计划完成时间为基准，平台时间 UTC 判定）。
+type SlaOverdueItem struct {
+	ID           string `json:"id"`
+	ProjectID    string `json:"project_id"`
+	Site         string `json:"site"`
+	Category     string `json:"category"`
+	Status       string `json:"status"`
+	PlannedEnd   string `json:"planned_end"`
+	OverdueHours int64  `json:"overdue_hours"`
 }

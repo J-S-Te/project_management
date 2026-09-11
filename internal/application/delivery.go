@@ -32,6 +32,12 @@ const (
 	EventReportStatusUpdated     = "REPORT_STATUS_UPDATED"
 	// EventEquipmentReturned 记录设备归还：写回设备行的归还时间，释放占用。
 	EventEquipmentReturned = "EQUIPMENT_RETURNED"
+	// EventAutomationTriggered 是配置驱动的派生事件：事件落库后有启用的
+	//「自动化触发」规则命中时才追加，保证配置表真正参与运行时行为。
+	EventAutomationTriggered = "AUTOMATION_TRIGGERED"
+	// EventWarningTriggered 是配置驱动的派生事件：任务分配/执行团队指派产生
+	// 能力冲突且有启用的「冲突预警规则」时才追加。
+	EventWarningTriggered = "WARNING_TRIGGERED"
 )
 
 type DeliveryRepository interface {
@@ -39,6 +45,7 @@ type DeliveryRepository interface {
 	ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error
 	SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error
 	ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error
+	ListSlaOverdue(context.Context, platform.ScopeFilter) ([]domain.SlaOverdueItem, error)
 	ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error)
 	FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error)
 	UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error)
@@ -55,6 +62,20 @@ func (s *Service) deliveryRepo() (DeliveryRepository, error) {
 	return repo, nil
 }
 
+// ListSlaOverdue 返回超过计划完成时间且尚未终结的服务项，
+// 超期时长按计划完成时间与当前 UTC 的差额计算（分钟级取整为小时）。
+func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]domain.SlaOverdueItem, error) {
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return nil, err
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return nil, err
+	}
+	return repo.ListSlaOverdue(ctx, filter)
+}
+
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
 	filter, scopeErr := authorizeProjectScope(p, "project.contract.import")
 	if scopeErr != nil {
@@ -68,11 +89,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		return domain.Project{}, err
 	}
 	if existing, findErr := repo.FindProjectByContractVersion(ctx, filter, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractVersion)); findErr == nil {
-		event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": input.StampedContractUploaded})
-		if err := repo.SyncContractStampStatus(ctx, existing, input.StampedContractUploaded, event); err != nil {
-			return domain.Project{}, err
-		}
-		return existing, nil
+		return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
 	} else if !errors.Is(findErr, ErrNotFound) {
 		return domain.Project{}, findErr
 	}
@@ -107,9 +124,27 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
 	if err := repo.ActivateContract(ctx, project, items, event); err != nil {
+		if errors.Is(err, ErrDuplicateContract) {
+			// 竞态窗口：find 阶段两请求都未命中，先到者已建好项目，后到者撞唯一键。
+			// 回读已存在项目并同步盖章状态，按幂等成功返回，不再抛 500。
+			existing, findErr := repo.FindProjectByContractVersion(ctx, filter, project.Contract, project.ContractVersion)
+			if findErr != nil {
+				return domain.Project{}, findErr
+			}
+			return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
+		}
 		return domain.Project{}, err
 	}
 	return project, nil
+}
+
+// syncExistingContract 对已经存在的合同版本做幂等收尾：同步盖章状态并返回既有项目。
+func syncExistingContract(ctx context.Context, repo DeliveryRepository, p platform.Principal, existing domain.Project, stampedUploaded bool) (domain.Project, error) {
+	event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": stampedUploaded})
+	if err := repo.SyncContractStampStatus(ctx, existing, stampedUploaded, event); err != nil {
+		return domain.Project{}, err
+	}
+	return existing, nil
 }
 
 func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal, projectID string, input domain.DecompositionAdjustmentInput) error {
@@ -158,6 +193,9 @@ func (s *Service) AssignServiceItem(ctx context.Context, p platform.Principal, i
 	payload := map[string]any{"team_lead_id": input.TeamLeadID, "project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "equipment_ids": input.EquipmentIDs, "required_codes": input.RequiredCodes, "planned_start": input.PlannedStart, "planned_end": input.PlannedEnd, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
 	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventAssignmentPublished, payload)); err != nil {
 		return domain.ConflictCheckResult{}, err
+	}
+	if !result.Passed {
+		s.fireConflictWarning(ctx, p, itemID, result.Conflicts)
 	}
 	return result, nil
 }
@@ -211,7 +249,13 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	}
 	result := checkCapabilities(required, ids, caps)
 	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "equipment_ids": input.EquipmentIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
-	return result, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload))
+	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload)); err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	if !result.Passed {
+		s.fireConflictWarning(ctx, p, itemID, result.Conflicts)
+	}
+	return result, nil
 }
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
 	filter, err := authorizeProjectScope(p, "project.implementation.plan")
@@ -493,7 +537,7 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(input.EquipmentRequestID) == "" || strings.TrimSpace(input.TravelRequestID) == "" {
+	if strings.TrimSpace(input.TravelRequestID) == "" {
 		return ErrValidation
 	}
 	repo, err := s.deliveryRepo()
@@ -514,7 +558,7 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"equipment_request_id": input.EquipmentRequestID, "travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
 }
 
 // ReturnEquipment 把某台设备从服务项的实施准备清单中归还：清单行保留（保留借出历史），
@@ -747,6 +791,17 @@ func validateCapability(item domain.Capability) error {
 }
 
 // resourceIDPrefix 区分人员与设备的资源编号前缀，避免两类编号混用。
+// existingUsageScope 在既有能力目录里查同编号设备的使用范围；查不到时返回默认的可借出，
+// 保证新增设备与历史数据都落在同一个默认值上。
+func existingUsageScope(items []domain.Capability, resourceID string) string {
+	for _, item := range items {
+		if item.ResourceID == resourceID && strings.TrimSpace(item.UsageScope) != "" {
+			return item.UsageScope
+		}
+	}
+	return domain.EquipmentUsageAny
+}
+
 func resourceIDPrefix(resourceType string) string {
 	if resourceType == "EQUIPMENT" {
 		return "EQ-"
@@ -812,6 +867,15 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, err
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
+	// 使用范围只对设备有意义：调用方没有提交时必须沿用该设备的既有设置，
+	// 否则从"资质与能力管理"改一个名称就会把「仅在公司使用」静默改回可借出。
+	if item.ResourceType == "EQUIPMENT" && strings.TrimSpace(item.UsageScope) == "" {
+		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+		if err != nil {
+			return item, err
+		}
+		item.UsageScope = existingUsageScope(existing, item.ResourceID)
+	}
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
 
@@ -842,6 +906,8 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 		known = append(known, rows[i])
 		rows[i].TenantID = p.TenantID
 		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
+		// CSV 不携带使用范围；导入既有设备时必须保留原设置，不能被批量改回可借出。
+		rows[i].UsageScope = firstNonEmpty(rows[i].UsageScope, existingUsageScope(known, rows[i].ResourceID))
 		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": "+err.Error())
@@ -913,15 +979,23 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 	if item.ResourceType != "EQUIPMENT" || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
 		return item, ErrValidation
 	}
-	item.UsageScope = strings.ToUpper(strings.TrimSpace(firstNonEmpty(item.UsageScope, domain.EquipmentUsageAny)))
-	if item.UsageScope != domain.EquipmentUsageAny && item.UsageScope != domain.EquipmentUsageCompanyOnly {
-		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
-	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return item, e
 	}
 	item.TenantID = p.TenantID
+	// 未提交使用范围时沿用既有设置，避免"编辑设备"顺手把「仅在公司使用」改回可借出。
+	if strings.TrimSpace(item.UsageScope) == "" {
+		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+		if err != nil {
+			return item, err
+		}
+		item.UsageScope = existingUsageScope(existing, item.ResourceID)
+	}
+	item.UsageScope = strings.ToUpper(strings.TrimSpace(firstNonEmpty(item.UsageScope, domain.EquipmentUsageAny)))
+	if item.UsageScope != domain.EquipmentUsageAny && item.UsageScope != domain.EquipmentUsageCompanyOnly {
+		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
+	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
@@ -930,7 +1004,67 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	if e != nil {
 		return e
 	}
-	return repo.ApplyDeliveryEvent(ctx, event)
+	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
+		return err
+	}
+	s.fireAutomations(ctx, event)
+	return nil
+}
+
+// fireAutomations 在事件落库后按启用的「自动化触发」规则追加 AUTOMATION_TRIGGERED
+// 派生事件，让配置表中的 trigger/target 真正参与运行时行为。未命中任何规则时不产生
+// 额外事件；派生事件不再递归触发下一次自动化，也绝不因配置读取失败回滚主事件。
+func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEvent) {
+	if event.Type == EventAutomationTriggered || event.Type == EventWarningTriggered {
+		return
+	}
+	repo, e := s.deliveryRepo()
+	if e != nil {
+		return
+	}
+	rules, err := s.Repo.ListRules(ctx, event.TenantID, "automations")
+	if err != nil {
+		return
+	}
+	targets := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		if !rule.Enabled || strings.TrimSpace(rule.Trigger) != event.Type {
+			continue
+		}
+		targets = append(targets, strings.TrimSpace(rule.Target))
+	}
+	if len(targets) == 0 {
+		return
+	}
+	triggered := event
+	triggered.Type = EventAutomationTriggered
+	triggered.CreatedAt = time.Now().UTC().Add(time.Millisecond)
+	triggered.Payload = map[string]any{"trigger": event.Type, "targets": targets}
+	_ = repo.ApplyDeliveryEvent(ctx, triggered)
+}
+
+// fireConflictWarning 在任务分配/执行团队指派产生能力冲突且有启用的「冲突预警规则」时，
+// 追加 WARNING_TRIGGERED 派生事件，把冲突明细纳入项目事件流。非破坏性：失败不影响主流程。
+func (s *Service) fireConflictWarning(ctx context.Context, p platform.Principal, itemID string, conflicts []string) {
+	rules, err := s.Repo.ListRules(ctx, p.TenantID, "warning-rules")
+	if err != nil {
+		return
+	}
+	active := false
+	for _, rule := range rules {
+		if rule.Enabled {
+			active = true
+			break
+		}
+	}
+	if !active {
+		return
+	}
+	repo, e := s.deliveryRepo()
+	if e != nil {
+		return
+	}
+	_ = repo.ApplyDeliveryEvent(ctx, deliveryEvent(p, "", itemID, EventWarningTriggered, map[string]any{"conflicts": conflicts}))
 }
 
 func (s *Service) authorizeProject(ctx context.Context, p platform.Principal, permission, projectID string) error {

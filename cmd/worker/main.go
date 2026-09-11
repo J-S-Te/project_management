@@ -4,9 +4,7 @@ import (
 	"context"
 	"github.com/j-s-te/project-management/internal/bootstrap"
 	"github.com/j-s-te/project-management/internal/config"
-	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
 	"github.com/j-s-te/project-management/internal/temporalworker"
-	"github.com/j-s-te/project-management/internal/workflows"
 	"go.temporal.io/sdk/worker"
 	"log/slog"
 	"os"
@@ -47,7 +45,6 @@ func main() {
 		os.Exit(1)
 	}
 	w := worker.New(temporalClient, cfg.TemporalTaskQueue, workerOptions)
-	workflows.Register(w, &workflows.Activities{Store: store.NewRepository(db)})
 	logger.Info("project workflow worker started", "task_queue", cfg.TemporalTaskQueue, "deployment", cfg.TemporalWorkerDeploymentName, "build_id", cfg.TemporalWorkerBuildID, "versioning", cfg.TemporalWorkerVersioning)
 	// 版本路由开启时 Worker 只消费自身版本队列；Deployment 的 Current 版本为空会让新工作流
 	// 以 UNVERSIONED 入队且无人领取，因此启动时主动收敛，不再依赖人工 PROMOTE。
