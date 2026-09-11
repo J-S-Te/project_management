@@ -104,7 +104,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
 | POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理与工程师并校验能力；设备不在该阶段选取 |
 | POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布现场计划；必须携带实施人员清单（`personnel`，至少一名人员，资质有效期需覆盖使用时段），渗透测试项还必须包含专项计划 |
-| POST | `/api/v1/service-items/{id}/preparation` | 登记设备申领、行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |
+| POST | `/api/v1/service-items/{id}/preparation` | 登记行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |
 | GET | `/api/v1/service-items/{id}/equipment-reservations` | 查询计划窗口内被其他服务项占用的设备，供实施准备的选择器置灰已占用设备 |
 | POST | `/api/v1/service-items/{id}/equipment-return` | 归还设备：写回归还时间，释放占用并让设备回到「在公司」 |
 | POST | `/api/v1/service-items/{id}/check-in` | 记录带时间戳的 GPS 签到 |

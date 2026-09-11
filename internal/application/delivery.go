@@ -493,7 +493,7 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(input.EquipmentRequestID) == "" || strings.TrimSpace(input.TravelRequestID) == "" {
+	if strings.TrimSpace(input.TravelRequestID) == "" {
 		return ErrValidation
 	}
 	repo, err := s.deliveryRepo()
@@ -514,7 +514,7 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"equipment_request_id": input.EquipmentRequestID, "travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
 }
 
 // ReturnEquipment 把某台设备从服务项的实施准备清单中归还：清单行保留（保留借出历史），
@@ -747,6 +747,17 @@ func validateCapability(item domain.Capability) error {
 }
 
 // resourceIDPrefix 区分人员与设备的资源编号前缀，避免两类编号混用。
+// existingUsageScope 在既有能力目录里查同编号设备的使用范围；查不到时返回默认的可借出，
+// 保证新增设备与历史数据都落在同一个默认值上。
+func existingUsageScope(items []domain.Capability, resourceID string) string {
+	for _, item := range items {
+		if item.ResourceID == resourceID && strings.TrimSpace(item.UsageScope) != "" {
+			return item.UsageScope
+		}
+	}
+	return domain.EquipmentUsageAny
+}
+
 func resourceIDPrefix(resourceType string) string {
 	if resourceType == "EQUIPMENT" {
 		return "EQ-"
@@ -812,6 +823,15 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, err
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
+	// 使用范围只对设备有意义：调用方没有提交时必须沿用该设备的既有设置，
+	// 否则从"资质与能力管理"改一个名称就会把「仅在公司使用」静默改回可借出。
+	if item.ResourceType == "EQUIPMENT" && strings.TrimSpace(item.UsageScope) == "" {
+		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+		if err != nil {
+			return item, err
+		}
+		item.UsageScope = existingUsageScope(existing, item.ResourceID)
+	}
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
 
@@ -842,6 +862,8 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 		known = append(known, rows[i])
 		rows[i].TenantID = p.TenantID
 		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
+		// CSV 不携带使用范围；导入既有设备时必须保留原设置，不能被批量改回可借出。
+		rows[i].UsageScope = firstNonEmpty(rows[i].UsageScope, existingUsageScope(known, rows[i].ResourceID))
 		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": "+err.Error())
@@ -913,15 +935,23 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 	if item.ResourceType != "EQUIPMENT" || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
 		return item, ErrValidation
 	}
-	item.UsageScope = strings.ToUpper(strings.TrimSpace(firstNonEmpty(item.UsageScope, domain.EquipmentUsageAny)))
-	if item.UsageScope != domain.EquipmentUsageAny && item.UsageScope != domain.EquipmentUsageCompanyOnly {
-		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
-	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return item, e
 	}
 	item.TenantID = p.TenantID
+	// 未提交使用范围时沿用既有设置，避免"编辑设备"顺手把「仅在公司使用」改回可借出。
+	if strings.TrimSpace(item.UsageScope) == "" {
+		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+		if err != nil {
+			return item, err
+		}
+		item.UsageScope = existingUsageScope(existing, item.ResourceID)
+	}
+	item.UsageScope = strings.ToUpper(strings.TrimSpace(firstNonEmpty(item.UsageScope, domain.EquipmentUsageAny)))
+	if item.UsageScope != domain.EquipmentUsageAny && item.UsageScope != domain.EquipmentUsageCompanyOnly {
+		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
+	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }

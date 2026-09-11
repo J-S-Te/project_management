@@ -177,10 +177,11 @@ type ReportStatusInput struct {
 	Phase string `json:"phase"`
 }
 
+// PreparationInput 是实施准备提交的内容。设备申领不再是自由文本：设备清单
+// （Equipment）本身就说明申领了哪些设备、在什么时段使用，因此不再单列申领单号。
 type PreparationInput struct {
-	EquipmentRequestID string `json:"equipment_request_id"`
-	TravelRequestID    string `json:"travel_request_id"`
-	Notes              string `json:"notes"`
+	TravelRequestID string `json:"travel_request_id"`
+	Notes           string `json:"notes"`
 	// Equipment 是实施准备确定的设备清单；每行带使用时段，服务端按占用区间硬拦重叠。
 	Equipment []PlanResourceInput `json:"equipment"`
 }

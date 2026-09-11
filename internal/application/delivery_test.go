@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/j-s-te/project-management/internal/platform"
+
 	"github.com/j-s-te/project-management/internal/domain"
 )
 
@@ -314,5 +316,73 @@ func TestEquipmentPresenceDerivesFromReservations(t *testing.T) {
 	}
 	if _, ok := active["EQ-2"]; ok {
 		t.Fatalf("future reservation must not mark the equipment as out: %#v", active)
+	}
+}
+
+// 使用范围只在显式提交时改变：从「资质与能力管理」、设备维护表单或 CSV 导入改其它字段，
+// 都不能把「仅在公司使用」静默改回可借出。
+func TestEquipmentUsageScopeIsPreservedWhenOmitted(t *testing.T) {
+	setup := func() (*capabilityRepository, *Service) {
+		repo := &capabilityRepository{capabilities: []domain.Capability{
+			{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, Status: "ACTIVE", UsageScope: domain.EquipmentUsageCompanyOnly},
+		}}
+		service := &Service{Repo: repo}
+		service.Personnel = nil
+		return repo, service
+	}
+	owner := principalWith("project.device.manage", platform.DataScope{RoleCode: "device_admin", ScopeType: "APPLICATION"})
+
+	// 设备维护表单：不提交 usage_scope 时沿用既有设置。
+	repo, service := setup()
+	if _, err := service.UpsertEquipment(context.Background(), owner, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备改名", Codes: []string{"c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
+		t.Fatalf("omitted usage scope must keep the stored value, got %q", got)
+	}
+
+	// 显式提交时按提交值改写（可借出 ↔ 仅在公司使用）。
+	if _, err := service.UpsertEquipment(context.Background(), owner, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, UsageScope: domain.EquipmentUsageAny}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageAny {
+		t.Fatalf("explicit usage scope must win, got %q", got)
+	}
+
+	// 新增设备没有历史值：落到默认的可借出。
+	if _, err := service.UpsertEquipment(context.Background(), owner, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-NEW", ResourceName: "新设备", Codes: []string{"c2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageAny {
+		t.Fatalf("new equipment must default to lendable, got %q", got)
+	}
+
+	// 非法取值仍然拒绝。
+	if _, err := service.UpsertEquipment(context.Background(), owner, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, UsageScope: "SOMETIMES"}); err == nil {
+		t.Fatal("unknown usage scope must be rejected")
+	}
+}
+
+// 资质与能力管理与 CSV 导入同样不能清掉设备的使用范围。
+func TestCapabilityUpsertAndImportPreserveUsageScope(t *testing.T) {
+	repo := &capabilityRepository{capabilities: []domain.Capability{
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, Status: "ACTIVE", UsageScope: domain.EquipmentUsageCompanyOnly},
+	}}
+	service := &Service{Repo: repo}
+	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
+
+	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备改名", Codes: []string{"c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
+		t.Fatalf("capability upsert must keep the stored usage scope, got %q", got)
+	}
+
+	repo.saved = nil
+	if _, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
+		t.Fatalf("csv import must keep the stored usage scope, got %q", got)
 	}
 }

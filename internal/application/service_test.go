@@ -296,6 +296,7 @@ type capabilityRepository struct {
 	scopeRepository
 	capabilities []domain.Capability
 	reservations []domain.EquipmentReservation
+	saved        []domain.Capability
 }
 
 func (r *capabilityRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
@@ -316,8 +317,9 @@ func (r *capabilityRepository) ListDeliveryEvents(context.Context, platform.Scop
 func (r *capabilityRepository) FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error) {
 	return "", "", ErrNotFound
 }
-func (r *capabilityRepository) UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error) {
-	return domain.Capability{}, nil
+func (r *capabilityRepository) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
+	r.saved = append(r.saved, item)
+	return item, nil
 }
 func (r *capabilityRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
 	return r.capabilities, nil

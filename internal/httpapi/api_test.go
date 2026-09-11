@@ -497,6 +497,7 @@ func TestMissingPermissionIsForbidden(t *testing.T) {
 		t.Fatalf("status=%d", response.Code)
 	}
 }
+
 // 人员、设备与能力码是操作台表单的下拉数据源。这些只读接口以 project.read 为基线：
 // 除超级管理员外，项目经理等角色同样需要渲染表单，历史上用 assign/manage 权限把守会
 // 让非管理员角色整体加载失败。
@@ -805,7 +806,7 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	conflicting := `{"equipment_request_id":"EQ-REQ-1","travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-001","window_start":"2026-09-17","window_end":"2026-09-19"}]}`
+	conflicting := `{"travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-001","window_start":"2026-09-17","window_end":"2026-09-19"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", conflicting)
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "PM_RESOURCE_CONFLICT") || !strings.Contains(response.Body.String(), "PJ-2026-002") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -814,7 +815,7 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 		t.Fatalf("conflicting preparation must not record an event: %+v", repository.events)
 	}
 
-	free := `{"equipment_request_id":"EQ-REQ-1","travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-002","window_start":"2026-09-16","window_end":"2026-09-18"}]}`
+	free := `{"travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-002","window_start":"2026-09-16","window_end":"2026-09-18"}]}`
 	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", free)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
