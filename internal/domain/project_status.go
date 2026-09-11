@@ -39,8 +39,8 @@ var projectStatusNodes = []string{
 
 // 服务项状态到推进等级的映射；待确认/待复核属于同一「待拆解确认」阶段。
 var serviceItemStatusRank = map[string]int{
-	"待确认":                         0,
-	"待复核":                         0,
+	"待确认":                          0,
+	"待复核":                          0,
 	ProjectStatusPendingAllocation: 1,
 	ProjectStatusPendingExecution:  2,
 	ProjectStatusPreparing:         3,
@@ -131,20 +131,25 @@ func serviceItemLifecycleRank(item ProjectStatusItem) int {
 }
 
 // DeriveProjectProgress 按服务项推进等级派生项目进度百分比：
-// 各服务项等级均值除以最高等级，已终止服务项按 100% 计。
+// 各服务项等级均值除以最高等级。已终止服务项不再有剩余工作量，既不计入分子也不计入分母：
+// 按满分计入会得出「1 终止 + 1 待实施 = 62%」这种与状态口径相反的进度。
 // 进度不再由事件手工写入固定值，与派生状态共用同一套等级表。
 func DeriveProjectProgress(items []ProjectStatusItem) int {
 	if len(items) == 0 {
 		return 0
 	}
 	maxRank := len(projectStatusNodes) - 1
-	total := 0
+	total, counted := 0, 0
 	for _, item := range items {
 		if strings.TrimSpace(item.Status) == ProjectStatusTerminated {
-			total += maxRank
 			continue
 		}
 		total += serviceItemLifecycleRank(item)
+		counted++
 	}
-	return total * 100 / (maxRank * len(items))
+	if counted == 0 {
+		// 全部已终止：没有剩余工作量。
+		return 100
+	}
+	return total * 100 / (maxRank * counted)
 }

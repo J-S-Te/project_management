@@ -86,7 +86,8 @@ func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]d
 	if err != nil {
 		return nil, err
 	}
-	return computeSlaItems(candidates, rules, time.Now().UTC()), nil
+	// 与列表/详情同一脱敏口径：该响应会带出 site/category。
+	return s.applyFieldPermissionsToSlaItems(ctx, p, computeSlaItems(candidates, rules, time.Now().UTC()))
 }
 
 // computeSlaItems 把未终结服务项展开成 SLA 口径列表：计划完成超期每项一条；
@@ -672,7 +673,8 @@ func (s *Service) ListEquipmentReservations(ctx context.Context, p platform.Prin
 			overlapping = append(overlapping, reservation)
 		}
 	}
-	return overlapping, nil
+	// 与项目读路径同一脱敏口径：该响应会带出 customer。
+	return s.applyFieldPermissionsToReservations(ctx, p, overlapping)
 }
 
 // planWindowOf 取服务项已发布实施计划的起止；没有计划时无法确定设备占用区间。

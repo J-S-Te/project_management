@@ -135,7 +135,10 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
 	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
 	// 报告推进到"已归档"才需要 project.report.archive；现场执行角色不应顺带获得归档权。
-	api.POST("/service-items/:id/report-status", requireAny("project.field.complete", "project.report.archive"), h.updateReportStatus)
+	// 路由层只做粗粒度放行：具体阶段权限（编制/审核/签发用 project.report.manage，
+	// 归档用 project.report.archive）由应用层 reportPhasePermission 判定。
+	// 缺 project.report.manage 会让质量管理员在路由层就被拦死，编制/审核/签发全部不可用。
+	api.POST("/service-items/:id/report-status", requireAny("project.field.complete", "project.report.archive", "project.report.manage"), h.updateReportStatus)
 	return router
 }
 
@@ -411,12 +414,16 @@ func navigationSections(roles []string) []string {
 		"admin":        allNavigationSections,
 		"system_admin": allNavigationSections,
 		// 各业务角色只看与本职责相关的栏目；服务端仍是最终授权边界。
-		"business_admin":       {"projects", "decomposition", "allocation"},
-		"team_lead":            {"projects", "allocation", "assignments", "implementation", "exceptions"},
-		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
+		"business_admin": {"projects", "decomposition", "allocation"},
+		// inbox 是「已指派团队负责人但尚未配齐项目经理/工程师」的待办队列，
+		// 归团队负责人处理；此前它只存在于 allNavigationSections，任何业务角色都看不到。
+		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions"},
+		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
+		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
+		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards", "reports"},
 		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
 		"device_admin":         {"dashboard", "projects", "equipment", "sites"},
-		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla"},
+		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "reports"},
 		"engineer":             {"projects", "implementation", "exceptions"},
 		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +38,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 	if err != nil {
 		return domain.Project{}, err
 	}
-	project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+	applyDerivedProjectMetrics(&project, inputs[record.ID])
 	return project, nil
 }
 
@@ -204,6 +206,11 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
 	case application.EventEquipmentReturned:
+		// 设备归还只能作用于已进入交付的服务项：待确认/待复核/待分配还没有设备清单可还，
+		// 已终止是终态，允许事后归还等于让终态数据可被改写。
+		if item.Status == "待确认" || item.Status == "待复核" || item.Status == "待分配" || item.Status == domain.ProjectStatusTerminated {
+			return application.ErrValidation
+		}
 		if err := markEquipmentReturned(tx, item, event); err != nil {
 			return err
 		}
@@ -250,9 +257,25 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 	default:
-		return nil
+		// 审计类事件只留痕、不改服务项状态。其余未知类型必须显式拒绝：
+		// 静默成功会让未接线的新事件在接口层返回成功、审计流显示「已发生」，
+		// 而业务状态停在原地，排查时无从判断。
+		if isAuditOnlyEvent(event.Type) {
+			return nil
+		}
+		return application.ErrValidation
 	}
 	return tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND id=?", item.TenantID, item.ID).Updates(updates).Error
+}
+
+// isAuditOnlyEvent 列出不改变服务项状态、仅用于留痕的事件类型。
+func isAuditOnlyEvent(eventType string) bool {
+	switch eventType {
+	case application.EventContractActivated, application.EventContractStampStatus,
+		application.EventWarningTriggered, application.EventAutomationTriggered:
+		return true
+	}
+	return false
 }
 
 func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.DeliveryEvent) error {
@@ -287,7 +310,19 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		if err := tx.Where("tenant_id=? AND project_id=?", project.TenantID, project.ID).Delete(&serviceItemRecord{}).Error; err != nil {
 			return err
 		}
-		for _, item := range items {
+		// 拆解调整的服务项由应用层只带业务字段，编号必须在这里补齐：
+		// 主键为空会让多行互相冲突而整单回滚，单行则会落成 id='' 的孤儿行——
+		// 事件分发以 service_item_id != "" 判定，该服务项之后再也无法被确认或实施。
+		maxSequence := 0
+		for _, old := range oldItems {
+			if sequence := serviceItemSequence(old.ID); sequence > maxSequence {
+				maxSequence = sequence
+			}
+		}
+		for index, item := range items {
+			if strings.TrimSpace(item.ID) == "" {
+				item.ID = serviceItemIDFor(project.ID, maxSequence+index+1)
+			}
 			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
@@ -303,13 +338,34 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", project.TenantID, project.ID).Updates(updates).Error
 }
 
+// serviceItemIDFor 生成服务项编号，与创建、合同激活路径保持同一语义：SI-<项目后缀>-NNN。
+func serviceItemIDFor(projectID string, sequence int) string {
+	return fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(projectID, "PJ-"), sequence)
+}
+
+// serviceItemSequence 解析既有服务项编号末段的序号；无法解析时返回 0，
+// 使拆解调整总能从 1 开始顺延而不是与归档行重号。
+func serviceItemSequence(itemID string) int {
+	parts := strings.Split(strings.TrimSpace(itemID), "-")
+	if len(parts) == 0 {
+		return 0
+	}
+	sequence, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil || sequence < 0 {
+		return 0
+	}
+	return sequence
+}
+
 // syncProjectStatusColumn 在事件事务提交前按派生规则重算并回写 pm_project.status。
 // 与读侧（ListProjects/GetProject/Dashboard/FindProjectByContractVersion）共用
 // domain.DeriveProjectStatus 单一口径，保证存储列永不分叉：服务项状态推进到哪，
 // 项目状态缓存就立刻对齐到哪，不再依赖某条事件手工设置项目状态。
 func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
 	var project projectRecord
-	if err := tx.Where("tenant_id=? AND id=?", tenantID, projectID).First(&project).Error; err != nil {
+	// 与事件路径同一加锁顺序（先服务项、后项目行）：项目行锁把所有针对同一项目的
+	// 写入串行化，随后的服务项投影读才是稳定快照，不会把落后一档的状态写回存储列。
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND id=?", tenantID, projectID).First(&project).Error; err != nil {
 		return err
 	}
 	var items []domain.ProjectStatusItem
@@ -337,7 +393,9 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 	}
 	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).
 		Select("id, project_id, site, category, status, planned_end, TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()) AS overdue_hours").
-		Where("planned_end IS NOT NULL AND planned_end < UTC_TIMESTAMP() AND status NOT IN ?", []string{domain.ProjectStatusCompleted, domain.ProjectStatusTerminated})
+		// 终态必须用服务项自己的状态常量：服务项永远不会取到项目状态「已完成」，
+		// 用错常量会让已交付（现场实施完成）的项只要计划时间已过就永久留在超期列表。
+		Where("planned_end IS NOT NULL AND planned_end < UTC_TIMESTAMP() AND status NOT IN ?", []string{domain.ProjectStatusFieldCompleted, domain.ProjectStatusTerminated})
 	if err := query.Order("planned_end").Scan(&rows).Error; err != nil {
 		return nil, err
 	}

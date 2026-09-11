@@ -365,9 +365,12 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	input.Name = strings.TrimSpace(input.Name)
 	input.Customer = strings.TrimSpace(input.Customer)
 	input.Contract = strings.TrimSpace(input.Contract)
-	if input.Status == "" {
-		input.Status = "待拆解确认"
-	}
+	// 状态、进度与补充协议标记由服务端派生，不接受调用方指定：
+	// 否则客户端可以伪造进度百分比，或用 supplement_status=REQUIRED 把新项目直接钉进
+	// 不可逆的「补充协议处理中」分支。创建一律从待拆解确认、零进度、非补充协议开始。
+	input.Status = "待拆解确认"
+	input.Progress = 0
+	input.SupplementStatus = "NONE"
 	if input.Team == "" {
 		input.Team = "未分配"
 	}

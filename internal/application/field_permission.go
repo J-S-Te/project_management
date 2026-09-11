@@ -138,6 +138,45 @@ func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principa
 	return projects, items, nil
 }
 
+// applyFieldPermissionsToSlaItems 对 SLA 超期列表执行与服务项读路径相同的字段脱敏。
+// 该列表会带出 site/category，不处理会让配置为 hidden 的字段从这条读路径整片漏出。
+func (s *Service) applyFieldPermissionsToSlaItems(ctx context.Context, p platform.Principal, items []domain.SlaOverdueItem) ([]domain.SlaOverdueItem, error) {
+	_, itemHidden, err := s.hiddenFieldsFor(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if len(itemHidden) == 0 || len(items) == 0 {
+		return items, nil
+	}
+	for index := range items {
+		if _, hide := itemHidden["site"]; hide {
+			items[index].Site = maskedFieldValue
+		}
+		if _, hide := itemHidden["category"]; hide {
+			items[index].Category = maskedFieldValue
+		}
+	}
+	return items, nil
+}
+
+// applyFieldPermissionsToReservations 对设备预约列表执行项目字段脱敏：该列表带出客户名，
+// 与项目读路径共用 customer 这一隐藏口径。
+func (s *Service) applyFieldPermissionsToReservations(ctx context.Context, p platform.Principal, reservations []domain.EquipmentReservation) ([]domain.EquipmentReservation, error) {
+	projectHidden, _, err := s.hiddenFieldsFor(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectHidden) == 0 || len(reservations) == 0 {
+		return reservations, nil
+	}
+	if _, hide := projectHidden["customer"]; hide {
+		for index := range reservations {
+			reservations[index].Customer = maskedFieldValue
+		}
+	}
+	return reservations, nil
+}
+
 // applyFieldPermissionsToEvents 对交付事件流执行与服务项读路径完全相同的字段脱敏。
 // 事件 payload 里带着指派快照与拆解快照，若不处理，配置为 hidden 的字段会从
 // /delivery-events 整条漏出去——脱敏只有覆盖所有读路径才算生效。
