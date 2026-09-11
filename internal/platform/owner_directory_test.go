@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -36,7 +37,9 @@ func TestOwnerDirectoryClientUsesScopeAndParsesEnvelope(t *testing.T) {
 		scope:    ownerDirectoryScope,
 	}
 	directory.service.client.Transport = transport
-	page, err := directory.List(context.Background(), OwnerDirectoryQuery{Keyword: "张三", Page: 1, PageSize: 80})
+	page, err := directory.List(context.Background(), OwnerDirectoryQuery{
+		Keyword: "张三", RoleCodes: []string{" team_lead ", "team_lead", "", "project_manager"}, Page: 1, PageSize: 80,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +55,14 @@ func TestOwnerDirectoryClientUsesScopeAndParsesEnvelope(t *testing.T) {
 	// 单页上限 50 必须生效，避免一次拉取过多平台人员。
 	if !strings.Contains(query, "page_size=50") {
 		t.Fatalf("page_size query = %q", query)
+	}
+	// 角色过滤以重复参数发出，且空白值与重复值不进入查询串。
+	parsed, err := url.ParseQuery(query)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", query, err)
+	}
+	if got := strings.Join(parsed["role_code"], ","); got != "team_lead,project_manager" {
+		t.Fatalf("role_code query = %q, want %q", got, "team_lead,project_manager")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/j-s-te/project-management/internal/domain"
@@ -165,11 +166,13 @@ func TestFullDataScopeCanManageTenantWideRules(t *testing.T) {
 }
 
 type personnelStub struct {
-	page platform.OwnerDirectoryPage
-	err  error
+	page      platform.OwnerDirectoryPage
+	err       error
+	lastQuery platform.OwnerDirectoryQuery
 }
 
-func (stub personnelStub) List(context.Context, platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+func (stub *personnelStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	stub.lastQuery = query
 	return stub.page, stub.err
 }
 
@@ -177,21 +180,41 @@ func (stub personnelStub) List(context.Context, platform.OwnerDirectoryQuery) (p
 // 未配置目录时返回“目录不可用”，完全没有目录读权限时才是越权。
 func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *testing.T) {
 	service := &Service{Repo: &scopeRepository{}}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", 0, 0); !errors.Is(err, ErrForbidden) {
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", nil, 0, 0); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("ListPersonnel() without directory read permission error = %v, want %v", err, ErrForbidden)
 	}
 	for _, permission := range []string{"project.read", "project.team.assign", "project.execution.assign"} {
-		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
+		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", nil, 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
 			t.Fatalf("ListPersonnel() with %s and no directory error = %v, want %v", permission, err, ErrPersonnelUnavailable)
 		}
 	}
-	service.Personnel = personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "user-1", DisplayName: "张三"}}, Page: 1, PageSize: 50, Total: 1}}
-	page, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "张", "", 0, 0)
+	stub := &personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "user-1", DisplayName: "张三"}}, Page: 1, PageSize: 50, Total: 1}}
+	service.Personnel = stub
+	page, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "张", "", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page.Items) != 1 || page.Items[0].UserID != "user-1" {
 		t.Fatalf("unexpected page: %#v", page)
+	}
+}
+
+// 团队负责人/项目经理/工程师的下拉按应用角色取人：角色码必须原样透传给平台目录，
+// 空白和重复值在进入查询前就要被剔除，否则会变成对空角色的过滤。
+func TestListPersonnelForwardsNormalizedRoleCodes(t *testing.T) {
+	stub := &personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}, Page: 1, PageSize: 50}}
+	service := &Service{Repo: &scopeRepository{}, Personnel: stub}
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "", "", []string{" team_lead ", "", "team_lead", "project_manager"}, 1, 50); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(stub.lastQuery.RoleCodes, ",") != "team_lead,project_manager" {
+		t.Fatalf("role codes = %v, want [team_lead project_manager]", stub.lastQuery.RoleCodes)
+	}
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "", "", []string{"  ", ""}, 1, 50); err != nil {
+		t.Fatal(err)
+	}
+	if len(stub.lastQuery.RoleCodes) != 0 {
+		t.Fatalf("empty role codes must not become a filter: %v", stub.lastQuery.RoleCodes)
 	}
 }
 

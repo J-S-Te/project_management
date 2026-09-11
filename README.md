@@ -93,7 +93,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | GET/POST | `/api/v1/projects` | 查询/创建项目 |
 | GET | `/api/v1/projects/{id}` | 项目详情 |
 | GET | `/api/v1/service-items` | 查询服务项 |
-| GET | `/api/v1/personnel` | 查询基础平台负责人目录（团队负责人/项目经理/工程师选择） |
+| GET | `/api/v1/personnel` | 查询基础平台负责人目录（团队负责人/项目经理/工程师选择）；`role_code` 可重复或用逗号分隔，按应用角色只返回岗位模板继承或直接授权过的人员 |
 | POST | `/api/v1/service-items/confirm` | 确认拆解结果 |
 | GET/POST | `/api/v1/rules` | 查询/创建规则 |
 | PATCH | `/api/v1/rules/{id}` | 启停规则 |
