@@ -63,3 +63,21 @@ func TestProjectStatusInputQueryAppliesServiceItemScope(t *testing.T) {
 		}
 	}
 }
+
+// 拆解调整的服务项编号由仓储层顺延既有最大序号补齐：主键为空会让多行互相冲突而整单回滚，
+// 单行则落成 id=” 的孤儿行——事件分发以 service_item_id != "" 判定，该服务项之后再也走不动。
+func TestServiceItemIDFollowsExistingSequence(t *testing.T) {
+	if got := serviceItemIDFor("PJ-2026-ABC123", 2); got != "SI-2026-ABC123-002" {
+		t.Fatalf("serviceItemIDFor = %q, want SI-2026-ABC123-002", got)
+	}
+	for itemID, want := range map[string]int{
+		"SI-2026-ABC123-007": 7,
+		"SI-2026-ABC123-001": 1,
+		"":                   0,
+		"garbage":            0,
+	} {
+		if got := serviceItemSequence(itemID); got != want {
+			t.Fatalf("serviceItemSequence(%q) = %d, want %d", itemID, got, want)
+		}
+	}
+}

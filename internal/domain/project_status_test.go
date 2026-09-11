@@ -95,3 +95,21 @@ func TestIsRiskProjectStatusUsesDerivedStatusVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// 已终止项不再有剩余工作量，必须同时从分子和分母剔除：
+// 按满分计入会得出「1 终止 + 1 待实施 = 62%」这种与状态口径相反的进度。
+func TestDeriveProjectProgressExcludesTerminatedItems(t *testing.T) {
+	// 等级表最高级为 8（现场完成 + 报告归档），待实施为 2。
+	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusTerminated}, {Status: ProjectStatusPendingExecution}}); got != 25 {
+		t.Fatalf("一个终止 + 一个待实施 = %d, want 25（只按未终止项计算）", got)
+	}
+	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusTerminated}, {Status: ProjectStatusTerminated}}); got != 100 {
+		t.Fatalf("全部终止 = %d, want 100（没有剩余工作量）", got)
+	}
+	if got := DeriveProjectProgress(nil); got != 0 {
+		t.Fatalf("无服务项 = %d, want 0", got)
+	}
+	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusPendingAllocation}, {Status: ProjectStatusPendingAllocation}}); got != 12 {
+		t.Fatalf("两个待分配 = %d, want 12", got)
+	}
+}

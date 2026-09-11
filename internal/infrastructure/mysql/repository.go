@@ -36,7 +36,7 @@ func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilt
 	items := make([]domain.Project, 0, len(records))
 	for _, record := range records {
 		project := projectFromRecord(record)
-		project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+		applyDerivedProjectMetrics(&project, inputs[record.ID])
 		// 状态过滤必须作用于唯一的派生状态，而不是可能滞后的存储列。
 		if wanted != "" && project.Status != wanted {
 			continue
@@ -59,8 +59,15 @@ func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter
 	if err != nil {
 		return domain.Project{}, err
 	}
-	project.Status = domain.DeriveProjectStatus(inputs[record.ID], record.SupplementStatus, record.Status)
+	applyDerivedProjectMetrics(&project, inputs[record.ID])
 	return project, nil
+}
+
+// applyDerivedProjectMetrics 用同一份服务项投影刷新项目的唯一状态与进度。
+// 两者必须同源：只派生状态而让进度读存储列，会让确认拆解后的项目显示「待分配 · 0%」。
+func applyDerivedProjectMetrics(project *domain.Project, items []domain.ProjectStatusItem) {
+	project.Status = domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
+	project.Progress = domain.DeriveProjectProgress(items)
 }
 
 // projectIDsOf 提取项目主键，供后续按项目聚合服务项状态。
@@ -206,10 +213,18 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 			if err := tx.Model(&serviceItemRecord{}).Where("tenant_id = ? AND project_id = ? AND status IN ?", tenant, projectID, []string{"待确认", "待复核"}).Count(&pending).Error; err != nil {
 				return err
 			}
-			if pending == 0 {
-				if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ? AND status = ?", tenant, projectID, "待拆解确认").Updates(map[string]any{"status": "待分配", "updated_at": now}).Error; err != nil {
-					return err
-				}
+			if pending > 0 {
+				continue
+			}
+			// 拆解全部确认即退出补充协议分支：supplement_status 是派生状态的短路条件，
+			// 不回写 NONE 会让项目永久停在「补充协议处理中」，此后任何推进都不再改变状态。
+			if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ?", tenant, projectID).
+				Updates(map[string]any{"supplement_status": "NONE", "updated_at": now}).Error; err != nil {
+				return err
+			}
+			// 状态与进度一律走单一派生口径，不再手写目标状态（手写会让进度停在 0）。
+			if err := syncProjectStatusColumn(tx, tenant, projectID); err != nil {
+				return err
 			}
 		}
 		result = make([]domain.ServiceItem, 0, len(records))
