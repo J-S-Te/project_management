@@ -864,3 +864,71 @@ func TestInternalContractActivationIsAudited(t *testing.T) {
 		t.Fatalf("audit event=%+v", event)
 	}
 }
+
+// 列表接口统一返回分页 envelope：显式分页时给出当前页与筛选后的总数，
+// 未指定 page_size 时返回全部（下拉数据源需要完整集合）。
+func TestProjectListPaginationEnvelope(t *testing.T) {
+	repository := &repo{projects: []domain.Project{
+		{ID: "PJ-1", TenantID: "tenant-1"}, {ID: "PJ-2", TenantID: "tenant-1"}, {ID: "PJ-3", TenantID: "tenant-1"},
+	}}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	response := perform(handler, http.MethodGet, "/api/v1/projects?page=2&page_size=1", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Data struct {
+			Items    []domain.Project `json:"items"`
+			Total    int              `json:"total"`
+			Page     int              `json:"page"`
+			PageSize int              `json:"page_size"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v body=%s", err, response.Body.String())
+	}
+	if page.Data.Total != 3 || page.Data.Page != 2 || page.Data.PageSize != 1 || len(page.Data.Items) != 1 {
+		t.Fatalf("unexpected page: %+v", page.Data)
+	}
+	if page.Data.Items[0].ID != "PJ-2" {
+		t.Fatalf("second page must carry the second row, got %s", page.Data.Items[0].ID)
+	}
+
+	// 未指定 page_size 时不截断，保持"完整集合"语义。
+	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Data.Total != 3 || len(page.Data.Items) != 3 {
+		t.Fatalf("unpaginated list must return everything: %+v", page.Data)
+	}
+
+	// 分页参数非法时明确报错，而不是静默返回第一页。
+	response = perform(handler, http.MethodGet, "/api/v1/projects?page=0", "")
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid page must be rejected, status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// 超大 page_size 被收敛到上限，避免客户端拉爆响应。
+func TestVeryLargePageSizeIsCapped(t *testing.T) {
+	handler := router(t, map[string]bool{"project.read": true}, nil)
+	response := perform(handler, http.MethodGet, "/api/v1/projects?page=1&page_size=100000", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Data struct {
+			PageSize int `json:"page_size"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Data.PageSize != 200 {
+		t.Fatalf("page_size must be capped at 200, got %d", page.Data.PageSize)
+	}
+}

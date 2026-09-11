@@ -444,12 +444,17 @@ func (h *Handler) dashboard(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listProjects(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListProjects(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 func (h *Handler) getProject(c *gin.Context) {
 	item, err := h.service.GetProject(c.Request.Context(), principal(c), c.Param("id"))
@@ -538,12 +543,17 @@ func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string)
 	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 
 // listPersonnel 把基础平台负责人目录代理给服务项操作台，前端据此渲染人员下拉框，
@@ -593,6 +603,56 @@ func (h *Handler) resolvePersonnelNames(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, map[string]any{"names": names})
+}
+
+// maximumPageSize 是列表接口单页上限，避免客户端用超大 page_size 拉爆响应。
+const maximumPageSize = 200
+
+// PageEnvelope 是列表接口的统一分页响应。page_size<=0 表示不分页（返回全部行），
+// 这与"下拉数据源需要完整集合"的既有语义一致；显式分页时返回 total 供前端渲染分页控件。
+type PageEnvelope struct {
+	Items    any `json:"items"`
+	Total    int `json:"total"`
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+}
+
+// pageParams 解析可选的分页参数；未提供时返回 0，表示不分页。
+func pageParams(c *gin.Context) (int, int, error) {
+	page, err := optionalPositiveInt(c.Query("page"))
+	if err != nil {
+		return 0, 0, err
+	}
+	pageSize, err := optionalPositiveInt(c.Query("page_size"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if pageSize > maximumPageSize {
+		pageSize = maximumPageSize
+	}
+	return page, pageSize, nil
+}
+
+// writePage 输出统一分页响应。项目列表的状态过滤发生在服务端的派生态上，
+// 因此这里对已经过筛选与派生的结果切片，保证分页结果与"唯一的派生状态"口径一致。
+func writePage[T any](c *gin.Context, items []T, page, pageSize int) {
+	total := len(items)
+	if pageSize <= 0 {
+		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: total, Page: 1, PageSize: total})
+		return
+	}
+	if page <= 0 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	writeData(c, http.StatusOK, PageEnvelope{Items: items[start:end], Total: total, Page: page, PageSize: pageSize})
 }
 
 func optionalPositiveInt(value string) (int, error) {
@@ -755,12 +815,17 @@ func (h *Handler) listEquipmentReservations(c *gin.Context) {
 }
 
 func (h *Handler) listEquipment(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListEquipment(c.Request.Context(), principal(c))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 func (h *Handler) upsertEquipment(c *gin.Context) {
 	var input domain.Capability
