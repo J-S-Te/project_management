@@ -124,7 +124,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
 	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
-	api.POST("/service-items/:id/special-method-review", require("project.deviation.review"), h.reviewSpecialMethod)
+	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
 	api.POST("/service-items/:id/report-status", require("project.field.complete"), h.updateReportStatus)
 	return router
 }
