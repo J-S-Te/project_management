@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -14,6 +15,12 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// isDuplicateKey 识别 MySQL 唯一键冲突（错误码 1062），把驱动的底层错误翻译成业务哨兵。
+func isDuplicateKey(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
+}
 
 func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter platform.ScopeFilter, contractID, version string) (domain.Project, error) {
 	var record projectRecord
@@ -37,6 +44,12 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
+			// 同一 (tenant_id, contract_id, contract_version) 并发激活时，唯一键
+			// uq_pm_project_contract_version 会让后到的事务失败；这里翻译成语义哨兵，
+			// 由应用层回读已存在项目并按幂等成功返回。
+			if isDuplicateKey(err) {
+				return application.ErrDuplicateContract
+			}
 			return err
 		}
 		for _, item := range items {
@@ -110,6 +123,13 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 				return err
 			}
 		}
+		// L4：事件落库后把派生项目状态回写 pm_project.status 缓存，与读侧派生口径保持一致。
+		// 服务项状态在事务内推进（含直接落库的终止/偏离/现场完成），不再让存储列悄然陈旧。
+		if event.ProjectID != "" {
+			if err := syncProjectStatusColumn(tx, event.TenantID, event.ProjectID); err != nil {
+				return err
+			}
+		}
 		return createEvent(tx, event)
 	})
 }
@@ -135,7 +155,7 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
 		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
 	case application.EventAssignmentPublished:
-		if item.Status != "待分配" && item.Status != "待实施" {
+		if item.Status != "待分配" {
 			return application.ErrValidation
 		}
 		updates["team_lead_id"] = stringValue(event.Payload, "team_lead_id")
@@ -303,6 +323,52 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		return nil
 	}
 	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", project.TenantID, project.ID).Updates(updates).Error
+}
+
+// syncProjectStatusColumn 在事件事务提交前按派生规则重算并回写 pm_project.status。
+// 与读侧（ListProjects/GetProject/Dashboard/FindProjectByContractVersion）共用
+// domain.DeriveProjectStatus 单一口径，保证存储列永不分叉：服务项状态推进到哪，
+// 项目状态缓存就立刻对齐到哪，不再依赖某条事件手工设置项目状态。
+func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
+	var project projectRecord
+	if err := tx.Where("tenant_id=? AND id=?", tenantID, projectID).First(&project).Error; err != nil {
+		return err
+	}
+	var items []domain.ProjectStatusItem
+	if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=?", tenantID, projectID).Select("status, report_status").Scan(&items).Error; err != nil {
+		return err
+	}
+	derived := domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
+	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", tenantID, projectID).Update("status", derived).Error
+}
+
+// ListSlaOverdue 返回超期服务项：计划完成时间早于当前 UTC 且尚未进入终态。
+// 与列表/仪表盘一致地套用服务项数据范围，超期时长由数据库按小时取整。
+func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
+	var rows []struct {
+		ID           string
+		ProjectID    string
+		Site         string
+		Category     string
+		Status       string
+		PlannedEnd   *time.Time
+		OverdueHours int64
+	}
+	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).
+		Select("id, project_id, site, category, status, planned_end, TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()) AS overdue_hours").
+		Where("planned_end IS NOT NULL AND planned_end < UTC_TIMESTAMP() AND status NOT IN ?", []string{domain.ProjectStatusCompleted, domain.ProjectStatusTerminated})
+	if err := query.Order("planned_end").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	items := make([]domain.SlaOverdueItem, 0, len(rows))
+	for _, row := range rows {
+		plannedEnd := ""
+		if row.PlannedEnd != nil {
+			plannedEnd = row.PlannedEnd.Format(time.RFC3339)
+		}
+		items = append(items, domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status, PlannedEnd: plannedEnd, OverdueHours: row.OverdueHours})
+	}
+	return items, nil
 }
 
 func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.DeliveryEvent, error) {

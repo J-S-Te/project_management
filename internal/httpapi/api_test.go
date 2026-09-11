@@ -8,8 +8,6 @@ import (
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	"github.com/j-s-te/project-management/internal/platform"
-	"github.com/j-s-te/project-management/internal/workflows"
-	"go.temporal.io/sdk/client"
 	"io"
 	"log/slog"
 	"net/http"
@@ -82,6 +80,9 @@ func (r *repo) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent)
 	r.events = append(r.events, event)
 	return nil
 }
+func (r *repo) ListSlaOverdue(context.Context, platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
+	return []domain.SlaOverdueItem{}, nil
+}
 func (r *repo) ListDeliveryEvents(_ context.Context, _ platform.ScopeFilter, project string) ([]domain.DeliveryEvent, error) {
 	return r.events, nil
 }
@@ -131,7 +132,7 @@ func (r *repo) GetServiceItem(_ context.Context, _ platform.ScopeFilter, id stri
 	}
 	return domain.ServiceItem{}, application.ErrNotFound
 }
-func (r *repo) ConfirmServiceItems(_ context.Context, _ string, ids []string, _ string) ([]domain.ServiceItem, error) {
+func (r *repo) ConfirmServiceItems(_ context.Context, _ platform.ScopeFilter, ids []string, _ string) ([]domain.ServiceItem, error) {
 	return r.items, nil
 }
 func (r *repo) ListRules(context.Context, string, string) ([]domain.Rule, error) { return r.rules, nil }
@@ -156,25 +157,6 @@ func (r *repo) Dashboard(_ context.Context, filter platform.ScopeFilter) (domain
 	return r.dashboard, nil
 }
 
-type executor struct{ items []domain.ServiceItem }
-
-func (e executor) ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error) {
-	return run{items: e.items}, nil
-}
-
-type run struct{ items []domain.ServiceItem }
-
-func (run) GetID() string    { return "workflow-1" }
-func (run) GetRunID() string { return "run-1" }
-func (r run) Get(_ context.Context, value any) error {
-	result := value.(*workflows.ConfirmServiceItemsResult)
-	result.Items = r.items
-	return nil
-}
-func (r run) GetWithOptions(ctx context.Context, value any, _ client.WorkflowRunGetOptions) error {
-	return r.Get(ctx, value)
-}
-
 type audit struct{ events []platform.AuditEvent }
 
 func (a *audit) Report(_ context.Context, e platform.AuditEvent) error {
@@ -185,7 +167,7 @@ func (a *audit) Report(_ context.Context, e platform.AuditEvent) error {
 func router(t *testing.T, permissions map[string]bool, reporter platform.AuditReporter) http.Handler {
 	t.Helper()
 	repository := &repo{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}}}
-	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	service := &application.Service{Repo: repository}
 	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
 	return httpapi.NewRouter(service, id, reporter, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
@@ -649,7 +631,7 @@ func TestImplementationPlanPreconditionReturnsActionableConflict(t *testing.T) {
 // 真正的字段级错误仍为 422，但必须点名具体字段。
 func TestImplementationPlanValidationNamesTheInvalidField(t *testing.T) {
 	repository := &repo{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配", ProjectManagerID: "pm-1", ConflictStatus: "PASSED"}}}
-	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	service := &application.Service{Repo: repository}
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -687,7 +669,7 @@ func TestPersonnelNamesEndpointReportsUnavailableDirectory(t *testing.T) {
 // 目录可用时返回 user_id → 显示名 的映射，供界面把团队负责人/项目经理/工程师渲染成姓名。
 func TestPersonnelNamesEndpointResolvesNames(t *testing.T) {
 	repository := &repo{}
-	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test", Personnel: ownerDirectoryStub{names: map[string]string{"u-1": "张三"}}}
+	service := &application.Service{Repo: repository, Personnel: ownerDirectoryStub{names: map[string]string{"u-1": "张三"}}}
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	response := perform(handler, http.MethodGet, "/api/v1/personnel/names?user_ids=u-1,u-404", "")
@@ -705,6 +687,20 @@ func TestPersonnelNamesEndpointResolvesNames(t *testing.T) {
 
 // 团队负责人/项目经理/工程师下拉按应用角色取人：/personnel 必须把 role_code 原样透传给
 // 平台负责人目录，并同时接受重复参数与逗号分隔两种写法。
+func TestSlaOverdueEndpointReturnsOverdueItems(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/delivery/sla-overdue", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"data":[]`) {
+		t.Fatalf("expected empty overdue array, got %s", response.Body.String())
+	}
+}
+
 func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
 	directory := &recordingOwnerDirectoryStub{}
 	service := &application.Service{Repo: &repo{}, Personnel: directory}
@@ -759,7 +755,7 @@ func TestImplementationPlanCarriesResolvedPersonnel(t *testing.T) {
 			{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "无线测试套件", Codes: []string{"802.11 a/b/g/n/ac"}, Status: "ACTIVE"},
 		},
 	}
-	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	service := &application.Service{Repo: repository}
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -802,7 +798,7 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 			{ServiceItemID: "SI-OTHER", ProjectID: "PJ-2026-002", ResourceID: "EQ-001", ResourceName: "无线测试套件", WindowStart: "2026-09-16", WindowEnd: "2026-09-18"},
 		},
 	}
-	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	service := &application.Service{Repo: repository}
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -826,5 +822,47 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 	equipment, ok := repository.events[0].Payload["equipment"].([]domain.PlanResource)
 	if !ok || len(equipment) != 1 || equipment[0].ResourceName != "BurpSuite 终端" || equipment[0].WindowStart != "2026-09-16" {
 		t.Fatalf("equipment=%#v", repository.events[0].Payload["equipment"])
+	}
+}
+
+// M2：安全头补齐防内嵌/防嗅探/防缓存配置，且对任意接口生效。
+func TestSecurityHeadersAreSetOnEveryResponse(t *testing.T) {
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/healthz", "")
+	for _, header := range []string{"X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy", "Content-Security-Policy", "Cache-Control"} {
+		if value := response.Header().Get(header); value == "" {
+			t.Fatalf("missing security header %s", header)
+		}
+	}
+	if response.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("X-Frame-Options=%q", response.Header().Get("X-Frame-Options"))
+	}
+}
+
+// M2：内部机器接口（合同激活投递）同样写入平台审计，不再出现无审计的写通道。
+func TestInternalContractActivationIsAudited(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	auditLog := &audit{}
+	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, auditLog, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
+	})
+	body := `{"contract_id":"HT-AUDIT","contract_version":"1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","test_mode":"STANDARD"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
+	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
+	request.Header.Set("X-Contract-Tenant-ID", "tenant-audit")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(auditLog.events) != 1 {
+		t.Fatalf("internal activation must be audited, got %+v", auditLog.events)
+	}
+	event := auditLog.events[0]
+	if event.ActorID != "contract_management" || !strings.Contains(event.Action, "internal.v1.contracts.activate") {
+		t.Fatalf("audit event=%+v", event)
 	}
 }

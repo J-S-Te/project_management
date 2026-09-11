@@ -14,8 +14,6 @@ import (
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/j-s-te/project-management/internal/temporalworker"
-	"github.com/j-s-te/project-management/internal/workflows"
-	"go.temporal.io/sdk/worker"
 )
 
 func main() {
@@ -37,35 +35,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer bootstrap.CloseDatabase(db)
-	temporalClient, err := bootstrap.OpenTemporal(ctx, cfg, metrics)
-	if err != nil {
-		logger.Error("temporal failed", "error", err)
-		os.Exit(1)
-	}
-	defer temporalClient.Close()
 	repository := store.NewRepository(db)
-	var embeddedWorker worker.Worker
-	if cfg.RunWorkerWithAPI {
-		versioning := temporalworker.VersioningConfig{
-			Enabled: cfg.TemporalWorkerVersioning, DeploymentName: cfg.TemporalWorkerDeploymentName,
-			BuildID: cfg.TemporalWorkerBuildID, Policy: cfg.TemporalWorkerVersioningPolicy,
-		}
-		workerOptions, optionsErr := temporalworker.WorkerOptions(versioning)
-		if optionsErr != nil {
-			logger.Error("configure embedded Temporal worker versioning", "error", optionsErr)
-			os.Exit(1)
-		}
-		embeddedWorker = worker.New(temporalClient, cfg.TemporalTaskQueue, workerOptions)
-		workflows.Register(embeddedWorker, &workflows.Activities{Store: repository})
-		if err := embeddedWorker.Start(); err != nil {
-			logger.Error("start embedded workflow worker", "error", err)
-			os.Exit(1)
-		}
-		defer embeddedWorker.Stop()
-		// 版本路由开启时 Worker 只消费自身版本队列；Deployment 的 Current 版本为空会让新工作流
-		// 以 UNVERSIONED 入队且无人领取，因此启动时主动收敛，不再依赖人工 PROMOTE。
-		temporalworker.EnsureCurrentVersionOnStartup(ctx, temporalClient, logger, versioning)
-	}
 	startupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	audit := platform.NewAuditReporter(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
@@ -125,7 +95,7 @@ func main() {
 	} else {
 		logger.Warn("platform owner directory integration disabled; personnel pickers will be unavailable")
 	}
-	service := &application.Service{Repo: repository, Temporal: temporalClient, TaskQueue: cfg.TemporalTaskQueue, Personnel: personnel}
+	service := &application.Service{Repo: repository, Personnel: personnel}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,

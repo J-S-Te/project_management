@@ -386,3 +386,222 @@ func TestCapabilityUpsertAndImportPreserveUsageScope(t *testing.T) {
 		t.Fatalf("csv import must keep the stored usage scope, got %q", got)
 	}
 }
+
+// duplicateContractRepository 模拟并发激活合同时的竞态败方：find 阶段未命中，
+// 但写库时撞唯一键——这正是 activations/HTTP 重放最可能出现的时序。
+type duplicateContractRepository struct {
+	scopeRepository
+	existing  domain.Project
+	missOnce  bool
+	synced    bool
+	activated []string
+	// duplicate 为 true 时 ActivateContract 撞唯一键（模拟后到请求）。
+	duplicate bool
+}
+
+func (r *duplicateContractRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
+	if r.missOnce {
+		r.missOnce = false
+		return domain.Project{}, ErrNotFound
+	}
+	if r.existing.ID != "" {
+		return r.existing, nil
+	}
+	return domain.Project{}, ErrNotFound
+}
+func (r *duplicateContractRepository) ActivateContract(_ context.Context, project domain.Project, _ []domain.ServiceItem, _ domain.DeliveryEvent) error {
+	if r.duplicate {
+		return ErrDuplicateContract
+	}
+	r.existing = project
+	r.activated = append(r.activated, project.ID)
+	return nil
+}
+func (r *duplicateContractRepository) SyncContractStampStatus(_ context.Context, project domain.Project, _ bool, _ domain.DeliveryEvent) error {
+	r.synced = true
+	r.existing = project
+	return nil
+}
+func (r *duplicateContractRepository) ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error {
+	return nil
+}
+func (r *duplicateContractRepository) ListSlaOverdue(context.Context, platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
+	return nil, nil
+}
+func (r *duplicateContractRepository) ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error) {
+	return nil, nil
+}
+func (r *duplicateContractRepository) FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error) {
+	return "", "", ErrNotFound
+}
+func (r *duplicateContractRepository) UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error) {
+	return domain.Capability{}, nil
+}
+func (r *duplicateContractRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
+	return nil, nil
+}
+func (r *duplicateContractRepository) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {
+	return nil, nil
+}
+func (r *duplicateContractRepository) ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error) {
+	return nil, nil
+}
+
+// 重复激活同一合同版本不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
+func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *testing.T) {
+	principal := principalWith("project.contract.import", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION", ScopeID: "app-1"})
+	activeRepo := &duplicateContractRepository{}
+	service := &Service{Repo: activeRepo}
+	activation := func() domain.ContractActivation {
+		return domain.ContractActivation{
+			ContractID: "CT-001", ContractVersion: "v1.0", Customer: "客户A", EffectiveAt: time.Now().UTC(),
+			Services: []domain.ContractService{{SourceID: "S1", Site: "北京", Batch: "B1", Category: "渗透测试", TestMode: "PENETRATION"}},
+		}
+	}
+
+	first, err := service.ActivateContract(context.Background(), principal, activation())
+	if err != nil {
+		t.Fatalf("first activation failed: %v", err)
+	}
+	if len(activeRepo.activated) != 1 {
+		t.Fatalf("first activation should insert project once, got %d", len(activeRepo.activated))
+	}
+
+	// 第二次请求并发到达：它的 pre-check find 与首次插入同时进行（miss），写库时撞唯一键。
+	activeRepo.missOnce = true
+	activeRepo.duplicate = true
+	second, err := service.ActivateContract(context.Background(), principal, activation())
+	if err != nil {
+		t.Fatalf("duplicate activation must be idempotent success, got %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate activation returned %q, want original project %q", second.ID, first.ID)
+	}
+	if !activeRepo.synced {
+		t.Fatal("duplicate activation should still sync the stamped-contract state")
+	}
+	if len(activeRepo.activated) != 1 {
+		t.Fatalf("duplicate activation must not insert another project, got %d inserts", len(activeRepo.activated))
+	}
+}
+
+// hookRepository 同时充当 Repository 与 DeliveryRepository，记录派生事件并保留规则/超期数据，
+// 供 automations / warning-rules / sla 钩子测试使用。
+type hookRepository struct {
+	capabilityRepository
+	rules   []domain.Rule
+	events  []domain.DeliveryEvent
+	overdue []domain.SlaOverdueItem
+}
+
+func (r *hookRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
+	return r.rules, nil
+}
+func (r *hookRepository) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
+func (r *hookRepository) ListSlaOverdue(_ context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
+	r.lastFilter = filter
+	return r.overdue, nil
+}
+
+func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
+	principal := platform.Principal{TenantID: "t1", UserID: "u1"}
+
+	t.Run("enabled matching rule appends AUTOMATION_TRIGGERED", func(t *testing.T) {
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "通知技术总监"}}}
+		service := Service{Repo: repo}
+		err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"}))
+		if err != nil {
+			t.Fatalf("applyEvent failed: %v", err)
+		}
+		if len(repo.events) != 2 || repo.events[1].Type != EventAutomationTriggered {
+			t.Fatalf("expected source + one AUTOMATION_TRIGGERED event, got %+v", repo.events)
+		}
+		triggered := repo.events[1]
+		if triggered.TenantID != "t1" || triggered.ProjectID != "PJ-1" || triggered.ServiceItemID != "SI-1" {
+			t.Fatalf("derived event lost context: %+v", triggered)
+		}
+		targets, _ := triggered.Payload["targets"].([]string)
+		if len(targets) != 1 || targets[0] != "通知技术总监" {
+			t.Fatalf("derived event targets wrong: %+v", triggered.Payload)
+		}
+	})
+
+	t.Run("non-matching or disabled rules append nothing", func(t *testing.T) {
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "REPORT_STATUS_UPDATED", Target: "x"}, {Enabled: false, Trigger: "DEVIATION_REPORTED", Target: "y"}}}
+		service := Service{Repo: repo}
+		if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", nil)); err != nil {
+			t.Fatalf("applyEvent failed: %v", err)
+		}
+		if len(repo.events) != 1 || repo.events[0].Type != "DEVIATION_REPORTED" {
+			t.Fatalf("expected only the source event, got %+v", repo.events)
+		}
+	})
+
+	t.Run("derived events never re-trigger automations", func(t *testing.T) {
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: EventAutomationTriggered, Target: "boom"}}}
+		service := Service{Repo: repo}
+		if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventAutomationTriggered, nil)); err != nil {
+			t.Fatalf("applyEvent failed: %v", err)
+		}
+		if len(repo.events) != 1 || repo.events[0].Type != EventAutomationTriggered {
+			t.Fatalf("AUTOMATION_TRIGGERED must not recurse, got %+v", repo.events)
+		}
+	})
+}
+
+func TestAssignServiceItemConflictEmitsWarningEventOnlyWhenRuleEnabled(t *testing.T) {
+	principal := principalWith("project.resource.assign", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
+	input := domain.AssignmentInput{
+		TeamLeadID: "TL-1", ProjectManagerID: "PM-1", EngineerIDs: []string{"E-1"},
+		RequiredCodes: []string{"ISO27001"}, PlannedStart: "2026-10-01T00:00:00Z", PlannedEnd: "2026-10-02T00:00:00Z",
+	}
+
+	t.Run("conflict with enabled warning rule appends WARNING_TRIGGERED", func(t *testing.T) {
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, CheckType: "能力冲突", Name: "缺资质预警"}}}
+		service := Service{Repo: repo}
+		result, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input)
+		if err != nil {
+			t.Fatalf("AssignServiceItem failed: %v", err)
+		}
+		if result.Passed {
+			t.Fatal("empty capability directory should produce conflicts")
+		}
+		if len(repo.events) != 2 || repo.events[0].Type != EventAssignmentPublished || repo.events[1].Type != EventWarningTriggered {
+			t.Fatalf("expected ASSIGNMENT_PUBLISHED + WARNING_TRIGGERED, got %+v", repo.events)
+		}
+		conflicts, _ := repo.events[1].Payload["conflicts"].([]string)
+		if len(conflicts) == 0 {
+			t.Fatalf("warning event payload must carry conflict list: %+v", repo.events[1].Payload)
+		}
+	})
+
+	t.Run("no warning rules configured appends nothing extra", func(t *testing.T) {
+		repo := &hookRepository{}
+		service := Service{Repo: repo}
+		if _, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input); err != nil {
+			t.Fatalf("AssignServiceItem failed: %v", err)
+		}
+		if len(repo.events) != 1 || repo.events[0].Type != EventAssignmentPublished {
+			t.Fatalf("expected only the assignment event, got %+v", repo.events)
+		}
+	})
+}
+
+func TestListSlaOverdueForwardsScopeFilterToRepository(t *testing.T) {
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	repo := &hookRepository{overdue: []domain.SlaOverdueItem{{ID: "SI-1", ProjectID: "PJ-1", OverdueHours: 12}}}
+	service := Service{Repo: repo}
+	items, err := service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "SI-1" || items[0].OverdueHours != 12 {
+		t.Fatalf("overdue items not forwarded: %+v", items)
+	}
+	if repo.lastFilter.TenantID != "tenant-1" {
+		t.Fatalf("scope filter not forwarded, got %+v", repo.lastFilter)
+	}
+}
