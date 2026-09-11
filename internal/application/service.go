@@ -105,14 +105,30 @@ func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, sta
 	if err != nil {
 		return nil, err
 	}
-	return s.Repo.ListProjects(ctx, filter, q, status)
+	projects, err := s.Repo.ListProjects(ctx, filter, q, status)
+	if err != nil {
+		return nil, err
+	}
+	masked, _, err := s.applyFieldPermissions(ctx, p, projects, nil)
+	if err != nil {
+		return nil, err
+	}
+	return masked, nil
 }
 func (s *Service) GetProject(ctx context.Context, p platform.Principal, id string) (domain.Project, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
 		return domain.Project{}, err
 	}
-	return s.Repo.GetProject(ctx, filter, id)
+	project, err := s.Repo.GetProject(ctx, filter, id)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	masked, _, err := s.applyFieldPermissions(ctx, p, []domain.Project{project}, nil)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	return masked[0], nil
 }
 func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.Dashboard, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
@@ -126,7 +142,15 @@ func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, pr
 	if err != nil {
 		return nil, err
 	}
-	return s.Repo.ListServiceItems(ctx, filter, projectID)
+	items, err := s.Repo.ListServiceItems(ctx, filter, projectID)
+	if err != nil {
+		return nil, err
+	}
+	_, masked, err := s.applyFieldPermissions(ctx, p, nil, items)
+	if err != nil {
+		return nil, err
+	}
+	return masked, nil
 }
 
 // ListPersonnel 从基础平台负责人目录读取可选人员，供服务项操作台选择团队负责人、
@@ -321,18 +345,29 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		}
 		return input, nil
 	}
+	// 拆解规则执行语义：存在启用规则时，未命中任何规则的常规批次在拆解时自动确认
+	// （Status=待分配，跳过人工确认），命中规则描述范围的批次保留待确认以便重点复核。
+	// 未配置任何规则时行为与历史一致（全部待确认）。
+	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
+	if err != nil {
+		return input, err
+	}
 	items := make([]domain.ServiceItem, 0, len(requested))
 	for index, source := range requested {
 		mode := strings.ToUpper(firstNonEmpty(source.TestMode, "STANDARD"))
 		if strings.TrimSpace(source.Site) == "" || mode != "STANDARD" && mode != "PENETRATION" {
 			return input, ErrValidation
 		}
+		itemStatus := "待确认"
+		if hasEnabledSplitRule(splitRules) && !matchesSplitRule(splitRules, source.Batch, source.Site, source.Category) {
+			itemStatus = "待分配"
+		}
 		items = append(items, domain.ServiceItem{
 			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
 			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category),
 			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
-			Status: "待确认", ConflictStatus: "UNCHECKED",
+			Status: itemStatus, ConflictStatus: "UNCHECKED",
 		})
 	}
 	input.Services = len(items)
@@ -470,9 +505,10 @@ func requireApplicationAuthorization(p platform.Principal, permission string) er
 
 // requireDirectoryRead 授权只读目录接口（人员目录、设备、能力码）。这些接口只提供操作台
 // 表单的下拉数据源，凡是参与项目工作的角色都要能渲染表单，因此统一以 project.read 为基线；
-// 分配、指派、维护等写操作仍由各自的 assign/manage 权限把守。数据范围约束保持不变。
+// 分配、指派、维护等写操作仍由各自的 assign/manage 权限把守。数据范围约束保持不变——
+// 组织级范围（包括 ORG）可读，PROJECT/SELF 范围仍禁止，避免跨项目暴露租户级主数据。
 func requireDirectoryRead(p platform.Principal, permissions ...string) error {
-	if !p.HasFullDataScope() {
+	if !p.HasOrganizationalScope() {
 		return ErrForbidden
 	}
 	for _, permission := range permissions {
@@ -487,6 +523,43 @@ func contains(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
 			return true
+		}
+	}
+	return false
+}
+
+// hasEnabledSplitRule 判断租户是否配置了至少一条启用的拆解规则。无规则时
+// 拆解行为保持历史一致（全部待确认），规则存在后才启用自动确认分支。
+func hasEnabledSplitRule(rules []domain.Rule) bool {
+	for i := range rules {
+		if rules[i].Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesSplitRule 按双向包含匹配判断服务项批次/站点/类别是否命中规则适用范围。
+// 规则 Scope 是自由文本（如"单批次金额超过 50 万元"），因此用包含关系近似匹配：
+// 文本与范围任一方向包含即视为命中，便于把"大额/特殊批次"写进适用范围。
+func matchesSplitRule(rules []domain.Rule, texts ...string) bool {
+	for i := range rules {
+		rule := &rules[i]
+		if !rule.Enabled {
+			continue
+		}
+		scope := strings.ToLower(strings.TrimSpace(rule.Scope))
+		if scope == "" {
+			continue
+		}
+		for _, text := range texts {
+			value := strings.ToLower(strings.TrimSpace(text))
+			if value == "" {
+				continue
+			}
+			if strings.Contains(value, scope) || strings.Contains(scope, value) {
+				return true
+			}
 		}
 	}
 	return false
