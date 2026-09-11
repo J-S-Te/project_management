@@ -529,7 +529,8 @@ func (h *Handler) listServiceItems(c *gin.Context) {
 }
 
 // listPersonnel 把基础平台负责人目录代理给服务项操作台，前端据此渲染人员下拉框，
-// 不再要求业务用户手工填写平台用户 ID。
+// 不再要求业务用户手工填写平台用户 ID。role_code 可重复或用逗号分隔，按应用角色
+// 过滤候选人（团队负责人/项目经理/工程师），过滤规则由平台按有效授权判定。
 func (h *Handler) listPersonnel(c *gin.Context) {
 	page, err := optionalPositiveInt(c.Query("page"))
 	if err != nil {
@@ -541,12 +542,27 @@ func (h *Handler) listPersonnel(c *gin.Context) {
 		writeServiceError(c, application.ErrValidation)
 		return
 	}
-	result, err := h.service.ListPersonnel(c.Request.Context(), principal(c), c.Query("keyword"), c.Query("user_id"), page, pageSize)
+	result, err := h.service.ListPersonnel(c.Request.Context(), principal(c), c.Query("keyword"), c.Query("user_id"), queryRoleCodes(c), page, pageSize)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
 	writeData(c, http.StatusOK, result)
+}
+
+// queryRoleCodes 归一化 role_code 查询参数，同时接受重复参数与逗号分隔两种写法。
+// 角色码由平台按调用应用校验，这里只做拆分和去空，不维护子系统侧的角色白名单。
+func queryRoleCodes(c *gin.Context) []string {
+	raw := c.QueryArray("role_code")
+	roleCodes := make([]string, 0, len(raw))
+	for _, value := range raw {
+		for _, code := range strings.Split(value, ",") {
+			if code = strings.TrimSpace(code); code != "" {
+				roleCodes = append(roleCodes, code)
+			}
+		}
+	}
+	return roleCodes
 }
 
 // resolvePersonnelNames 批量解析人员显示名。user_ids 为逗号分隔的平台 user_id，

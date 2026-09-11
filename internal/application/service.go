@@ -121,7 +121,9 @@ func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, pr
 
 // ListPersonnel 从基础平台负责人目录读取可选人员，供服务项操作台选择团队负责人、
 // 项目经理和工程师。只有具备分配权限的角色能读取，避免把平台人员清单暴露给纯查看角色。
-func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keyword, userID string, page, pageSize int) (platform.OwnerDirectoryPage, error) {
+// roleCodes 非空时只返回在这些应用角色上确有有效授权的人员：团队负责人、项目经理和
+// 工程师的下拉据此只列岗位模板继承或直接授权过的候选人，不再把全平台人员都列出来。
+func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keyword, userID string, roleCodes []string, page, pageSize int) (platform.OwnerDirectoryPage, error) {
 	// 人员目录只读，与 /personnel 路由守卫保持一致：project.read 是基线，保留 assign 权限
 	// 是为了兼容只授予分配权限的角色定义。
 	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
@@ -136,12 +138,46 @@ func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keywo
 	if pageSize <= 0 || pageSize > 50 {
 		pageSize = 50
 	}
-	result, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{Keyword: strings.TrimSpace(keyword), UserID: strings.TrimSpace(userID), Page: page, PageSize: pageSize})
+	result, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{
+		Keyword: strings.TrimSpace(keyword), UserID: strings.TrimSpace(userID),
+		RoleCodes: normalizeRoleCodes(roleCodes), Page: page, PageSize: pageSize,
+	})
 	if err != nil {
 		// 目录不可用时对上层统一暴露“未配置/不可用”，不把平台内部错误细节透给浏览器。
 		return platform.OwnerDirectoryPage{}, fmt.Errorf("%w: %v", ErrPersonnelUnavailable, err)
 	}
 	return result, nil
+}
+
+// maximumPersonnelRoleCodes 限制单次查询的角色码数量。下拉最多只需要"团队负责人/项目经理/
+// 工程师"这类少量角色，给参数设上限可避免把目录接口变成任意角色枚举入口。
+const maximumPersonnelRoleCodes = 8
+
+// normalizeRoleCodes 去空、去重并截断角色码，保持查询串稳定且可预测。
+func normalizeRoleCodes(roleCodes []string) []string {
+	if len(roleCodes) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(roleCodes))
+	seen := make(map[string]struct{}, len(roleCodes))
+	for _, raw := range roleCodes {
+		code := strings.TrimSpace(raw)
+		if code == "" {
+			continue
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		normalized = append(normalized, code)
+		if len(normalized) == maximumPersonnelRoleCodes {
+			break
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 // maximumPersonnelNameLookups 限制一次批量解析的人员数量：负责人目录只支持按单个
 // user_id 精确查询，必须给子系统的扇出设上限，避免把目录接口当成自由查询入口。

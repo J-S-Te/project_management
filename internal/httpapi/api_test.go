@@ -701,6 +701,39 @@ func TestPersonnelNamesEndpointResolvesNames(t *testing.T) {
 	}
 }
 
+// 团队负责人/项目经理/工程师下拉按应用角色取人：/personnel 必须把 role_code 原样透传给
+// 平台负责人目录，并同时接受重复参数与逗号分隔两种写法。
+func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
+	directory := &recordingOwnerDirectoryStub{}
+	service := &application.Service{Repo: &repo{}, Personnel: directory}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	response := perform(handler, http.MethodGet, "/api/v1/personnel?role_code=team_lead&role_code=project_manager,engineer&page=1&page_size=50", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := strings.Join(directory.last.RoleCodes, ","); got != "team_lead,project_manager,engineer" {
+		t.Fatalf("role codes = %q, want %q", got, "team_lead,project_manager,engineer")
+	}
+
+	// 不带 role_code 时保持原有语义：返回应用内全部可选人员，而不是过滤空角色。
+	response = perform(handler, http.MethodGet, "/api/v1/personnel?page=1&page_size=50", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(directory.last.RoleCodes) != 0 {
+		t.Fatalf("role codes = %v, want empty", directory.last.RoleCodes)
+	}
+}
+
+type recordingOwnerDirectoryStub struct{ last platform.OwnerDirectoryQuery }
+
+func (stub *recordingOwnerDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	stub.last = query
+	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}, Page: 1, PageSize: 50}, nil
+}
+
 type ownerDirectoryStub struct{ names map[string]string }
 
 func (stub ownerDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {

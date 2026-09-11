@@ -42,11 +42,15 @@ type OwnerDirectoryPage struct {
 }
 
 // OwnerDirectoryQuery 过滤基础平台负责人目录。
+// RoleCodes 按应用角色的有效授权取人：平台只返回在调用应用/环境中确实持有这些角色
+// 的用户，覆盖岗位模板继承、组织绑定和直接绑定三种来源，因此子系统不需要自行复制
+// 任职与岗位模板的判定规则。
 type OwnerDirectoryQuery struct {
-	Keyword  string
-	UserID   string
-	Page     int
-	PageSize int
+	Keyword   string
+	UserID    string
+	RoleCodes []string
+	Page      int
+	PageSize  int
 }
 
 // OwnerDirectory 查询基础平台人员目录；未配置集成时实现为 nil。
@@ -89,6 +93,20 @@ func (c *ownerDirectoryClient) List(ctx context.Context, query OwnerDirectoryQue
 	}
 	if userID := strings.TrimSpace(query.UserID); userID != "" {
 		values.Set("user_id", userID)
+	}
+	// 角色码以重复参数发送，与平台 /internal/owner-directory 的解析方式一致；空值和重复值
+	// 不进查询串，避免把"没有过滤"误写成"过滤空角色"。
+	seenRoles := make(map[string]struct{}, len(query.RoleCodes))
+	for _, raw := range query.RoleCodes {
+		code := strings.TrimSpace(raw)
+		if code == "" {
+			continue
+		}
+		if _, exists := seenRoles[code]; exists {
+			continue
+		}
+		seenRoles[code] = struct{}{}
+		values.Add("role_code", code)
 	}
 	if query.Page > 0 {
 		values.Set("page", strconv.Itoa(query.Page))
