@@ -38,7 +38,8 @@ func TestOwnerDirectoryClientUsesScopeAndParsesEnvelope(t *testing.T) {
 	}
 	directory.service.client.Transport = transport
 	page, err := directory.List(context.Background(), OwnerDirectoryQuery{
-		Keyword: "张三", RoleCodes: []string{" team_lead ", "team_lead", "", "project_manager"}, Page: 1, PageSize: 80,
+		Keyword: "张三", RoleCodes: []string{" team_lead ", "team_lead", "", "project_manager"},
+		RoleOrigins: []string{"TEMPLATE", " TEMPLATE "}, Page: 1, PageSize: 80,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +64,9 @@ func TestOwnerDirectoryClientUsesScopeAndParsesEnvelope(t *testing.T) {
 	}
 	if got := strings.Join(parsed["role_code"], ","); got != "team_lead,project_manager" {
 		t.Fatalf("role_code query = %q, want %q", got, "team_lead,project_manager")
+	}
+	if got := strings.Join(parsed["role_origin"], ","); got != "TEMPLATE" {
+		t.Fatalf("role_origin query = %q, want %q", got, "TEMPLATE")
 	}
 }
 

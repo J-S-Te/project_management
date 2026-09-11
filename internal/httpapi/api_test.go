@@ -709,12 +709,15 @@ func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	response := perform(handler, http.MethodGet, "/api/v1/personnel?role_code=team_lead&role_code=project_manager,engineer&page=1&page_size=50", "")
+	response := perform(handler, http.MethodGet, "/api/v1/personnel?role_code=team_lead&role_code=project_manager,engineer&role_origin=TEMPLATE&page=1&page_size=50", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	if got := strings.Join(directory.last.RoleCodes, ","); got != "team_lead,project_manager,engineer" {
 		t.Fatalf("role codes = %q, want %q", got, "team_lead,project_manager,engineer")
+	}
+	if got := strings.Join(directory.last.RoleOrigins, ","); got != "TEMPLATE" {
+		t.Fatalf("role origins = %q, want %q", got, "TEMPLATE")
 	}
 
 	// 不带 role_code 时保持原有语义：返回应用内全部可选人员，而不是过滤空角色。
@@ -722,8 +725,8 @@ func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if len(directory.last.RoleCodes) != 0 {
-		t.Fatalf("role codes = %v, want empty", directory.last.RoleCodes)
+	if len(directory.last.RoleCodes) != 0 || len(directory.last.RoleOrigins) != 0 {
+		t.Fatalf("role codes = %v, role origins = %v, want empty", directory.last.RoleCodes, directory.last.RoleOrigins)
 	}
 }
 

@@ -351,7 +351,7 @@ func validatePenetrationCompliance(input domain.ImplementationPlanInput) error {
 // ReviewSpecialMethod 技术总监对特殊方法（渗透测试专项）服务项的适用性与风险控制复核。
 // 复核通过后才能发布实施计划；驳回后可在修正后再次提交复核。
 func (s *Service) ReviewSpecialMethod(ctx context.Context, p platform.Principal, itemID string, input domain.SpecialMethodReviewInput) error {
-	if err := s.authorizeServiceItem(ctx, p, "project.deviation.review", itemID); err != nil {
+	if err := s.authorizeServiceItem(ctx, p, "project.special_method.review", itemID); err != nil {
 		return err
 	}
 	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
