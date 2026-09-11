@@ -180,17 +180,17 @@ func (stub *personnelStub) List(_ context.Context, query platform.OwnerDirectory
 // 未配置目录时返回“目录不可用”，完全没有目录读权限时才是越权。
 func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *testing.T) {
 	service := &Service{Repo: &scopeRepository{}}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", nil, 0, 0); !errors.Is(err, ErrForbidden) {
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", nil, nil, 0, 0); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("ListPersonnel() without directory read permission error = %v, want %v", err, ErrForbidden)
 	}
 	for _, permission := range []string{"project.read", "project.team.assign", "project.execution.assign"} {
-		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", nil, 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
+		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", nil, nil, 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
 			t.Fatalf("ListPersonnel() with %s and no directory error = %v, want %v", permission, err, ErrPersonnelUnavailable)
 		}
 	}
 	stub := &personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "user-1", DisplayName: "张三"}}, Page: 1, PageSize: 50, Total: 1}}
 	service.Personnel = stub
-	page, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "张", "", nil, 0, 0)
+	page, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "张", "", nil, nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,17 +204,21 @@ func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *t
 func TestListPersonnelForwardsNormalizedRoleCodes(t *testing.T) {
 	stub := &personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}, Page: 1, PageSize: 50}}
 	service := &Service{Repo: &scopeRepository{}, Personnel: stub}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "", "", []string{" team_lead ", "", "team_lead", "project_manager"}, 1, 50); err != nil {
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.team.assign"), "", "", []string{" team_lead ", "", "team_lead", "project_manager"}, []string{"TEMPLATE", "TEMPLATE"}, 1, 50); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(stub.lastQuery.RoleCodes, ",") != "team_lead,project_manager" {
 		t.Fatalf("role codes = %v, want [team_lead project_manager]", stub.lastQuery.RoleCodes)
 	}
-	if _, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "", "", []string{"  ", ""}, 1, 50); err != nil {
+	// 来源过滤同样去重后透传：它决定下拉里是否会出现管理员直接开通的例外绑定。
+	if strings.Join(stub.lastQuery.RoleOrigins, ",") != "TEMPLATE" {
+		t.Fatalf("role origins = %v, want [TEMPLATE]", stub.lastQuery.RoleOrigins)
+	}
+	if _, err := service.ListPersonnel(context.Background(), principalWith("project.read"), "", "", []string{"  ", ""}, []string{}, 1, 50); err != nil {
 		t.Fatal(err)
 	}
-	if len(stub.lastQuery.RoleCodes) != 0 {
-		t.Fatalf("empty role codes must not become a filter: %v", stub.lastQuery.RoleCodes)
+	if len(stub.lastQuery.RoleCodes) != 0 || len(stub.lastQuery.RoleOrigins) != 0 {
+		t.Fatalf("empty filters must not become a filter: %v / %v", stub.lastQuery.RoleCodes, stub.lastQuery.RoleOrigins)
 	}
 }
 
