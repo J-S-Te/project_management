@@ -8,6 +8,9 @@ type projectRecord struct {
 	OwnerOrgID        string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
 	Name              string `gorm:"size:255;not null"`
 	Customer          string `gorm:"size:255;not null"`
+	// CustomerID 是合同系统传来的客户标识（源自 CRM 客户主数据），
+	// 让按客户聚合与对账不必依赖客户名称的字符串匹配。
+	CustomerID        string `gorm:"size:64;not null"`
 	Contract          string `gorm:"size:64;not null"`
 	ContractVersion   string `gorm:"size:64;not null"`
 	SupplementStatus  string `gorm:"size:32;not null"`
