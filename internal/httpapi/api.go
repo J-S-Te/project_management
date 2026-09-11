@@ -124,6 +124,11 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
 	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
+	// 站点台账：站点是项目/服务项的公共主数据，读以 project.read 为基线，
+	// 写沿用资源主数据权限 project.resource.manage。
+	api.GET("/sites", require("project.read"), h.listSites)
+	api.PUT("/sites", require("project.resource.manage"), h.upsertSite)
+	api.DELETE("/sites/:site_code", require("project.resource.manage"), h.deleteSite)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
@@ -395,7 +400,7 @@ func (h *Handler) navigation(c *gin.Context) {
 var allNavigationSections = []string{
 	"dashboard", "monitoring",
 	"projects", "decomposition",
-	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
+	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "sites", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla",
 }
@@ -409,8 +414,8 @@ func navigationSections(roles []string) []string {
 		"business_admin":       {"projects", "decomposition", "allocation"},
 		"team_lead":            {"projects", "allocation", "assignments", "implementation", "exceptions"},
 		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
-		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
-		"device_admin":         {"dashboard", "projects", "equipment"},
+		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
+		"device_admin":         {"dashboard", "projects", "equipment", "sites"},
 		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla"},
 		"engineer":             {"projects", "implementation", "exceptions"},
 		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
@@ -758,6 +763,7 @@ func (h *Handler) reviewDeviation(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(input.Decision)})
 }
+
 // syncPersonnelIdentities 回基础平台负责人目录复核人员资质档案，标记离职/查无此人。
 func (h *Handler) syncPersonnelIdentities(c *gin.Context) {
 	result, err := h.service.SyncPersonnelIdentities(c.Request.Context(), principal(c))
@@ -839,6 +845,36 @@ func (h *Handler) upsertEquipment(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, item)
 }
+func (h *Handler) listSites(c *gin.Context) {
+	items, err := h.service.ListSites(c.Request.Context(), principal(c), c.Query("status"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
+func (h *Handler) upsertSite(c *gin.Context) {
+	var input domain.Site
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.UpsertSite(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) deleteSite(c *gin.Context) {
+	if err := h.service.DeleteSite(c.Request.Context(), principal(c), c.Param("site_code")); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "DISABLED"})
+}
+
 func (h *Handler) listRules(c *gin.Context) {
 	items, err := h.service.ListRules(c.Request.Context(), principal(c), c.Query("kind"))
 	if err != nil {

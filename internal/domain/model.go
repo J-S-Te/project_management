@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"strings"
+	"time"
+)
 
 type Project struct {
 	TenantID          string    `json:"-"`
@@ -119,7 +123,45 @@ type SlaOverdueItem struct {
 
 // SLA 口径常量。
 const (
-	SlaKindPlanEndOverdue     = "PLAN_END_OVERDUE"
-	SlaKindStatusOverdue      = "STATUS_DEADLINE_OVERDUE"
-	SlaKindStatusApproaching  = "STATUS_DEADLINE_APPROACHING"
+	SlaKindPlanEndOverdue    = "PLAN_END_OVERDUE"
+	SlaKindStatusOverdue     = "STATUS_DEADLINE_OVERDUE"
+	SlaKindStatusApproaching = "STATUS_DEADLINE_APPROACHING"
 )
+
+// Site 是站点主数据：项目/服务项的 site 原本是从合同复制的自由文本，
+// 既无法按站点聚合，也没有坐标可供比对。站点台账给它一个稳定编码与坐标。
+type Site struct {
+	ID        string  `json:"id"`
+	TenantID  string  `json:"-"`
+	SiteCode  string  `json:"site_code"`
+	Name      string  `json:"name"`
+	Address   string  `json:"address,omitempty"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	// HasCoordinates 区分"坐标为 0"与"尚未采集"：0,0 是合法坐标（几内亚湾），
+	// 因此不能拿零值当缺失判断。
+	HasCoordinates bool   `json:"has_coordinates"`
+	Status         string `json:"status"`
+	Notes          string `json:"notes,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+// ValidateSite 校验站点档案：编码与名称必填，坐标必须在合法经纬度范围内。
+// 坐标可选（尚未采集），但一旦给出就必须合法——错误的坐标比没有坐标更危险。
+func ValidateSite(item Site) error {
+	if strings.TrimSpace(item.SiteCode) == "" || strings.TrimSpace(item.Name) == "" {
+		return errors.New("site code and name are required")
+	}
+	if item.Status != "" && item.Status != "ACTIVE" && item.Status != "DISABLED" {
+		return errors.New("site status must be ACTIVE or DISABLED")
+	}
+	if item.HasCoordinates || item.Latitude != 0 || item.Longitude != 0 {
+		if item.Latitude < -90 || item.Latitude > 90 {
+			return errors.New("site latitude must be between -90 and 90")
+		}
+		if item.Longitude < -180 || item.Longitude > 180 {
+			return errors.New("site longitude must be between -180 and 180")
+		}
+	}
+	return nil
+}

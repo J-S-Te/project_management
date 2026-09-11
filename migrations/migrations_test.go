@@ -108,3 +108,24 @@ func TestPersonnelIdentityMigrationAddsReviewColumns(t *testing.T) {
 		}
 	}
 }
+
+// 站点台账：site 原本只是从合同复制的自由文本，既无法聚合也没有坐标；
+// pm_site 把它提升为主数据，坐标用可空列区分"未采集"与"坐标为 0"。
+func TestSiteRegistryMigrationCreatesCoordinateAwareTable(t *testing.T) {
+	body, err := Files.ReadFile("000014_site_registry.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS pm_site",
+		"site_code VARCHAR(64) NOT NULL",
+		"latitude DECIMAL(10,7) NULL",
+		"longitude DECIMAL(10,7) NULL",
+		"UNIQUE KEY uq_pm_site_tenant_code (tenant_id, site_code)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+}
