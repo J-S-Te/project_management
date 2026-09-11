@@ -244,8 +244,12 @@ type capabilityRecord struct {
 	ValidUntil      *time.Time
 	Status          string `gorm:"size:16;not null"`
 	UsageScope      string `gorm:"size:16;not null"`
-	UpdatedAt       time.Time
-	UpdatedBy       string `gorm:"size:64;not null"`
+	// UserID 关联平台 user_id；IdentityStatus/IdentityCheckedAt 记录回基础平台复核的结果。
+	UserID            string `gorm:"size:64;not null"`
+	IdentityStatus    string `gorm:"size:16;not null"`
+	IdentityCheckedAt *time.Time
+	UpdatedAt         time.Time
+	UpdatedBy         string `gorm:"size:64;not null"`
 }
 
 func (capabilityRecord) TableName() string { return "pm_capability" }

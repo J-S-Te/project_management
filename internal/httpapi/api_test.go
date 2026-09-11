@@ -96,6 +96,10 @@ func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ str
 	r.capabilities = append(r.capabilities, item)
 	return item, nil
 }
+func (r *repo) UpdateCapabilityIdentities(context.Context, string, map[string]string, time.Time) error {
+	return nil
+}
+
 func (r *repo) ListCapabilities(_ context.Context, tenant, typ string) ([]domain.Capability, error) {
 	return r.capabilities, nil
 }

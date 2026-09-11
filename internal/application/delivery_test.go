@@ -442,6 +442,9 @@ func (r *duplicateContractRepository) FindCapabilities(context.Context, string, 
 func (r *duplicateContractRepository) ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error) {
 	return nil, nil
 }
+func (r *duplicateContractRepository) UpdateCapabilityIdentities(context.Context, string, map[string]string, time.Time) error {
+	return nil
+}
 
 // 重复激活同一合同版本不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
 func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *testing.T) {
@@ -595,4 +598,67 @@ func TestListSlaOverdueConsumesSlaRules(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("disabled sla rule must not produce items: %+v", items)
 	}
+}
+
+// 人员资质档案必须回基础平台复核"这个人是否真实存在"：目录中查无此人的档案标记
+// MISSING，仍存在的标记 ACTIVE，未关联平台账号的历史档案保持 UNLINKED；
+// 目录本身报错的档案记为 Unverified 且不改写，避免把平台抖动写成离职。
+func TestSyncPersonnelIdentitiesReconcilesAgainstOwnerDirectory(t *testing.T) {
+	repo := &capabilityRepository{capabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "张三", UserID: "u-active"},
+		{ResourceType: "PERSON", ResourceID: "P-002", ResourceName: "李四", UserID: "u-gone"},
+		{ResourceType: "PERSON", ResourceID: "P-003", ResourceName: "王五", UserID: "u-error"},
+		{ResourceType: "PERSON", ResourceID: "P-004", ResourceName: "历史档案"},
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-1", ResourceName: "设备"},
+	}}
+	service := &Service{Repo: repo, Personnel: directoryStub{names: map[string]string{"u-active": "张三"}}}
+	// u-error 让目录查询失败，u-gone 查得到但不在 names 里（即查无此人）。
+	service.Personnel = directoryStub{names: map[string]string{"u-active": "张三"}, failures: map[string]struct{}{"u-error": {}}}
+	principal := principalWith("project.resource.manage", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
+
+	result, err := service.SyncPersonnelIdentities(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("SyncPersonnelIdentities failed: %v", err)
+	}
+	if result.Total != 4 || result.Active != 1 || result.Missing != 1 || result.Unlinked != 1 || result.Unverified != 1 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+	if result.Active+result.Missing+result.Unlinked+result.Unverified != result.Total {
+		t.Fatalf("counts must add up to the record total: %+v", result)
+	}
+	if repo.identityStatuses["u-active"] != domain.IdentityStatusActive {
+		t.Fatalf("existing user must be ACTIVE: %+v", repo.identityStatuses)
+	}
+	if repo.identityStatuses["u-gone"] != domain.IdentityStatusMissing {
+		t.Fatalf("absent user must be MISSING: %+v", repo.identityStatuses)
+	}
+	if _, touched := repo.identityStatuses["u-error"]; touched {
+		t.Fatalf("directory failure must not be written as absence: %+v", repo.identityStatuses)
+	}
+}
+
+// 未开通负责人目录集成时，复核必须明确失败而不是把所有人标成离职。
+func TestSyncPersonnelIdentitiesFailsWithoutDirectory(t *testing.T) {
+	service := &Service{Repo: &capabilityRepository{}}
+	principal := principalWith("project.resource.manage", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
+	if _, err := service.SyncPersonnelIdentities(context.Background(), principal); !errors.Is(err, ErrPersonnelUnavailable) {
+		t.Fatalf("err = %v, want ErrPersonnelUnavailable", err)
+	}
+}
+
+// directoryStub 按 user_id 应答，并可注入指定 ID 的目录故障。
+type directoryStub struct {
+	names    map[string]string
+	failures map[string]struct{}
+}
+
+func (stub directoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	if _, failed := stub.failures[query.UserID]; failed {
+		return platform.OwnerDirectoryPage{}, errors.New("owner directory unavailable")
+	}
+	display, ok := stub.names[query.UserID]
+	if !ok {
+		return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}}, nil
+	}
+	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
 }

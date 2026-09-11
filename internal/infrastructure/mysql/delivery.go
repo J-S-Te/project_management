@@ -389,8 +389,14 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	}
 	item.UpdatedAt = time.Now().UTC()
 	codes := jsonValue(item.Codes)
-	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
-	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
+	// 人员档案的身份复核状态不能由导入/编辑覆盖：新档案默认 UNLINKED（未关联平台账号）
+	// 或 ACTIVE（已关联但尚未复核），真实状态只能由回基础平台的复核写入。
+	identityStatus := domain.IdentityStatusUnlinked
+	if strings.TrimSpace(item.UserID) != "" {
+		identityStatus = firstValue(item.IdentityStatus, domain.IdentityStatusActive)
+	}
+	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, UserID: strings.TrimSpace(item.UserID), CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), IdentityStatus: identityStatus, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
+	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "user_id", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
 	return item, err
 }
 func (r *Repository) ListCapabilities(ctx context.Context, tenant, typ string) ([]domain.Capability, error) {
@@ -417,7 +423,10 @@ func capabilitiesFromRecords(records []capabilityRecord) []domain.Capability {
 	for _, v := range records {
 		codes := []string{}
 		_ = json.Unmarshal(v.CapabilityCodes, &codes)
-		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, Codes: codes, Status: v.Status, UsageScope: firstValue(v.UsageScope, domain.EquipmentUsageAny), UpdatedAt: v.UpdatedAt}
+		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, UserID: v.UserID, Codes: codes, Status: v.Status, UsageScope: firstValue(v.UsageScope, domain.EquipmentUsageAny), IdentityStatus: firstValue(v.IdentityStatus, domain.IdentityStatusUnlinked), UpdatedAt: v.UpdatedAt}
+		if v.IdentityCheckedAt != nil {
+			item.IdentityCheckedAt = *v.IdentityCheckedAt
+		}
 		if v.ValidFrom != nil {
 			item.ValidFrom = *v.ValidFrom
 		}
@@ -576,4 +585,22 @@ func mapNotFound(err error) error {
 		return application.ErrNotFound
 	}
 	return err
+}
+
+// UpdateCapabilityIdentities 批量回写人员档案的身份复核结果。
+// 只更新身份相关列，避免复核动作覆盖档案的业务字段。
+func (r *Repository) UpdateCapabilityIdentities(ctx context.Context, tenantID string, statuses map[string]string, checkedAt time.Time) error {
+	if len(statuses) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for userID, status := range statuses {
+			if err := tx.Model(&capabilityRecord{}).
+				Where("tenant_id = ? AND resource_type = ? AND user_id = ?", tenantID, "PERSON", userID).
+				Updates(map[string]any{"identity_status": status, "identity_checked_at": checkedAt, "updated_at": checkedAt}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

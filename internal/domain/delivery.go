@@ -54,6 +54,12 @@ type Capability struct {
 	Status        string    `json:"status"`
 	// UsageScope 为 ANY（可借出）或 COMPANY_ONLY（仅在公司使用，不可借出）。
 	UsageScope string `json:"usage_scope"`
+	// IdentityStatus 是人员档案与基础平台负责人目录的复核结果：
+	// ACTIVE（目录中存在）/ MISSING（已离职或查无此人）/ UNLINKED（历史档案未关联 user_id）。
+	// 资质档案在本系统维护，但"这个人是否真实存在"只能由基础平台回答。
+	IdentityStatus string `json:"identity_status,omitempty"`
+	// IdentityCheckedAt 是最近一次回基础平台复核的时间；零值表示从未复核。
+	IdentityCheckedAt time.Time `json:"identity_checked_at,omitempty"`
 	// Presence 是派生状态：IN_COMPANY / OUT_OF_COMPANY（借出中）。仅设备有意义。
 	Presence string `json:"presence,omitempty"`
 	// BorrowedBy 在借出中时说明占用方（项目号）；BorrowedServiceItemID 供设备维护页发起归还。
@@ -205,3 +211,10 @@ type ConflictCheckResult struct {
 	Passed    bool     `json:"passed"`
 	Conflicts []string `json:"conflicts"`
 }
+
+// 人员档案身份复核状态：资质档案由本系统维护，但"这个人是否真实存在"必须回基础平台核对。
+const (
+	IdentityStatusActive   = "ACTIVE"
+	IdentityStatusMissing  = "MISSING"
+	IdentityStatusUnlinked = "UNLINKED"
+)

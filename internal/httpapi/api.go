@@ -117,6 +117,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/capabilities", requireAny("project.read", "project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
 	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
+	// 回基础平台复核人员资质档案：资质在本系统维护，人员是否真实存在由平台回答。
+	api.POST("/capabilities/sync-identities", require("project.resource.manage"), h.syncPersonnelIdentities)
 	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
 	api.GET("/equipment", requireAny("project.read", "project.device.read"), h.listEquipment)
 	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
@@ -696,6 +698,16 @@ func (h *Handler) reviewDeviation(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(input.Decision)})
 }
+// syncPersonnelIdentities 回基础平台负责人目录复核人员资质档案，标记离职/查无此人。
+func (h *Handler) syncPersonnelIdentities(c *gin.Context) {
+	result, err := h.service.SyncPersonnelIdentities(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
+}
+
 func (h *Handler) listCapabilities(c *gin.Context) {
 	items, err := h.service.ListCapabilities(c.Request.Context(), principal(c), strings.ToUpper(c.Query("resource_type")))
 	if err != nil {

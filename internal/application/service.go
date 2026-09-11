@@ -234,6 +234,26 @@ func (s *Service) ResolvePersonnelNames(ctx context.Context, p platform.Principa
 	if s.Personnel == nil {
 		return nil, ErrPersonnelUnavailable
 	}
+	wanted := normalizePersonnelIDs(ids)
+	if len(wanted) == 0 {
+		return map[string]string{}, nil
+	}
+	lookup := s.lookupPersonnel(ctx, wanted)
+	if len(lookup.failures) == len(wanted) {
+		return nil, fmt.Errorf("%w: owner directory lookup failed", ErrPersonnelUnavailable)
+	}
+	return lookup.names, nil
+}
+
+// personnelLookup 是一次批量目录查询的结果。names 是确认存在的人员，
+// failures 是目录本身报错的 ID——它与"查无此人"是两件事，调用方必须区分。
+type personnelLookup struct {
+	names    map[string]string
+	failures map[string]struct{}
+}
+
+// normalizePersonnelIDs 去空白、去重并施加一次查询的数量上限。
+func normalizePersonnelIDs(ids []string) []string {
 	wanted := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
@@ -250,17 +270,22 @@ func (s *Service) ResolvePersonnelNames(ctx context.Context, p platform.Principa
 			break
 		}
 	}
-	names := make(map[string]string, len(wanted))
-	if len(wanted) == 0 {
-		return names, nil
+	return wanted
+}
+
+// lookupPersonnel 并发查询负责人目录，逐个 ID 精确匹配。目录只支持单个 user_id 查询，
+// 因此在服务端聚合并限制并发，让浏览器一次请求就能拿到结果。
+func (s *Service) lookupPersonnel(ctx context.Context, ids []string) personnelLookup {
+	result := personnelLookup{names: make(map[string]string, len(ids)), failures: make(map[string]struct{})}
+	if s.Personnel == nil || len(ids) == 0 {
+		return result
 	}
 	var (
-		mutex    sync.Mutex
-		group    sync.WaitGroup
-		tokens   = make(chan struct{}, personnelNameLookupConcurrency)
-		failures int
+		mutex  sync.Mutex
+		group  sync.WaitGroup
+		tokens = make(chan struct{}, personnelNameLookupConcurrency)
 	)
-	for _, userID := range wanted {
+	for _, userID := range ids {
 		group.Add(1)
 		go func(target string) {
 			defer group.Done()
@@ -270,22 +295,19 @@ func (s *Service) ResolvePersonnelNames(ctx context.Context, p platform.Principa
 			mutex.Lock()
 			defer mutex.Unlock()
 			if err != nil {
-				failures++
+				result.failures[target] = struct{}{}
 				return
 			}
 			for _, item := range page.Items {
 				if strings.TrimSpace(item.UserID) == target && strings.TrimSpace(item.DisplayName) != "" {
-					names[target] = strings.TrimSpace(item.DisplayName)
+					result.names[target] = strings.TrimSpace(item.DisplayName)
 					return
 				}
 			}
 		}(userID)
 	}
 	group.Wait()
-	if failures == len(wanted) {
-		return nil, fmt.Errorf("%w: owner directory lookup failed", ErrPersonnelUnavailable)
-	}
-	return names, nil
+	return result
 }
 
 func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind string) ([]domain.Rule, error) {
@@ -356,9 +378,9 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		}
 		return input, nil
 	}
-	// 拆解规则执行语义：存在启用规则时，未命中任何规则的常规批次在拆解时自动确认
-	// （Status=待分配，跳过人工确认），命中规则描述范围的批次保留待确认以便重点复核。
-	// 未配置任何规则时行为与历史一致（全部待确认）。
+	// 拆解规则执行语义统一由 splitRuleItemStatus 实现：存在启用规则时，未命中任何
+	// 规则的常规批次自动确认（Status=待分配，跳过人工确认），命中规则范围的批次保留
+	// 待确认以便重点复核；未配置规则时全部待确认。
 	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
 	if err != nil {
 		return input, err
@@ -369,10 +391,8 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		if strings.TrimSpace(source.Site) == "" || mode != "STANDARD" && mode != "PENETRATION" {
 			return input, ErrValidation
 		}
-		itemStatus := "待确认"
-		if hasEnabledSplitRule(splitRules) && !matchesSplitRule(splitRules, source.Batch, source.Site, source.Category) {
-			itemStatus = "待分配"
-		}
+		// 与合同激活、拆解调整共用同一套规则语义，避免三条入口各自演化。
+		itemStatus := splitRuleItemStatus(splitRules, source)
 		items = append(items, domain.ServiceItem{
 			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),

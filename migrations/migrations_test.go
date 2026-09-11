@@ -90,3 +90,21 @@ func TestProjectGovernanceMigrationAddsReviewReportAndComplianceStructures(t *te
 		t.Fatal("governance migration uses a literal TEXT default, which MySQL rejects with error 1101")
 	}
 }
+
+// 人员资质档案必须能回基础平台复核：identity_status 记录复核结论，
+// identity_checked_at 记录复核时间；未关联平台账号的历史档案保持 UNLINKED。
+func TestPersonnelIdentityMigrationAddsReviewColumns(t *testing.T) {
+	body, err := Files.ReadFile("000013_personnel_identity_check.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(body)
+	for _, expected := range []string{
+		"ALTER TABLE pm_capability ADD COLUMN identity_status VARCHAR(16) NOT NULL DEFAULT 'UNLINKED'",
+		"ALTER TABLE pm_capability ADD COLUMN identity_checked_at DATETIME(3) NULL",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("migration missing %q:\n%s", expected, content)
+		}
+	}
+}
