@@ -88,8 +88,9 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | GET | `/api/v1/auth/me` | 当前项目系统主体与权限 |
 | GET | `/api/v1/dashboard` | 汇总指标 |
 | GET | `/api/v1/navigation` | 按当前角色返回项目管理工作区可见页面；前端不得自行扩展页面权限 |
-| GET | `/api/v1/equipment` | 设备管理员查询设备基础信息、能力和检定状态 |
-| PUT | `/api/v1/equipment` | 设备管理员新增、更新、停用或维护设备检定信息 |
+| GET | `/api/v1/equipment` | 设备管理员查询设备基础信息、能力、检定状态、在位状态（在公司/不在公司）与使用范围 |
+
+| PUT | `/api/v1/equipment` | 设备管理员新增、更新、停用或维护设备检定信息；`usage_scope` 为 `ANY`（可借出）或 `COMPANY_ONLY`（仅在公司使用，不可借出） |
 | GET/POST | `/api/v1/projects` | 查询/创建项目 |
 | GET | `/api/v1/projects/{id}` | 项目详情 |
 | GET | `/api/v1/service-items` | 查询服务项 |
@@ -101,9 +102,11 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/internal/v1/contracts/activate` | 合同系统内部网络投递入口，不使用浏览器会话 |
 | POST | `/api/v1/projects/{id}/decomposition-adjustments` | 调整拆解并记录补充协议引用 |
 | POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
-| POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理、工程师和设备并校验能力 |
-| POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布现场计划；渗透测试项必须包含专项计划 |
-| POST | `/api/v1/service-items/{id}/preparation` | 登记设备申领和行程预定 |
+| POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理与工程师并校验能力；设备不在该阶段选取 |
+| POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布现场计划；必须携带实施人员清单（`personnel`，至少一名人员，资质有效期需覆盖使用时段），渗透测试项还必须包含专项计划 |
+| POST | `/api/v1/service-items/{id}/preparation` | 登记设备申领、行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |
+| GET | `/api/v1/service-items/{id}/equipment-reservations` | 查询计划窗口内被其他服务项占用的设备，供实施准备的选择器置灰已占用设备 |
+| POST | `/api/v1/service-items/{id}/equipment-return` | 归还设备：写回归还时间，释放占用并让设备回到「在公司」 |
 | POST | `/api/v1/service-items/{id}/check-in` | 记录带时间戳的 GPS 签到 |
 | POST | `/api/v1/service-items/{id}/field-records` | 提交原始数据、环境条件和证据文件引用 |
 | POST | `/api/v1/service-items/{id}/deviations` | 停止任务并上报偏离 |

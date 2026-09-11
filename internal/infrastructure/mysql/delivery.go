@@ -35,7 +35,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Health: project.Health, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			return err
 		}
@@ -51,7 +51,7 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 
 func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project domain.Project, items []domain.ServiceItem) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Health: project.Health, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			return err
 		}
@@ -75,13 +75,6 @@ func (r *Repository) SyncContractStampStatus(ctx context.Context, project domain
 				return nil
 			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		health := "关注"
-		if uploaded {
-			health = "正常"
-		}
-		if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ?", project.TenantID, project.ID).Updates(map[string]any{"health": health, "updated_at": event.CreatedAt}).Error; err != nil {
 			return err
 		}
 		return createEvent(tx, event)
@@ -205,9 +198,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["report_status"] = phase
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
+	case application.EventEquipmentReturned:
+		if err := markEquipmentReturned(tx, item, event); err != nil {
+			return err
+		}
 	case application.EventPreparationStarted:
 		if item.Status != "待实施" {
 			return application.ErrValidation
+		}
+		if err := updateImplPlanEquipment(tx, item, event); err != nil {
+			return err
 		}
 		updates["status"] = "实施准备中"
 	case application.EventFieldCheckIn:
@@ -285,7 +285,6 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		updates["services"] = len(items)
 		updates["supplement_status"] = "REQUIRED"
 		updates["status"] = "补充协议处理中"
-		updates["health"] = "关注"
 	case application.EventFieldImplementationDone:
 		var count int64
 		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status NOT IN ?", project.TenantID, project.ID, []string{"实施中", "现场实施完成", "已终止"}).Count(&count).Error; err != nil {
@@ -343,8 +342,8 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	}
 	item.UpdatedAt = time.Now().UTC()
 	codes := jsonValue(item.Codes)
-	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
-	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "capability_codes", "valid_from", "valid_until", "status", "updated_at", "updated_by"})}).Create(&rec).Error
+	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
+	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
 	return item, err
 }
 func (r *Repository) ListCapabilities(ctx context.Context, tenant, typ string) ([]domain.Capability, error) {
@@ -371,7 +370,7 @@ func capabilitiesFromRecords(records []capabilityRecord) []domain.Capability {
 	for _, v := range records {
 		codes := []string{}
 		_ = json.Unmarshal(v.CapabilityCodes, &codes)
-		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, Codes: codes, Status: v.Status, UpdatedAt: v.UpdatedAt}
+		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, Codes: codes, Status: v.Status, UsageScope: firstValue(v.UsageScope, domain.EquipmentUsageAny), UpdatedAt: v.UpdatedAt}
 		if v.ValidFrom != nil {
 			item.ValidFrom = *v.ValidFrom
 		}
@@ -409,10 +408,74 @@ func upsertImplPlan(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		TestWindow:          stringValue(event.Payload, "test_window"),
 		EmergencyContact:    stringValue(event.Payload, "emergency_contact"),
 		RollbackPlan:        stringValue(event.Payload, "rollback_plan"),
+		Personnel:           jsonBytes(event.Payload, "personnel"),
 		UpdatedAt:           event.CreatedAt,
 		UpdatedBy:           event.ActorUserID,
 	}
-	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "service_item_id"}}, DoUpdates: clause.AssignmentColumns([]string{"planned_start", "planned_end", "site_plan", "penetration_test_plan", "auth_doc_no", "auth_start", "auth_end", "auth_scope", "test_scope", "test_window", "emergency_contact", "rollback_plan", "updated_at", "updated_by"})}).Create(&record).Error
+	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "service_item_id"}}, DoUpdates: clause.AssignmentColumns([]string{"planned_start", "planned_end", "site_plan", "penetration_test_plan", "auth_doc_no", "auth_start", "auth_end", "auth_scope", "test_scope", "test_window", "emergency_contact", "rollback_plan", "personnel", "updated_at", "updated_by"})}).Create(&record).Error
+}
+
+// markEquipmentReturned 在计划行的设备清单里给对应设备写上归还时间。找不到该设备时按幂等
+// 处理：可能是重复归还，或设备已被重新保存的清单替换，都不应报错。
+func markEquipmentReturned(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	resourceID := strings.TrimSpace(stringValue(event.Payload, "resource_id"))
+	if resourceID == "" {
+		return application.ErrValidation
+	}
+	var record implPlanRecord
+	if err := tx.Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).Take(&record).Error; err != nil {
+		return mapNotFound(err)
+	}
+	var resources []domain.PlanResource
+	if len(record.Equipment) > 0 {
+		if err := json.Unmarshal(record.Equipment, &resources); err != nil {
+			return err
+		}
+	}
+	updated := make([]domain.PlanResource, 0, len(resources))
+	changed := false
+	for _, resource := range resources {
+		if resource.ResourceID == resourceID && strings.TrimSpace(resource.ReturnedAt) == "" {
+			resource.ReturnedAt = event.CreatedAt.Format(time.RFC3339)
+			changed = true
+		}
+		updated = append(updated, resource)
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	return tx.Model(&implPlanRecord{}).Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).
+		Updates(map[string]any{"equipment": encoded, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error
+}
+
+// updateImplPlanEquipment 把实施准备阶段确定的设备清单写回计划行。设备清单与人员清单
+// 分列保存，因此重发计划不会覆盖设备，反之亦然。
+func updateImplPlanEquipment(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	equipment := jsonBytes(event.Payload, "equipment")
+	if len(equipment) == 0 {
+		return nil
+	}
+	return tx.Model(&implPlanRecord{}).
+		Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).
+		Updates(map[string]any{"equipment": equipment, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error
+}
+
+// jsonBytes 把事件载荷里的嵌套结构重新编码成可直接写入 JSON 列的字节；
+// 键不存在或值为空时返回 nil，让列保持 NULL。
+func jsonBytes(values map[string]any, key string) []byte {
+	value, exists := values[key]
+	if !exists || value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil || string(encoded) == "null" {
+		return nil
+	}
+	return encoded
 }
 
 func rfc3339Time(values map[string]any, key string) *time.Time {

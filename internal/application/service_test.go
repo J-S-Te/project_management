@@ -151,7 +151,7 @@ func TestNarrowScopeCannotManageTenantWideRulesOrCapabilities(t *testing.T) {
 	if _, err := service.UpsertCapability(context.Background(), principal, domain.Capability{ResourceType: "PERSON", ResourceID: "person-1", ResourceName: "人员", Codes: []string{"TEST"}}); err != ErrForbidden {
 		t.Fatalf("UpsertCapability error=%v", err)
 	}
-	principal = principalWith("project.resource.read", platform.DataScope{RoleCode: "project_manager", ScopeType: "ORG", ScopeID: "org-1"})
+	principal = principalWith("project.resource.read", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"})
 	if _, err := service.ListCapabilities(context.Background(), principal, "PERSON"); err != ErrForbidden {
 		t.Fatalf("ListCapabilities error=%v", err)
 	}
@@ -287,5 +287,216 @@ func TestResolvePersonnelNamesCapsLookupCount(t *testing.T) {
 	}
 	if len(resolved) != maximumPersonnelNameLookups {
 		t.Fatalf("resolved %d names, want the cap %d", len(resolved), maximumPersonnelNameLookups)
+	}
+}
+
+// capabilityRepository 组合 scopeRepository 并补齐 DeliveryRepository，用于验证
+// 目录读写的数据范围策略（读：组织级；写：全量范围）。
+type capabilityRepository struct {
+	scopeRepository
+	capabilities []domain.Capability
+	reservations []domain.EquipmentReservation
+}
+
+func (r *capabilityRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
+	return domain.Project{}, ErrNotFound
+}
+func (r *capabilityRepository) ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error {
+	return nil
+}
+func (r *capabilityRepository) SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error {
+	return nil
+}
+func (r *capabilityRepository) ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error {
+	return nil
+}
+func (r *capabilityRepository) ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error) {
+	return nil, nil
+}
+func (r *capabilityRepository) FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error) {
+	return "", "", ErrNotFound
+}
+func (r *capabilityRepository) UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error) {
+	return domain.Capability{}, nil
+}
+func (r *capabilityRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
+	return r.capabilities, nil
+}
+func (r *capabilityRepository) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {
+	return nil, nil
+}
+func (r *capabilityRepository) ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error) {
+	return r.reservations, nil
+}
+
+// 组织级范围（ORG）允许读租户级能力目录：quality_manager 在"资质与能力"栏目
+// 需要看到目录数据来渲染表单，写权限仍由 resource.manage 全量范围把守。
+func TestOrganizationalScopeCanReadCapabilityDirectory(t *testing.T) {
+	repository := &capabilityRepository{capabilities: []domain.Capability{{ResourceID: "P-0001"}}}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.resource.read", platform.DataScope{RoleCode: "quality_manager", ScopeType: "ORG", ScopeID: "org-1"})
+	items, err := service.ListCapabilities(context.Background(), principal, "PERSON")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ResourceID != "P-0001" {
+		t.Fatalf("items=%+v", items)
+	}
+}
+
+// 按项目或个人范围的角色不能读租户级能力目录，避免跨项目泄露人员资质/设备主数据。
+func TestProjectScopeStillCannotReadCapabilityDirectory(t *testing.T) {
+	service := &Service{Repo: &capabilityRepository{}}
+	principal := principalWith("project.resource.read", platform.DataScope{RoleCode: "engineer", ScopeType: "PROJECT", ScopeID: "PJ-1"})
+	if _, err := service.ListCapabilities(context.Background(), principal, "PERSON"); err != ErrForbidden {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+// splitRuleRepository 提供可注入的拆解规则，验证拆解时自动确认语义。
+type splitRuleRepository struct {
+	serviceProjectRepository
+	rules []domain.Rule
+}
+
+func (r *splitRuleRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
+	return r.rules, nil
+}
+
+// 存在启用拆解规则时：未命中适用范围的常规批次自动确认（待分配），命中的保留待确认。
+func TestSplitRulesAutoConfirmNonMatchingItems(t *testing.T) {
+	repository := &splitRuleRepository{rules: []domain.Rule{{Enabled: true, Name: "大额批次", Scope: "金额超过 50 万元"}}}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"})
+	_, err := service.CreateProjectWithServiceItems(context.Background(), principal,
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"},
+		[]domain.ContractService{
+			{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"},
+			{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "STANDARD"},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.items) != 2 {
+		t.Fatalf("items=%+v", repository.items)
+	}
+	if repository.items[0].Status != "待分配" {
+		t.Fatalf("non-matching item should auto-confirm, got %q", repository.items[0].Status)
+	}
+	if repository.items[1].Status != "待确认" {
+		t.Fatalf("matching item should remain manual-confirm, got %q", repository.items[1].Status)
+	}
+}
+
+// 未配置任何拆解规则时行为与历史一致：全部服务项待人工确认，不自动放行。
+func TestSplitRulesWithoutRulesKeepManualConfirm(t *testing.T) {
+	repository := &serviceProjectRepository{}
+	service := &Service{Repo: repository}
+	_, err := service.CreateProjectWithServiceItems(context.Background(),
+		principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"}),
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"},
+		[]domain.ContractService{{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.items) != 1 || repository.items[0].Status != "待确认" {
+		t.Fatalf("items=%+v", repository.items)
+	}
+}
+
+// maskingRepository 提供可注入的字段权限规则与读数据，验证读侧 hidden 脱敏。
+type maskingRepository struct {
+	scopeRepository
+	rules   []domain.Rule
+	project domain.Project
+	items   []domain.ServiceItem
+}
+
+func (r *maskingRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
+	return r.rules, nil
+}
+func (r *maskingRepository) GetProject(_ context.Context, _ platform.ScopeFilter, id string) (domain.Project, error) {
+	project := r.project
+	project.ID = id
+	return project, nil
+}
+func (r *maskingRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string) ([]domain.ServiceItem, error) {
+	return r.items, nil
+}
+
+// 命中角色的 hidden 规则把敏感字段脱敏为 ***，其余字段不受影响。
+func TestFieldPermissionHidesFieldsForRole(t *testing.T) {
+	repository := &maskingRepository{
+		rules: []domain.Rule{
+			{Enabled: true, RoleCode: "engineer", FieldName: "customer", AccessLevel: "hidden"},
+			{Enabled: true, RoleCode: "engineer", FieldName: "site", AccessLevel: "hidden"},
+			{Enabled: true, RoleCode: "engineer", FieldName: "report_revenue", AccessLevel: "hidden"},
+		},
+		project: domain.Project{ID: "PJ-1", Name: "项目", Customer: "客户", Contract: "HT-1"},
+		items:   []domain.ServiceItem{{ID: "SI-1", Site: "杭州机房", Requirement: "按标准执行"}},
+	}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "engineer", ScopeType: "ORG", ScopeID: "org-1"})
+	principal.Roles = []string{"engineer"}
+
+	project, err := service.GetProject(context.Background(), principal, "PJ-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Customer != maskedFieldValue {
+		t.Fatalf("customer=%q want %q", project.Customer, maskedFieldValue)
+	}
+	if project.Name != "项目" || project.Contract != "HT-1" {
+		t.Fatalf("unrelated project fields must not be masked: %+v", project)
+	}
+
+	items, err := service.ListServiceItems(context.Background(), principal, "PJ-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Site != maskedFieldValue {
+		t.Fatalf("items=%+v", items)
+	}
+	if items[0].Requirement != "按标准执行" {
+		t.Fatalf("requirement should not be masked: %+v", items[0])
+	}
+}
+
+// 白名单外的字段（如其它域的 report_revenue）不参与脱敏，未知字段名安全忽略。
+func TestFieldPermissionIgnoresUnknownFields(t *testing.T) {
+	repository := &maskingRepository{
+		rules:   []domain.Rule{{Enabled: true, RoleCode: "engineer", FieldName: "report_revenue", AccessLevel: "hidden"}},
+		project: domain.Project{ID: "PJ-1", Name: "项目", Customer: "客户", Contract: "HT-1"},
+	}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "engineer", ScopeType: "ORG", ScopeID: "org-1"})
+	principal.Roles = []string{"engineer"}
+	project, err := service.GetProject(context.Background(), principal, "PJ-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Customer != "客户" {
+		t.Fatalf("customer=%q want 客户", project.Customer)
+	}
+}
+
+// 非目标角色与未启用的规则不产生脱敏。
+func TestFieldPermissionIgnoredForOtherRolesAndDisabledRules(t *testing.T) {
+	repository := &maskingRepository{
+		rules: []domain.Rule{
+			{Enabled: true, RoleCode: "engineer", FieldName: "customer", AccessLevel: "hidden"},
+			{Enabled: false, RoleCode: "team_lead", FieldName: "customer", AccessLevel: "hidden"},
+		},
+		project: domain.Project{ID: "PJ-1", Name: "项目", Customer: "客户", Contract: "HT-1"},
+	}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "team_lead", ScopeType: "ORG", ScopeID: "org-1"})
+	principal.Roles = []string{"team_lead"}
+	project, err := service.GetProject(context.Background(), principal, "PJ-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Customer != "客户" {
+		t.Fatalf("customer=%q want 客户", project.Customer)
 	}
 }

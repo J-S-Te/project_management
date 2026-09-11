@@ -119,6 +119,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
 	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
 	api.GET("/equipment", requireAny("project.read", "project.device.read"), h.listEquipment)
+	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
+	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
@@ -723,6 +725,32 @@ func (h *Handler) upsertCapability(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, item)
 }
+
+// returnEquipment 归还某台设备：写回归还时间，释放占用并让设备回到「在公司」。
+func (h *Handler) returnEquipment(c *gin.Context) {
+	var input struct {
+		ResourceID string `json:"resource_id"`
+	}
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.ReturnEquipment(c.Request.Context(), principal(c), c.Param("id"), input.ResourceID); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"resource_id": input.ResourceID, "status": "RETURNED"})
+}
+
+// listEquipmentReservations 返回设备占用情况，供实施准备选择器置灰已被其他服务项占用的设备。
+func (h *Handler) listEquipmentReservations(c *gin.Context) {
+	items, err := h.service.ListEquipmentReservations(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
 func (h *Handler) listEquipment(c *gin.Context) {
 	items, err := h.service.ListEquipment(c.Request.Context(), principal(c))
 	if err != nil {
@@ -852,6 +880,9 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrValidation):
 		// 服务层可携带字段级原因（例如缺哪个合规要素），优先展示它。
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", serviceMessage(err, "请求参数不合法"))
+	case errors.Is(err, application.ErrResourceConflict):
+		// 设备等资源的占用冲突必须把占用方与日期返给用户，否则无法调整时段。
+		writeError(c, http.StatusConflict, "PM_RESOURCE_CONFLICT", serviceMessage(err, "该资源在所选时段已被占用"))
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):

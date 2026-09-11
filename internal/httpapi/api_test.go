@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -49,6 +50,7 @@ type repo struct {
 	rules          []domain.Rule
 	events         []domain.DeliveryEvent
 	capabilities   []domain.Capability
+	reservations   []domain.EquipmentReservation
 	dashboard      domain.Dashboard
 	dashboardScope platform.ScopeFilter
 }
@@ -70,11 +72,7 @@ func (r *repo) ActivateContract(_ context.Context, p domain.Project, items []dom
 func (r *repo) SyncContractStampStatus(_ context.Context, p domain.Project, uploaded bool, event domain.DeliveryEvent) error {
 	for index := range r.projects {
 		if r.projects[index].ID == p.ID {
-			if uploaded {
-				r.projects[index].Health = "正常"
-			} else {
-				r.projects[index].Health = "关注"
-			}
+			r.projects[index].ContractVersion = p.ContractVersion
 		}
 	}
 	r.events = append(r.events, event)
@@ -99,6 +97,9 @@ func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ str
 }
 func (r *repo) ListCapabilities(_ context.Context, tenant, typ string) ([]domain.Capability, error) {
 	return r.capabilities, nil
+}
+func (r *repo) ListEquipmentReservations(_ context.Context, tenant, exclude string) ([]domain.EquipmentReservation, error) {
+	return r.reservations, nil
 }
 func (r *repo) FindCapabilities(_ context.Context, tenant, at string, ids []string) ([]domain.Capability, error) {
 	return r.capabilities, nil
@@ -304,7 +305,7 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"services":2`) {
 		t.Fatalf("body=%s", response.Body.String())
 	}
-	if len(repository.projects) != 1 || repository.projects[0].Status != "待拆解确认" || repository.projects[0].Health != "关注" {
+	if len(repository.projects) != 1 || repository.projects[0].Status != "待拆解确认" {
 		t.Fatalf("projects=%+v", repository.projects)
 	}
 	if len(repository.items) != 2 || repository.items[0].Status != "待确认" || repository.items[1].Status != "待确认" {
@@ -316,7 +317,7 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 
 	stampedBody := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", stampedBody)
-	if response.Code != http.StatusCreated || repository.projects[0].Health != "正常" || len(repository.events) != 2 || repository.events[1].Type != application.EventContractStampStatus {
+	if response.Code != http.StatusCreated || len(repository.events) != 2 || repository.events[1].Type != application.EventContractStampStatus {
 		t.Fatalf("status=%d projects=%+v events=%+v", response.Code, repository.projects, repository.events)
 	}
 }
@@ -745,4 +746,84 @@ func (stub ownerDirectoryStub) List(_ context.Context, query platform.OwnerDirec
 		return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}}, nil
 	}
 	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
+}
+
+// 现场实施计划必须携带人员与设备清单：清单随事件载荷下发给仓储层，
+// 快照字段由服务端从能力档案解析，浏览器只提交资源标识与使用时段。
+func TestImplementationPlanCarriesResolvedPersonnel(t *testing.T) {
+	repository := &repo{
+		items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配", ProjectManagerID: "pm-1", ConflictStatus: "PASSED"}},
+		capabilities: []domain.Capability{
+			{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "王明", Codes: []string{"CISP-PTE"}, Status: "ACTIVE", ValidUntil: time.Date(2027, 6, 30, 0, 0, 0, 0, time.UTC)},
+			{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "无线测试套件", Codes: []string{"802.11 a/b/g/n/ac"}, Status: "ACTIVE"},
+		},
+	}
+	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	body := `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-20T02:00:00Z","site_plan":"现场实施步骤","personnel":[{"resource_type":"PERSON","resource_id":"P-001"}]}`
+	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%+v", repository.events)
+	}
+	personnel, ok := repository.events[0].Payload["personnel"].([]domain.PlanResource)
+	if !ok || len(personnel) != 1 {
+		t.Fatalf("payload personnel=%#v", repository.events[0].Payload["personnel"])
+	}
+	if personnel[0].ResourceName != "王明" || personnel[0].ValidUntil != "2027-06-30" {
+		t.Fatalf("personnel=%+v", personnel)
+	}
+
+	// 没有人员行的计划不得发布：现场实施必须有人可派。
+	repository.events = nil
+	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-20T02:00:00Z","site_plan":"现场实施步骤","personnel":[]}`)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "至少添加一名实施人员") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// 实施准备阶段登记设备清单：占用冲突必须硬拦并点名占用方，未被占用的设备正常落库。
+func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T) {
+	repository := &repo{
+		items: []domain.ServiceItem{{
+			ID: "SI-1", Status: "待实施", ProjectManagerID: "pm-1", ConflictStatus: "PASSED",
+			PlannedStart: "2026-09-15T02:00:00Z", PlannedEnd: "2026-09-20T02:00:00Z",
+		}},
+		capabilities: []domain.Capability{
+			{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "无线测试套件", Status: "ACTIVE"},
+			{ResourceType: "EQUIPMENT", ResourceID: "EQ-002", ResourceName: "BurpSuite 终端", Status: "ACTIVE"},
+		},
+		reservations: []domain.EquipmentReservation{
+			{ServiceItemID: "SI-OTHER", ProjectID: "PJ-2026-002", ResourceID: "EQ-001", ResourceName: "无线测试套件", WindowStart: "2026-09-16", WindowEnd: "2026-09-18"},
+		},
+	}
+	service := &application.Service{Repo: repository, Temporal: executor{items: repository.items}, TaskQueue: "test"}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	conflicting := `{"equipment_request_id":"EQ-REQ-1","travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-001","window_start":"2026-09-17","window_end":"2026-09-19"}]}`
+	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", conflicting)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "PM_RESOURCE_CONFLICT") || !strings.Contains(response.Body.String(), "PJ-2026-002") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("conflicting preparation must not record an event: %+v", repository.events)
+	}
+
+	free := `{"equipment_request_id":"EQ-REQ-1","travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-002","window_start":"2026-09-16","window_end":"2026-09-18"}]}`
+	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", free)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%+v", repository.events)
+	}
+	equipment, ok := repository.events[0].Payload["equipment"].([]domain.PlanResource)
+	if !ok || len(equipment) != 1 || equipment[0].ResourceName != "BurpSuite 终端" || equipment[0].WindowStart != "2026-09-16" {
+		t.Fatalf("equipment=%#v", repository.events[0].Payload["equipment"])
+	}
 }

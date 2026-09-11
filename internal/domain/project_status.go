@@ -58,6 +58,19 @@ func ProjectStatusNodes() []string {
 	return nodes
 }
 
+// riskProjectStatuses 是"风险项目"指标的唯一口径：异常处理中与已终止。
+// 健康度字段移除后，风险项目不再依赖人工维护的健康标签，前端也按同一组状态计数。
+var riskProjectStatuses = map[string]struct{}{
+	ProjectStatusException:  {},
+	ProjectStatusTerminated: {},
+}
+
+// IsRiskProjectStatus 判断派生项目状态是否计入风险项目。
+func IsRiskProjectStatus(status string) bool {
+	_, ok := riskProjectStatuses[status]
+	return ok
+}
+
 // ProjectStatusItem 是派生项目状态所需的最小服务项投影。
 type ProjectStatusItem struct {
 	Status       string

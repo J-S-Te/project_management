@@ -44,6 +44,21 @@ func (p Principal) HasFullDataScope() bool {
 	return false
 }
 
+// HasOrganizationalScope reports whether the principal holds an organization-wide
+// grant (application, environment, tenant, or organization). Directory master
+// data such as capability/equipment records may be read by any organizational
+// role; per-project or per-person scopes stay excluded to avoid exposing
+// tenant-wide master data to narrow scopes.
+func (p Principal) HasOrganizationalScope() bool {
+	for _, scope := range p.DataScopes {
+		switch scope.ScopeType {
+		case "APPLICATION", "ENVIRONMENT", "TENANT", "ORG":
+			return true
+		}
+	}
+	return false
+}
+
 // ScopeFilter is the only business-data boundary accepted by repositories.
 // The platform currently exposes a tenant-wide application grant as
 // APPLICATION and an environment-wide grant as ENVIRONMENT, so both are

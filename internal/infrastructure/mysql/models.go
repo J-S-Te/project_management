@@ -17,7 +17,6 @@ type projectRecord struct {
 	Manager           string `gorm:"size:128"`
 	OwnerIdentityID   string `gorm:"size:128;not null;index:idx_pm_project_tenant_owner_identity,priority:2"`
 	ManagerIdentityID string `gorm:"size:128;not null;index:idx_pm_project_tenant_manager_identity,priority:2"`
-	Health            string `gorm:"size:32"`
 	Status            string `gorm:"size:32;not null;index:idx_pm_project_tenant_status,priority:2"`
 	Progress          int
 	Due               string `gorm:"size:64"`
@@ -81,6 +80,11 @@ type implPlanRecord struct {
 	TestWindow        string `gorm:"size:128;not null"`
 	EmergencyContact  string `gorm:"size:128;not null"`
 	RollbackPlan      string `gorm:"type:text;not null"`
+	// Personnel 是实施计划确定的人员清单快照；Equipment 是实施准备确定的设备清单快照
+	// （含使用时段）。两者都随计划行 1:1 保存，没有清单时保持 NULL，
+	// 不用空字符串占位，避免向 JSON 列写入非法值。
+	Personnel []byte `gorm:"type:json"`
+	Equipment []byte `gorm:"type:json"`
 	UpdatedAt         time.Time
 	UpdatedBy         string `gorm:"size:64;not null"`
 }
@@ -225,6 +229,7 @@ type capabilityRecord struct {
 	ValidFrom       *time.Time
 	ValidUntil      *time.Time
 	Status          string `gorm:"size:16;not null"`
+	UsageScope      string `gorm:"size:16;not null"`
 	UpdatedAt       time.Time
 	UpdatedBy       string `gorm:"size:64;not null"`
 }
