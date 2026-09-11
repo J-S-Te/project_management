@@ -57,8 +57,8 @@ func TestDeriveProjectStatusFallsBackToStoredStatusWithoutItems(t *testing.T) {
 
 func TestProjectStatusNodesAreUniqueAndOrdered(t *testing.T) {
 	nodes := ProjectStatusNodes()
-	if len(nodes) != 10 {
-		t.Fatalf("node count = %d, want 10", len(nodes))
+	if len(nodes) != 9 {
+		t.Fatalf("node count = %d, want 9", len(nodes))
 	}
 	seen := map[string]bool{}
 	for _, node := range nodes {
@@ -84,7 +84,7 @@ func TestIsRiskProjectStatusUsesDerivedStatusVocabulary(t *testing.T) {
 		}
 	}
 	safe := []string{
-		ProjectStatusPendingDecomposition, ProjectStatusPendingAllocation, ProjectStatusPendingPlan,
+		ProjectStatusPendingDecomposition, ProjectStatusPendingAllocation,
 		ProjectStatusPendingExecution, ProjectStatusPreparing, ProjectStatusInProgress,
 		ProjectStatusFieldCompleted, ProjectStatusReporting, ProjectStatusCompleted,
 		ProjectStatusSupplementRequired, "关注", "风险", "正常", "",

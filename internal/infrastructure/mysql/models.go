@@ -3,11 +3,14 @@ package mysql
 import "time"
 
 type projectRecord struct {
-	ID                string `gorm:"primaryKey;size:32"`
-	TenantID          string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
-	OwnerOrgID        string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
-	Name              string `gorm:"size:255;not null"`
-	Customer          string `gorm:"size:255;not null"`
+	ID         string `gorm:"primaryKey;size:32"`
+	TenantID   string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
+	OwnerOrgID string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
+	Name       string `gorm:"size:255;not null"`
+	Customer   string `gorm:"size:255;not null"`
+	// CustomerID 是合同系统传来的客户标识（源自 CRM 客户主数据），
+	// 让按客户聚合与对账不必依赖客户名称的字符串匹配。
+	CustomerID        string `gorm:"size:64;not null"`
 	Contract          string `gorm:"size:64;not null"`
 	ContractVersion   string `gorm:"size:64;not null"`
 	SupplementStatus  string `gorm:"size:32;not null"`
@@ -244,8 +247,31 @@ type capabilityRecord struct {
 	ValidUntil      *time.Time
 	Status          string `gorm:"size:16;not null"`
 	UsageScope      string `gorm:"size:16;not null"`
-	UpdatedAt       time.Time
-	UpdatedBy       string `gorm:"size:64;not null"`
+	// UserID 关联平台 user_id；IdentityStatus/IdentityCheckedAt 记录回基础平台复核的结果。
+	UserID            string `gorm:"size:64;not null"`
+	IdentityStatus    string `gorm:"size:16;not null"`
+	IdentityCheckedAt *time.Time
+	UpdatedAt         time.Time
+	UpdatedBy         string `gorm:"size:64;not null"`
 }
 
 func (capabilityRecord) TableName() string { return "pm_capability" }
+
+// siteRecord 是站点主数据的持久化形态。坐标用可空列存储：
+// NULL 表示"尚未采集"，与坐标恰好为 0 是两回事。
+type siteRecord struct {
+	ID        string `gorm:"primaryKey;size:32"`
+	TenantID  string `gorm:"size:64;not null"`
+	SiteCode  string `gorm:"size:64;not null"`
+	Name      string `gorm:"size:255;not null"`
+	Address   string `gorm:"size:512;not null"`
+	Latitude  *float64
+	Longitude *float64
+	Status    string `gorm:"size:16;not null"`
+	Notes     string `gorm:"size:512;not null"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UpdatedBy string `gorm:"size:64;not null"`
+}
+
+func (siteRecord) TableName() string { return "pm_site" }

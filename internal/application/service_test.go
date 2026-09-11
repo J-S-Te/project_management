@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -297,6 +298,18 @@ type capabilityRepository struct {
 	capabilities []domain.Capability
 	reservations []domain.EquipmentReservation
 	saved        []domain.Capability
+	// identityStatuses 记录身份复核回写的结果，供人员资质同步用例断言。
+	identityStatuses map[string]string
+}
+
+func (r *capabilityRepository) UpdateCapabilityIdentities(_ context.Context, _ string, statuses map[string]string, _ time.Time) error {
+	if r.identityStatuses == nil {
+		r.identityStatuses = map[string]string{}
+	}
+	for userID, status := range statuses {
+		r.identityStatuses[userID] = status
+	}
+	return nil
 }
 
 func (r *capabilityRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
@@ -324,8 +337,18 @@ func (r *capabilityRepository) UpsertCapability(_ context.Context, item domain.C
 	r.saved = append(r.saved, item)
 	return item, nil
 }
-func (r *capabilityRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
-	return r.capabilities, nil
+func (r *capabilityRepository) ListCapabilities(_ context.Context, _ string, typ string) ([]domain.Capability, error) {
+	// 与真实仓储一致地按资源类型过滤：人员资质复核只应看到 PERSON 档案。
+	if typ == "" {
+		return r.capabilities, nil
+	}
+	filtered := make([]domain.Capability, 0, len(r.capabilities))
+	for _, item := range r.capabilities {
+		if item.ResourceType == typ {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 func (r *capabilityRepository) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {
 	return nil, nil
@@ -337,7 +360,7 @@ func (r *capabilityRepository) ListEquipmentReservations(context.Context, string
 // 组织级范围（ORG）允许读租户级能力目录：quality_manager 在"资质与能力"栏目
 // 需要看到目录数据来渲染表单，写权限仍由 resource.manage 全量范围把守。
 func TestOrganizationalScopeCanReadCapabilityDirectory(t *testing.T) {
-	repository := &capabilityRepository{capabilities: []domain.Capability{{ResourceID: "P-0001"}}}
+	repository := &capabilityRepository{capabilities: []domain.Capability{{ResourceType: "PERSON", ResourceID: "P-0001"}}}
 	service := &Service{Repo: repository}
 	principal := principalWith("project.resource.read", platform.DataScope{RoleCode: "quality_manager", ScopeType: "ORG", ScopeID: "org-1"})
 	items, err := service.ListCapabilities(context.Background(), principal, "PERSON")

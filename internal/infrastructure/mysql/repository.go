@@ -103,7 +103,7 @@ func projectStatusInputQuery(db *gorm.DB, filter platform.ScopeFilter, projectID
 		Where("project_id IN ?", projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 }
 func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.ServiceItem, error) {
 	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
@@ -437,7 +437,7 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
@@ -536,7 +536,13 @@ func (r *Repository) ListEquipmentReservations(ctx context.Context, tenantID, ex
 		Select("plan.service_item_id, item.project_id, project.customer, plan.equipment, plan.planned_start, plan.planned_end").
 		Joins("JOIN pm_service_item AS item ON item.tenant_id = plan.tenant_id AND item.id = plan.service_item_id").
 		Joins("LEFT JOIN pm_project AS project ON project.tenant_id = item.tenant_id AND project.id = item.project_id").
-		Where("plan.tenant_id = ? AND plan.equipment IS NOT NULL", tenantID)
+		Where("plan.tenant_id = ? AND plan.equipment IS NOT NULL", tenantID).
+		// 只有真正持有设备的服务项才算占用：被偏离评审打回「待实施」或已终止的项，
+		// 计划里虽然还留着设备清单，但设备已经不该继续被它锁住。
+		Where("item.status IN ?", []string{
+			domain.ProjectStatusPreparing, domain.ProjectStatusInProgress,
+			domain.ProjectStatusException, domain.ProjectStatusFieldCompleted,
+		})
 	if excludeServiceItemID != "" {
 		query = query.Where("plan.service_item_id <> ?", excludeServiceItemID)
 	}

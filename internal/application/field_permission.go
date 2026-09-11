@@ -19,9 +19,12 @@ var maskableProjectFields = map[string]struct{}{
 }
 
 // maskableServiceItemFields 定义服务项上可被字段级权限配置隐藏的敏感字段白名单。
+// 指派关系（团队负责人 / 项目经理 / 工程师）同样是敏感字段：隐藏配置必须覆盖它，
+// 否则/服务项列表与事件流都能看到"谁被派到了哪个项目"。
 var maskableServiceItemFields = map[string]struct{}{
 	"batch": {}, "site": {}, "category": {}, "requirement": {}, "system": {},
 	"system_level": {}, "special": {}, "test_mode": {}, "source_service_id": {},
+	"team_lead_id": {}, "project_manager_id": {}, "engineer_ids": {},
 }
 
 func maskProjectField(project *domain.Project, field string) {
@@ -63,6 +66,14 @@ func maskServiceItemField(item *domain.ServiceItem, field string) {
 		item.TestMode = maskedFieldValue
 	case "source_service_id":
 		item.SourceServiceID = maskedFieldValue
+	case "team_lead_id":
+		item.TeamLeadID = maskedFieldValue
+	case "project_manager_id":
+		item.ProjectManagerID = maskedFieldValue
+	case "engineer_ids":
+		if len(item.EngineerIDs) > 0 {
+			item.EngineerIDs = []string{maskedFieldValue}
+		}
 	}
 }
 
@@ -125,4 +136,53 @@ func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principa
 		}
 	}
 	return projects, items, nil
+}
+
+// applyFieldPermissionsToEvents 对交付事件流执行与服务项读路径完全相同的字段脱敏。
+// 事件 payload 里带着指派快照与拆解快照，若不处理，配置为 hidden 的字段会从
+// /delivery-events 整条漏出去——脱敏只有覆盖所有读路径才算生效。
+func (s *Service) applyFieldPermissionsToEvents(ctx context.Context, p platform.Principal, events []domain.DeliveryEvent) ([]domain.DeliveryEvent, error) {
+	_, itemHidden, err := s.hiddenFieldsFor(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if len(itemHidden) == 0 || len(events) == 0 {
+		return events, nil
+	}
+	for index := range events {
+		events[index].Payload = maskEventPayload(events[index].Payload, itemHidden)
+	}
+	return events, nil
+}
+
+// maskEventPayload 递归掩码 payload 中命中隐藏字段的键；拆解事件里的 service_items
+// 是服务项快照，按同一套字段名递归处理。返回新 map，不修改调用方持有的原对象。
+func maskEventPayload(payload map[string]any, hidden map[string]struct{}) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	masked := make(map[string]any, len(payload))
+	for key, value := range payload {
+		if _, hide := hidden[key]; hide {
+			masked[key] = maskedFieldValue
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			masked[key] = maskEventPayload(typed, hidden)
+		case []any:
+			entries := make([]any, len(typed))
+			for index, entry := range typed {
+				if object, ok := entry.(map[string]any); ok {
+					entries[index] = maskEventPayload(object, hidden)
+					continue
+				}
+				entries[index] = entry
+			}
+			masked[key] = entries
+		default:
+			masked[key] = value
+		}
+	}
+	return masked
 }

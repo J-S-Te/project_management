@@ -8,6 +8,8 @@ type ContractActivation struct {
 	ContractVersion         string            `json:"contract_version"`
 	ContractName            string            `json:"contract_name"`
 	Customer                string            `json:"customer"`
+	// CustomerID 是合同系统持有的客户标识；旧版调用方未携带时保持空，项目仍以名称记录客户。
+	CustomerID              string            `json:"customer_id,omitempty"`
 	EffectiveAt             time.Time         `json:"effective_at"`
 	StampedContractUploaded bool              `json:"stamped_contract_uploaded"`
 	Services                []ContractService `json:"services"`
@@ -42,18 +44,28 @@ type Capability struct {
 	ResourceType string    `json:"resource_type"`
 	ResourceID   string    `json:"resource_id"`
 	ResourceName string    `json:"resource_name"`
-	Codes        []string  `json:"codes"`
-	ValidFrom    time.Time `json:"valid_from"`
-	ValidUntil   time.Time `json:"valid_until"`
-	Status       string    `json:"status"`
+	// UserID 是人员能力档案关联的平台 user_id：实施计划的人员行既可按档案编号、
+	// 也可按平台 user_id 提交，服务端统一解析到档案行，消除人员标识双轨制。
+	// 仅 PERSON 类型有意义；设备行保持空。
+	UserID        string    `json:"user_id,omitempty"`
+	Codes         []string  `json:"codes"`
+	ValidFrom     time.Time `json:"valid_from"`
+	ValidUntil    time.Time `json:"valid_until"`
+	Status        string    `json:"status"`
 	// UsageScope 为 ANY（可借出）或 COMPANY_ONLY（仅在公司使用，不可借出）。
 	UsageScope string `json:"usage_scope"`
+	// IdentityStatus 是人员档案与基础平台负责人目录的复核结果：
+	// ACTIVE（目录中存在）/ MISSING（已离职或查无此人）/ UNLINKED（历史档案未关联 user_id）。
+	// 资质档案在本系统维护，但"这个人是否真实存在"只能由基础平台回答。
+	IdentityStatus string `json:"identity_status,omitempty"`
+	// IdentityCheckedAt 是最近一次回基础平台复核的时间；零值表示从未复核。
+	IdentityCheckedAt time.Time `json:"identity_checked_at,omitempty"`
 	// Presence 是派生状态：IN_COMPANY / OUT_OF_COMPANY（借出中）。仅设备有意义。
 	Presence string `json:"presence,omitempty"`
 	// BorrowedBy 在借出中时说明占用方（项目号）；BorrowedServiceItemID 供设备维护页发起归还。
-	BorrowedBy            string    `json:"borrowed_by,omitempty"`
-	BorrowedServiceItemID string    `json:"borrowed_service_item_id,omitempty"`
-	BorrowedWindow        string    `json:"borrowed_window,omitempty"`
+	BorrowedBy            string `json:"borrowed_by,omitempty"`
+	BorrowedServiceItemID string `json:"borrowed_service_item_id,omitempty"`
+	BorrowedWindow        string `json:"borrowed_window,omitempty"`
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
@@ -75,23 +87,15 @@ type DecompositionAdjustmentInput struct {
 	Items                []ContractService `json:"items"`
 }
 
-type AssignmentInput struct {
-	TeamLeadID       string   `json:"team_lead_id"`
-	ProjectManagerID string   `json:"project_manager_id"`
-	EngineerIDs      []string `json:"engineer_ids"`
-	EquipmentIDs     []string `json:"equipment_ids"`
-	RequiredCodes    []string `json:"required_codes"`
-	PlannedStart     string   `json:"planned_start"`
-	PlannedEnd       string   `json:"planned_end"`
-}
-
 type TeamAssignmentInput struct {
 	TeamLeadID string `json:"team_lead_id"`
 }
+
+// ExecutionAssignmentInput 是团队负责人指派项目经理与实施工程师的输入。
+// 设备清单已在「实施准备」阶段登记，不再随指派提交。
 type ExecutionAssignmentInput struct {
 	ProjectManagerID string   `json:"project_manager_id"`
 	EngineerIDs      []string `json:"engineer_ids"`
-	EquipmentIDs     []string `json:"equipment_ids"`
 	RequiredCodes    []string `json:"required_codes"`
 }
 
@@ -186,12 +190,6 @@ type PreparationInput struct {
 	Equipment []PlanResourceInput `json:"equipment"`
 }
 
-type CheckInInput struct {
-	Latitude   float64   `json:"latitude"`
-	Longitude  float64   `json:"longitude"`
-	OccurredAt time.Time `json:"occurred_at"`
-}
-
 type FieldRecordInput struct {
 	RawData      string   `json:"raw_data"`
 	Environment  string   `json:"environment"`
@@ -213,3 +211,10 @@ type ConflictCheckResult struct {
 	Passed    bool     `json:"passed"`
 	Conflicts []string `json:"conflicts"`
 }
+
+// 人员档案身份复核状态：资质档案由本系统维护，但"这个人是否真实存在"必须回基础平台核对。
+const (
+	IdentityStatusActive   = "ACTIVE"
+	IdentityStatusMissing  = "MISSING"
+	IdentityStatusUnlinked = "UNLINKED"
+)

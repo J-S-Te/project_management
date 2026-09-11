@@ -71,12 +71,8 @@ func TestImplementationPlanPreconditionGuidesTheUserToTheMissingStep(t *testing.
 	if err := CheckImplementationPlanPrecondition(planPreconditionOf(ready)); err != nil {
 		t.Fatalf("ready item rejected: %v", err)
 	}
-	// 待制定计划同样是合法入口。
-	alsoReady := ready
-	alsoReady.Status = "待制定计划"
-	if err := CheckImplementationPlanPrecondition(planPreconditionOf(alsoReady)); err != nil {
-		t.Fatalf("待制定计划 rejected: %v", err)
-	}
+	// 「待制定计划」已随幽灵指派端点一并移除：任务分配完成即具备计划前置条件，
+	// 该状态在真实流程中不再出现，因此不再作为合法入口（生产库亦无该状态的行）。
 
 	cases := []struct {
 		name     string
@@ -446,6 +442,9 @@ func (r *duplicateContractRepository) FindCapabilities(context.Context, string, 
 func (r *duplicateContractRepository) ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error) {
 	return nil, nil
 }
+func (r *duplicateContractRepository) UpdateCapabilityIdentities(context.Context, string, map[string]string, time.Time) error {
+	return nil
+}
 
 // 重复激活同一合同版本不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
 func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *testing.T) {
@@ -552,56 +551,181 @@ func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
 	})
 }
 
-func TestAssignServiceItemConflictEmitsWarningEventOnlyWhenRuleEnabled(t *testing.T) {
-	principal := principalWith("project.resource.assign", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
-	input := domain.AssignmentInput{
-		TeamLeadID: "TL-1", ProjectManagerID: "PM-1", EngineerIDs: []string{"E-1"},
-		RequiredCodes: []string{"ISO27001"}, PlannedStart: "2026-10-01T00:00:00Z", PlannedEnd: "2026-10-02T00:00:00Z",
-	}
-
-	t.Run("conflict with enabled warning rule appends WARNING_TRIGGERED", func(t *testing.T) {
-		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, CheckType: "能力冲突", Name: "缺资质预警"}}}
-		service := Service{Repo: repo}
-		result, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input)
-		if err != nil {
-			t.Fatalf("AssignServiceItem failed: %v", err)
-		}
-		if result.Passed {
-			t.Fatal("empty capability directory should produce conflicts")
-		}
-		if len(repo.events) != 2 || repo.events[0].Type != EventAssignmentPublished || repo.events[1].Type != EventWarningTriggered {
-			t.Fatalf("expected ASSIGNMENT_PUBLISHED + WARNING_TRIGGERED, got %+v", repo.events)
-		}
-		conflicts, _ := repo.events[1].Payload["conflicts"].([]string)
-		if len(conflicts) == 0 {
-			t.Fatalf("warning event payload must carry conflict list: %+v", repo.events[1].Payload)
-		}
-	})
-
-	t.Run("no warning rules configured appends nothing extra", func(t *testing.T) {
-		repo := &hookRepository{}
-		service := Service{Repo: repo}
-		if _, err := service.AssignServiceItem(context.Background(), principal, "SI-1", input); err != nil {
-			t.Fatalf("AssignServiceItem failed: %v", err)
-		}
-		if len(repo.events) != 1 || repo.events[0].Type != EventAssignmentPublished {
-			t.Fatalf("expected only the assignment event, got %+v", repo.events)
-		}
-	})
-}
-
 func TestListSlaOverdueForwardsScopeFilterToRepository(t *testing.T) {
 	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
-	repo := &hookRepository{overdue: []domain.SlaOverdueItem{{ID: "SI-1", ProjectID: "PJ-1", OverdueHours: 12}}}
+	// 计划完成时间已过才会进入 SLA 口径；OverdueHours 由服务端按当前时间重算，
+	// 不再直接透传仓储给的旧值。
+	plannedEnd := time.Now().UTC().Add(-12 * time.Hour).Format(time.RFC3339)
+	repo := &hookRepository{overdue: []domain.SlaOverdueItem{{ID: "SI-1", ProjectID: "PJ-1", Status: "实施中", PlannedEnd: plannedEnd}}}
 	service := Service{Repo: repo}
 	items, err := service.ListSlaOverdue(context.Background(), principal)
 	if err != nil {
 		t.Fatalf("ListSlaOverdue failed: %v", err)
 	}
-	if len(items) != 1 || items[0].ID != "SI-1" || items[0].OverdueHours != 12 {
+	if len(items) != 1 || items[0].ID != "SI-1" || items[0].Kind != domain.SlaKindPlanEndOverdue {
 		t.Fatalf("overdue items not forwarded: %+v", items)
+	}
+	if items[0].OverdueHours != 12 {
+		t.Fatalf("overdue hours must be recomputed from planned_end, got %d", items[0].OverdueHours)
 	}
 	if repo.lastFilter.TenantID != "tenant-1" {
 		t.Fatalf("scope filter not forwarded, got %+v", repo.lastFilter)
 	}
+}
+
+// 状态停留超期由 pm_sla 规则驱动：只有启用的规则、且状态匹配才产生条目。
+func TestListSlaOverdueConsumesSlaRules(t *testing.T) {
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	candidate := domain.SlaOverdueItem{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施", UpdatedAt: time.Now().UTC().Add(-30 * time.Hour)}
+	repo := &hookRepository{
+		overdue: []domain.SlaOverdueItem{candidate},
+		rules:   []domain.Rule{{Kind: "sla", Enabled: true, Name: "待实施超期", Status: "待实施", DeadlineHours: 24, RemindHours: 4}},
+	}
+	service := Service{Repo: repo}
+	items, err := service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != domain.SlaKindStatusOverdue || items[0].RuleName != "待实施超期" {
+		t.Fatalf("enabled sla rule must produce a status-deadline item: %+v", items)
+	}
+	// 规则停用后不应再产生条目。
+	repo.rules[0].Enabled = false
+	items, err = service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("disabled sla rule must not produce items: %+v", items)
+	}
+}
+
+// 人员资质档案必须回基础平台复核"这个人是否真实存在"：目录中查无此人的档案标记
+// MISSING，仍存在的标记 ACTIVE，未关联平台账号的历史档案保持 UNLINKED；
+// 目录本身报错的档案记为 Unverified 且不改写，避免把平台抖动写成离职。
+func TestSyncPersonnelIdentitiesReconcilesAgainstOwnerDirectory(t *testing.T) {
+	repo := &capabilityRepository{capabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "张三", UserID: "u-active"},
+		{ResourceType: "PERSON", ResourceID: "P-002", ResourceName: "李四", UserID: "u-gone"},
+		{ResourceType: "PERSON", ResourceID: "P-003", ResourceName: "王五", UserID: "u-error"},
+		{ResourceType: "PERSON", ResourceID: "P-004", ResourceName: "历史档案"},
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-1", ResourceName: "设备"},
+	}}
+	service := &Service{Repo: repo, Personnel: directoryStub{names: map[string]string{"u-active": "张三"}}}
+	// u-error 让目录查询失败，u-gone 查得到但不在 names 里（即查无此人）。
+	service.Personnel = directoryStub{names: map[string]string{"u-active": "张三"}, failures: map[string]struct{}{"u-error": {}}}
+	principal := principalWith("project.resource.manage", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
+
+	result, err := service.SyncPersonnelIdentities(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("SyncPersonnelIdentities failed: %v", err)
+	}
+	if result.Total != 4 || result.Active != 1 || result.Missing != 1 || result.Unlinked != 1 || result.Unverified != 1 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+	if result.Active+result.Missing+result.Unlinked+result.Unverified != result.Total {
+		t.Fatalf("counts must add up to the record total: %+v", result)
+	}
+	if repo.identityStatuses["u-active"] != domain.IdentityStatusActive {
+		t.Fatalf("existing user must be ACTIVE: %+v", repo.identityStatuses)
+	}
+	if repo.identityStatuses["u-gone"] != domain.IdentityStatusMissing {
+		t.Fatalf("absent user must be MISSING: %+v", repo.identityStatuses)
+	}
+	if _, touched := repo.identityStatuses["u-error"]; touched {
+		t.Fatalf("directory failure must not be written as absence: %+v", repo.identityStatuses)
+	}
+}
+
+// 未开通负责人目录集成时，复核必须明确失败而不是把所有人标成离职。
+func TestSyncPersonnelIdentitiesFailsWithoutDirectory(t *testing.T) {
+	service := &Service{Repo: &capabilityRepository{}}
+	principal := principalWith("project.resource.manage", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
+	if _, err := service.SyncPersonnelIdentities(context.Background(), principal); !errors.Is(err, ErrPersonnelUnavailable) {
+		t.Fatalf("err = %v, want ErrPersonnelUnavailable", err)
+	}
+}
+
+// directoryStub 按 user_id 应答，并可注入指定 ID 的目录故障。
+type directoryStub struct {
+	names    map[string]string
+	failures map[string]struct{}
+}
+
+func (stub directoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	if _, failed := stub.failures[query.UserID]; failed {
+		return platform.OwnerDirectoryPage{}, errors.New("owner directory unavailable")
+	}
+	display, ok := stub.names[query.UserID]
+	if !ok {
+		return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}}, nil
+	}
+	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
+}
+
+// notificationStub 记录被投递的站内信，供自动化通知用例断言。
+type notificationStub struct{ published []platform.NotificationEvent }
+
+func (stub *notificationStub) Publish(_ context.Context, event platform.NotificationEvent) error {
+	stub.published = append(stub.published, event)
+	return nil
+}
+
+// 自动化规则的 target 是应用角色码：命中后按角色解析出人员并投递站内信，
+// 而不是只写一条没人消费的派生事件。
+func TestAutomationNotificationResolvesRoleTargets(t *testing.T) {
+	notifications := &notificationStub{}
+	repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}
+	service := &Service{
+		Repo: repo, Notifications: notifications,
+		Personnel: roleDirectoryStub{byRole: map[string][]string{"technical_director": {"u-lead", "u-lead2"}}},
+	}
+	principal := platform.Principal{TenantID: "t1", UserID: "u1"}
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 1 {
+		t.Fatalf("expected one notification, got %+v", notifications.published)
+	}
+	event := notifications.published[0]
+	if len(event.Recipients) != 2 || event.Recipients[0] != "u-lead" {
+		t.Fatalf("recipients must come from the role directory: %+v", event.Recipients)
+	}
+	if event.EventType != EventAutomationTriggered || event.IdempotencyKey == "" {
+		t.Fatalf("notification payload = %+v", event)
+	}
+}
+
+// 未开通站内信集成、目录不可用或角色下无人时静默跳过：通知是派生副作用，
+// 既不能回滚主事件，也不应因此丢失派生事件本身。
+func TestAutomationNotificationDegradesQuietly(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		service *Service
+	}{
+		{"no notification integration", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}}},
+		{"no directory", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}}},
+		{"role has nobody", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}, Personnel: roleDirectoryStub{}}},
+	} {
+		principal := platform.Principal{TenantID: "t1", UserID: "u1"}
+		if err := testCase.service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{})); err != nil {
+			t.Fatalf("%s: applyEvent failed: %v", testCase.name, err)
+		}
+		if stub, ok := testCase.service.Notifications.(*notificationStub); ok && len(stub.published) != 0 {
+			t.Fatalf("%s: must not publish: %+v", testCase.name, stub.published)
+		}
+	}
+}
+
+// roleDirectoryStub 按 role_code 应答负责人目录查询。
+type roleDirectoryStub struct{ byRole map[string][]string }
+
+func (stub roleDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	items := []platform.OwnerDirectoryUser{}
+	for _, role := range query.RoleCodes {
+		for _, userID := range stub.byRole[role] {
+			items = append(items, platform.OwnerDirectoryUser{UserID: userID, DisplayName: userID})
+		}
+	}
+	return platform.OwnerDirectoryPage{Items: items, Page: 1, PageSize: len(items)}, nil
 }

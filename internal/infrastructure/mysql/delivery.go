@@ -42,7 +42,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			// 同一 (tenant_id, contract_id, contract_version) 并发激活时，唯一键
 			// uq_pm_project_contract_version 会让后到的事务失败；这里翻译成语义哨兵，
@@ -154,21 +154,6 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["equipment_ids"] = jsonValue(event.Payload["equipment_ids"])
 		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
 		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
-	case application.EventAssignmentPublished:
-		if item.Status != "待分配" {
-			return application.ErrValidation
-		}
-		updates["team_lead_id"] = stringValue(event.Payload, "team_lead_id")
-		updates["project_manager_id"] = stringValue(event.Payload, "project_manager_id")
-		updates["engineer_ids"] = jsonValue(event.Payload["engineer_ids"])
-		updates["equipment_ids"] = jsonValue(event.Payload["equipment_ids"])
-		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
-		updates["planned_start"] = rfc3339Value(event.Payload, "planned_start")
-		updates["planned_end"] = rfc3339Value(event.Payload, "planned_end")
-		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
-		if updates["conflict_status"] == "PASSED" {
-			updates["status"] = "待制定计划"
-		}
 	case application.EventImplementationPlanned:
 		// 与 PlanImplementation 共用同一套前置规则：行锁内复查可覆盖读后状态变化的竞态，
 		// 并且仍然返回可执行的原因而不是笼统的参数错误。
@@ -230,15 +215,21 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 		updates["status"] = "实施准备中"
-	case application.EventFieldCheckIn:
+	case application.EventFieldRecordSubmitted:
+		// 现场记录（原始数据 / 环境条件）是进入"实施中"的真实动作。
+		// 原先由坐标签到承担这个状态推进，但那份坐标没有任何证明力，已删除；
+		// 这里沿用同一转移，避免服务项停在"实施准备中"再也走不动。
 		if item.Status != "待实施" && item.Status != "实施准备中" && item.Status != "实施中" {
 			return application.ErrValidation
 		}
 		updates["status"] = "实施中"
-	case application.EventFieldRecordSubmitted:
+	case application.EventFieldCompleted:
+		// 按服务项确认现场完成：先做完的项不必等项目里最后一个动作"顺带"完成。
 		if item.Status != "实施中" {
 			return application.ErrValidation
 		}
+		updates["status"] = "现场实施完成"
+		updates["report_status"] = "COMPILING"
 	case application.EventDeviationReported:
 		if item.Status != "实施中" {
 			return application.ErrValidation
@@ -305,19 +296,6 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		updates["services"] = len(items)
 		updates["supplement_status"] = "REQUIRED"
 		updates["status"] = "补充协议处理中"
-	case application.EventFieldImplementationDone:
-		var count int64
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status NOT IN ?", project.TenantID, project.ID, []string{"实施中", "现场实施完成", "已终止"}).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
-			return application.ErrValidation
-		}
-		updates["status"] = "现场实施完成"
-		updates["progress"] = 80
-		if err := tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND project_id=? AND status=?", project.TenantID, project.ID, "实施中").Updates(map[string]any{"status": "现场实施完成", "report_status": "COMPILING", "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error; err != nil {
-			return err
-		}
 	}
 	if len(updates) == 1 {
 		return nil
@@ -339,7 +317,10 @@ func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
 		return err
 	}
 	derived := domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
-	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", tenantID, projectID).Update("status", derived).Error
+	// 进度与状态同源：两者都由同一次服务项投影派生，避免进度退化成没人写的装饰字段。
+	progress := domain.DeriveProjectProgress(items)
+	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", tenantID, projectID).
+		Updates(map[string]any{"status": derived, "progress": progress}).Error
 }
 
 // ListSlaOverdue 返回超期服务项：计划完成时间早于当前 UTC 且尚未进入终态。
@@ -408,8 +389,14 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	}
 	item.UpdatedAt = time.Now().UTC()
 	codes := jsonValue(item.Codes)
-	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
-	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
+	// 人员档案的身份复核状态不能由导入/编辑覆盖：新档案默认 UNLINKED（未关联平台账号）
+	// 或 ACTIVE（已关联但尚未复核），真实状态只能由回基础平台的复核写入。
+	identityStatus := domain.IdentityStatusUnlinked
+	if strings.TrimSpace(item.UserID) != "" {
+		identityStatus = firstValue(item.IdentityStatus, domain.IdentityStatusActive)
+	}
+	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, UserID: strings.TrimSpace(item.UserID), CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), IdentityStatus: identityStatus, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
+	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "user_id", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
 	return item, err
 }
 func (r *Repository) ListCapabilities(ctx context.Context, tenant, typ string) ([]domain.Capability, error) {
@@ -436,7 +423,10 @@ func capabilitiesFromRecords(records []capabilityRecord) []domain.Capability {
 	for _, v := range records {
 		codes := []string{}
 		_ = json.Unmarshal(v.CapabilityCodes, &codes)
-		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, Codes: codes, Status: v.Status, UsageScope: firstValue(v.UsageScope, domain.EquipmentUsageAny), UpdatedAt: v.UpdatedAt}
+		item := domain.Capability{ID: v.ID, ResourceType: v.ResourceType, ResourceID: v.ResourceID, ResourceName: v.ResourceName, UserID: v.UserID, Codes: codes, Status: v.Status, UsageScope: firstValue(v.UsageScope, domain.EquipmentUsageAny), IdentityStatus: firstValue(v.IdentityStatus, domain.IdentityStatusUnlinked), UpdatedAt: v.UpdatedAt}
+		if v.IdentityCheckedAt != nil {
+			item.IdentityCheckedAt = *v.IdentityCheckedAt
+		}
 		if v.ValidFrom != nil {
 			item.ValidFrom = *v.ValidFrom
 		}
@@ -595,4 +585,22 @@ func mapNotFound(err error) error {
 		return application.ErrNotFound
 	}
 	return err
+}
+
+// UpdateCapabilityIdentities 批量回写人员档案的身份复核结果。
+// 只更新身份相关列，避免复核动作覆盖档案的业务字段。
+func (r *Repository) UpdateCapabilityIdentities(ctx context.Context, tenantID string, statuses map[string]string, checkedAt time.Time) error {
+	if len(statuses) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for userID, status := range statuses {
+			if err := tx.Model(&capabilityRecord{}).
+				Where("tenant_id = ? AND resource_type = ? AND user_id = ?", tenantID, "PERSON", userID).
+				Updates(map[string]any{"identity_status": status, "identity_checked_at": checkedAt, "updated_at": checkedAt}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

@@ -90,3 +90,42 @@ func TestProjectGovernanceMigrationAddsReviewReportAndComplianceStructures(t *te
 		t.Fatal("governance migration uses a literal TEXT default, which MySQL rejects with error 1101")
 	}
 }
+
+// 人员资质档案必须能回基础平台复核：identity_status 记录复核结论，
+// identity_checked_at 记录复核时间；未关联平台账号的历史档案保持 UNLINKED。
+func TestPersonnelIdentityMigrationAddsReviewColumns(t *testing.T) {
+	body, err := Files.ReadFile("000013_personnel_identity_check.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(body)
+	for _, expected := range []string{
+		"ALTER TABLE pm_capability ADD COLUMN identity_status VARCHAR(16) NOT NULL DEFAULT 'UNLINKED'",
+		"ALTER TABLE pm_capability ADD COLUMN identity_checked_at DATETIME(3) NULL",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("migration missing %q:\n%s", expected, content)
+		}
+	}
+}
+
+// 站点台账：site 原本只是从合同复制的自由文本，既无法聚合也没有坐标；
+// pm_site 把它提升为主数据，坐标用可空列区分"未采集"与"坐标为 0"。
+func TestSiteRegistryMigrationCreatesCoordinateAwareTable(t *testing.T) {
+	body, err := Files.ReadFile("000014_site_registry.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS pm_site",
+		"site_code VARCHAR(64) NOT NULL",
+		"latitude DECIMAL(10,7) NULL",
+		"longitude DECIMAL(10,7) NULL",
+		"UNIQUE KEY uq_pm_site_tenant_code (tenant_id, site_code)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+}

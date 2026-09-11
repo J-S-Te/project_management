@@ -97,7 +97,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/projects/:id/decomposition-adjustments", require("project.decomposition.manage"), h.adjustDecomposition)
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.GET("/delivery/sla-overdue", require("project.read"), h.listSlaOverdue)
-	api.POST("/projects/:id/field-complete", require("project.field.complete"), h.completeFieldImplementation)
+	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
+	api.POST("/service-items/:id/field-complete", require("project.field.complete"), h.completeServiceItemField)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
 	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
@@ -106,29 +107,35 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 批量把已保存的 user_id 翻译成姓名：团队负责人 / 项目经理 / 工程师在界面上不得显示 ULID。
 	api.GET("/personnel/names", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.resolvePersonnelNames)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
-	api.POST("/service-items/:id/assignment", require("project.resource.assign"), h.assignServiceItem)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
 	api.POST("/service-items/:id/execution-assignment", require("project.execution.assign"), h.assignExecutionTeam)
 	api.POST("/service-items/:id/implementation-plan", require("project.implementation.plan"), h.planImplementation)
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
-	api.POST("/service-items/:id/check-in", require("project.field.execute"), h.checkIn)
 	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
 	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
 	api.GET("/capabilities", requireAny("project.read", "project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
 	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
+	// 回基础平台复核人员资质档案：资质在本系统维护，人员是否真实存在由平台回答。
+	api.POST("/capabilities/sync-identities", require("project.resource.manage"), h.syncPersonnelIdentities)
 	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
 	api.GET("/equipment", requireAny("project.read", "project.device.read"), h.listEquipment)
 	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
 	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
+	// 站点台账：站点是项目/服务项的公共主数据，读以 project.read 为基线，
+	// 写沿用资源主数据权限 project.resource.manage。
+	api.GET("/sites", require("project.read"), h.listSites)
+	api.PUT("/sites", require("project.resource.manage"), h.upsertSite)
+	api.DELETE("/sites/:site_code", require("project.resource.manage"), h.deleteSite)
 	api.GET("/rules", require("project.read"), h.listRules)
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
 	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
 	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
-	api.POST("/service-items/:id/report-status", require("project.field.complete"), h.updateReportStatus)
+	// 报告推进到"已归档"才需要 project.report.archive；现场执行角色不应顺带获得归档权。
+	api.POST("/service-items/:id/report-status", requireAny("project.field.complete", "project.report.archive"), h.updateReportStatus)
 	return router
 }
 
@@ -393,7 +400,7 @@ func (h *Handler) navigation(c *gin.Context) {
 var allNavigationSections = []string{
 	"dashboard", "monitoring",
 	"projects", "decomposition",
-	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
+	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "sites", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla",
 }
@@ -407,9 +414,9 @@ func navigationSections(roles []string) []string {
 		"business_admin":       {"projects", "decomposition", "allocation"},
 		"team_lead":            {"projects", "allocation", "assignments", "implementation", "exceptions"},
 		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards"},
-		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
-		"device_admin":         {"dashboard", "projects", "equipment"},
-		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "permissions", "sla"},
+		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
+		"device_admin":         {"dashboard", "projects", "equipment", "sites"},
+		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla"},
 		"engineer":             {"projects", "implementation", "exceptions"},
 		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
 	}
@@ -442,12 +449,17 @@ func (h *Handler) dashboard(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listProjects(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListProjects(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 func (h *Handler) getProject(c *gin.Context) {
 	item, err := h.service.GetProject(c.Request.Context(), principal(c), c.Param("id"))
@@ -518,12 +530,12 @@ func (h *Handler) listSlaOverdue(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, items)
 }
-func (h *Handler) completeFieldImplementation(c *gin.Context) {
-	if err := h.service.CompleteFieldImplementation(c.Request.Context(), principal(c), c.Param("id")); err != nil {
+func (h *Handler) completeServiceItemField(c *gin.Context) {
+	if err := h.service.CompleteServiceItemField(c.Request.Context(), principal(c), c.Param("id")); err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	h.writeProjectStatus(c, http.StatusOK, c.Param("id"))
+	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
 }
 
 // writeProjectStatus 返回项目的唯一派生状态，避免写接口另起一套状态词汇。
@@ -536,12 +548,17 @@ func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string)
 	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 
 // listPersonnel 把基础平台负责人目录代理给服务项操作台，前端据此渲染人员下拉框，
@@ -593,6 +610,56 @@ func (h *Handler) resolvePersonnelNames(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]any{"names": names})
 }
 
+// maximumPageSize 是列表接口单页上限，避免客户端用超大 page_size 拉爆响应。
+const maximumPageSize = 200
+
+// PageEnvelope 是列表接口的统一分页响应。page_size<=0 表示不分页（返回全部行），
+// 这与"下拉数据源需要完整集合"的既有语义一致；显式分页时返回 total 供前端渲染分页控件。
+type PageEnvelope struct {
+	Items    any `json:"items"`
+	Total    int `json:"total"`
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+}
+
+// pageParams 解析可选的分页参数；未提供时返回 0，表示不分页。
+func pageParams(c *gin.Context) (int, int, error) {
+	page, err := optionalPositiveInt(c.Query("page"))
+	if err != nil {
+		return 0, 0, err
+	}
+	pageSize, err := optionalPositiveInt(c.Query("page_size"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if pageSize > maximumPageSize {
+		pageSize = maximumPageSize
+	}
+	return page, pageSize, nil
+}
+
+// writePage 输出统一分页响应。项目列表的状态过滤发生在服务端的派生态上，
+// 因此这里对已经过筛选与派生的结果切片，保证分页结果与"唯一的派生状态"口径一致。
+func writePage[T any](c *gin.Context, items []T, page, pageSize int) {
+	total := len(items)
+	if pageSize <= 0 {
+		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: total, Page: 1, PageSize: total})
+		return
+	}
+	if page <= 0 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	writeData(c, http.StatusOK, PageEnvelope{Items: items[start:end], Total: total, Page: page, PageSize: pageSize})
+}
+
 func optionalPositiveInt(value string) (int, error) {
 	if value == "" {
 		return 0, nil
@@ -616,18 +683,6 @@ func (h *Handler) confirmServiceItems(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, items)
-}
-func (h *Handler) assignServiceItem(c *gin.Context) {
-	var input domain.AssignmentInput
-	if !decode(c, &input) {
-		return
-	}
-	result, err := h.service.AssignServiceItem(c.Request.Context(), principal(c), c.Param("id"), input)
-	if err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	writeData(c, http.StatusOK, result)
 }
 func (h *Handler) assignTeam(c *gin.Context) {
 	var input domain.TeamAssignmentInput
@@ -674,17 +729,6 @@ func (h *Handler) startPreparation(c *gin.Context) {
 	}
 	writeData(c, http.StatusAccepted, map[string]string{"status": "实施准备中"})
 }
-func (h *Handler) checkIn(c *gin.Context) {
-	var input domain.CheckInInput
-	if !decode(c, &input) {
-		return
-	}
-	if err := h.service.CheckIn(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	writeData(c, http.StatusCreated, map[string]string{"status": "实施中"})
-}
 func (h *Handler) submitFieldRecord(c *gin.Context) {
 	var input domain.FieldRecordInput
 	if !decode(c, &input) {
@@ -719,6 +763,17 @@ func (h *Handler) reviewDeviation(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(input.Decision)})
 }
+
+// syncPersonnelIdentities 回基础平台负责人目录复核人员资质档案，标记离职/查无此人。
+func (h *Handler) syncPersonnelIdentities(c *gin.Context) {
+	result, err := h.service.SyncPersonnelIdentities(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
+}
+
 func (h *Handler) listCapabilities(c *gin.Context) {
 	items, err := h.service.ListCapabilities(c.Request.Context(), principal(c), strings.ToUpper(c.Query("resource_type")))
 	if err != nil {
@@ -766,12 +821,17 @@ func (h *Handler) listEquipmentReservations(c *gin.Context) {
 }
 
 func (h *Handler) listEquipment(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
 	items, err := h.service.ListEquipment(c.Request.Context(), principal(c))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, http.StatusOK, items)
+	writePage(c, items, page, pageSize)
 }
 func (h *Handler) upsertEquipment(c *gin.Context) {
 	var input domain.Capability
@@ -785,6 +845,36 @@ func (h *Handler) upsertEquipment(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, item)
 }
+func (h *Handler) listSites(c *gin.Context) {
+	items, err := h.service.ListSites(c.Request.Context(), principal(c), c.Query("status"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
+func (h *Handler) upsertSite(c *gin.Context) {
+	var input domain.Site
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.UpsertSite(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) deleteSite(c *gin.Context) {
+	if err := h.service.DeleteSite(c.Request.Context(), principal(c), c.Param("site_code")); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "DISABLED"})
+}
+
 func (h *Handler) listRules(c *gin.Context) {
 	items, err := h.service.ListRules(c.Request.Context(), principal(c), c.Query("kind"))
 	if err != nil {
