@@ -17,7 +17,6 @@ type Project struct {
 	Manager           string    `json:"manager"`
 	OwnerIdentityID   string    `json:"owner_identity_id,omitempty"`
 	ManagerIdentityID string    `json:"manager_identity_id,omitempty"`
-	Health            string    `json:"health"`
 	Status            string    `json:"status"`
 	Progress          int       `json:"progress"`
 	Due               string    `json:"due"`

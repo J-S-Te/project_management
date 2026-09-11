@@ -29,6 +29,9 @@ var (
 	// 例如未完成执行指派、能力校验未通过、特殊方法未复核。它与 ErrValidation
 	// 必须区分：前者要告诉用户"先去哪一步"，后者才提示"检查输入"。
 	ErrPrecondition = errors.New("service item precondition is not satisfied")
+	// ErrResourceConflict 表示与其他服务项的占用冲突（例如同一台设备的使用时段重叠）。
+	// 与 ErrConflict 区分：后者是并发写入导致的状态冲突，前者是可解释、可照着核对的业务占用。
+	ErrResourceConflict = errors.New("resource usage conflict")
 )
 
 // ReasonError 携带可直接展示给用户的原因说明，并保留底层错误类型，
@@ -47,6 +50,11 @@ func ValidationError(reason string) error { return ReasonError{Kind: ErrValidati
 // PreconditionError 构造前置状态错误，用于提示用户还缺哪一步。
 func PreconditionError(reason string) error {
 	return ReasonError{Kind: ErrPrecondition, Reason: reason}
+}
+
+// ConflictError 构造资源占用冲突错误，并把占用方与日期一并带给用户。
+func ConflictError(reason string) error {
+	return ReasonError{Kind: ErrResourceConflict, Reason: reason}
 }
 
 // UserMessage 返回 ReasonError 中可直接展示的原因；其他错误返回空串。
@@ -299,9 +307,6 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	input.Contract = strings.TrimSpace(input.Contract)
 	if input.Status == "" {
 		input.Status = "待拆解确认"
-	}
-	if input.Health == "" {
-		input.Health = "待确认"
 	}
 	if input.Team == "" {
 		input.Team = "未分配"

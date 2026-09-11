@@ -103,7 +103,7 @@ func projectStatusInputQuery(db *gorm.DB, filter platform.ScopeFilter, projectID
 		Where("project_id IN ?", projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Health: item.Health, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	return r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 }
 func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.ServiceItem, error) {
 	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
@@ -404,12 +404,11 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 		if status != domain.ProjectStatusCompleted {
 			result.InFlightProjects++
 		}
+		// 风险口径改为派生状态：异常处理中或已终止的项目。
+		if domain.IsRiskProjectStatus(status) {
+			result.RiskProjects++
+		}
 	}
-	var riskCount int64
-	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("health = ?", "风险").Count(&riskCount).Error; err != nil {
-		return result, err
-	}
-	result.RiskProjects = int(riskCount)
 	var count int64
 	if err := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).Count(&count).Error; err != nil {
 		return result, err
@@ -426,7 +425,7 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Health: r.Health, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
@@ -478,7 +477,10 @@ func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
 	return item
 }
 func implPlanFromRecord(r implPlanRecord) domain.ImplementationPlan {
-	plan := domain.ImplementationPlan{SitePlan: r.SitePlan, PenetrationTestPlan: r.PenetrationTestPlan, AuthDocNo: r.AuthDocNo, AuthScope: r.AuthScope, TestScope: r.TestScope, TestWindow: r.TestWindow, EmergencyContact: r.EmergencyContact, RollbackPlan: r.RollbackPlan}
+	plan := domain.ImplementationPlan{SitePlan: r.SitePlan, PenetrationTestPlan: r.PenetrationTestPlan, AuthDocNo: r.AuthDocNo, AuthScope: r.AuthScope, TestScope: r.TestScope, TestWindow: r.TestWindow, EmergencyContact: r.EmergencyContact, RollbackPlan: r.RollbackPlan, Personnel: []domain.PlanResource{}, Equipment: []domain.PlanResource{}}
+	// 清单解析失败的历史数据不应让整个计划读不出来：降级为空清单，其余字段照常返回。
+	plan.Personnel = decodePlanResources(r.Personnel, plan.Personnel)
+	plan.Equipment = decodePlanResources(r.Equipment, plan.Equipment)
 	if r.PlannedStart != nil {
 		plan.PlannedStart = r.PlannedStart.Format(time.RFC3339)
 	}
@@ -493,6 +495,74 @@ func implPlanFromRecord(r implPlanRecord) domain.ImplementationPlan {
 	}
 	return plan
 }
+
+// decodePlanResources 解析实施计划/准备阶段保存的资源快照；解析失败时返回传入的兜底空列表，
+// 不让历史脏数据把整个计划读不出来。
+func decodePlanResources(raw []byte, fallback []domain.PlanResource) []domain.PlanResource {
+	if len(raw) == 0 {
+		return fallback
+	}
+	var resources []domain.PlanResource
+	if err := json.Unmarshal(raw, &resources); err != nil || resources == nil {
+		return fallback
+	}
+	return resources
+}
+
+// ListEquipmentReservations 读取同租户其他服务项已登记的设备占用（实施准备阶段的设备清单），
+// 供占用冲突校验使用。占用区间取自行级使用时段，留空表示全程（计划起止）。
+func (r *Repository) ListEquipmentReservations(ctx context.Context, tenantID, excludeServiceItemID string) ([]domain.EquipmentReservation, error) {
+	var rows []struct {
+		ServiceItemID string
+		ProjectID     string
+		Customer      string
+		Equipment     []byte
+		PlannedStart  *time.Time
+		PlannedEnd    *time.Time
+	}
+	query := r.db.WithContext(ctx).Table("pm_impl_plan AS plan").
+		Select("plan.service_item_id, item.project_id, project.customer, plan.equipment, plan.planned_start, plan.planned_end").
+		Joins("JOIN pm_service_item AS item ON item.tenant_id = plan.tenant_id AND item.id = plan.service_item_id").
+		Joins("LEFT JOIN pm_project AS project ON project.tenant_id = item.tenant_id AND project.id = item.project_id").
+		Where("plan.tenant_id = ? AND plan.equipment IS NOT NULL", tenantID)
+	if excludeServiceItemID != "" {
+		query = query.Where("plan.service_item_id <> ?", excludeServiceItemID)
+	}
+	if err := query.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	reservations := []domain.EquipmentReservation{}
+	for _, row := range rows {
+		var resources []domain.PlanResource
+		if err := json.Unmarshal(row.Equipment, &resources); err != nil {
+			continue
+		}
+		planStart, planEnd := "", ""
+		if row.PlannedStart != nil {
+			planStart = row.PlannedStart.Format("2006-01-02")
+		}
+		if row.PlannedEnd != nil {
+			planEnd = row.PlannedEnd.Format("2006-01-02")
+		}
+		for _, resource := range resources {
+			// 已归还的设备行保留历史，但不再占用设备，也不再算「不在公司」。
+			if strings.TrimSpace(resource.ReturnedAt) != "" {
+				continue
+			}
+			reservation := domain.EquipmentReservation{
+				ServiceItemID: row.ServiceItemID, ProjectID: row.ProjectID, Customer: row.Customer,
+				ResourceID: resource.ResourceID, ResourceName: resource.ResourceName,
+				WindowStart: firstValue(resource.WindowStart, planStart), WindowEnd: firstValue(resource.WindowEnd, planEnd),
+			}
+			if reservation.WindowStart == "" || reservation.WindowEnd == "" {
+				continue
+			}
+			reservations = append(reservations, reservation)
+		}
+	}
+	return reservations, nil
+}
+
 func ruleFromRow(r ruleRow) domain.Rule {
 	return domain.Rule{TenantID: r.TenantID, ID: r.ID, Kind: r.Kind, Name: r.Name, Scope: r.Scope, Trigger: r.Trigger, CheckType: r.CheckType, Threshold: r.Threshold, Target: r.Target, RoleCode: r.RoleCode, FieldName: r.FieldName, AccessLevel: r.AccessLevel, Status: r.Status, DeadlineHours: r.DeadlineHours, RemindHours: r.RemindHours, Enabled: r.Enabled, Updated: r.UpdatedAt.Format("2006-01-02 15:04")}
 }

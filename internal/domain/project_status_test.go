@@ -73,3 +73,25 @@ func TestProjectStatusNodesAreUniqueAndOrdered(t *testing.T) {
 		}
 	}
 }
+
+// 风险项目指标在健康度字段移除后改由派生状态决定：只有异常处理中与已终止计入，
+// 健康度曾经用到的"关注"等中间态不再影响风险口径。
+func TestIsRiskProjectStatusUsesDerivedStatusVocabulary(t *testing.T) {
+	risk := []string{ProjectStatusException, ProjectStatusTerminated}
+	for _, status := range risk {
+		if !IsRiskProjectStatus(status) {
+			t.Fatalf("IsRiskProjectStatus(%q) = false, want true", status)
+		}
+	}
+	safe := []string{
+		ProjectStatusPendingDecomposition, ProjectStatusPendingAllocation, ProjectStatusPendingPlan,
+		ProjectStatusPendingExecution, ProjectStatusPreparing, ProjectStatusInProgress,
+		ProjectStatusFieldCompleted, ProjectStatusReporting, ProjectStatusCompleted,
+		ProjectStatusSupplementRequired, "关注", "风险", "正常", "",
+	}
+	for _, status := range safe {
+		if IsRiskProjectStatus(status) {
+			t.Fatalf("IsRiskProjectStatus(%q) = true, want false", status)
+		}
+	}
+}
