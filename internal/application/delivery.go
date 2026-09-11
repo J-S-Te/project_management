@@ -1193,9 +1193,28 @@ func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEven
 	triggered.Type = EventAutomationTriggered
 	triggered.CreatedAt = time.Now().UTC().Add(time.Millisecond)
 	triggered.Payload = map[string]any{"trigger": event.Type, "targets": targets}
-	if err := repo.ApplyDeliveryEvent(ctx, triggered); err != nil {
-		s.logDerivedEventFailure("automation", event, err)
+	s.persistDerivedEvent(ctx, "automation", event, triggered, repo)
+}
+
+// persistDerivedEvent 写入派生事件。派生事件是主事件提交后的 best-effort 副作用，
+// 不能回滚主流程，但"配了规则却没生效"必须可诊断：先重试几次（连接抖动通常是瞬时的），
+// 仍然失败才放弃并记录，而不是静默吞掉。
+func (s *Service) persistDerivedEvent(ctx context.Context, kind string, source, event domain.DeliveryEvent, repo DeliveryRepository) {
+	const attempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if lastErr = repo.ApplyDeliveryEvent(ctx, event); lastErr == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+		case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+			continue
+		}
+		break
 	}
+	s.logDerivedEventFailure(kind, source, lastErr)
 }
 
 // logDerivedEventFailure 记录派生事件写入失败。派生事件不回滚主事件，
@@ -1254,9 +1273,7 @@ func (s *Service) fireConflictWarning(ctx context.Context, p platform.Principal,
 		"rules":     matchedRules,
 		"threshold": threshold,
 	})
-	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
-		s.logDerivedEventFailure("warning", source, err)
-	}
+	s.persistDerivedEvent(ctx, "warning", source, event, repo)
 }
 
 // conflictKind 把能力校验产生的冲突描述归类，供预警规则的 check_type 匹配。
