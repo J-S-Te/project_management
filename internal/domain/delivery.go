@@ -4,10 +4,10 @@ import "time"
 
 // ContractActivation is the idempotent contract-to-project handoff owned by the contract system.
 type ContractActivation struct {
-	ContractID              string            `json:"contract_id"`
-	ContractVersion         string            `json:"contract_version"`
-	ContractName            string            `json:"contract_name"`
-	Customer                string            `json:"customer"`
+	ContractID      string `json:"contract_id"`
+	ContractVersion string `json:"contract_version"`
+	ContractName    string `json:"contract_name"`
+	Customer        string `json:"customer"`
 	// CustomerID 是合同系统持有的客户标识；旧版调用方未携带时保持空，项目仍以名称记录客户。
 	CustomerID              string            `json:"customer_id,omitempty"`
 	EffectiveAt             time.Time         `json:"effective_at"`
@@ -39,19 +39,19 @@ type DeliveryEvent struct {
 }
 
 type Capability struct {
-	ID           string    `json:"id"`
-	TenantID     string    `json:"-"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	ResourceName string    `json:"resource_name"`
+	ID           string `json:"id"`
+	TenantID     string `json:"-"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	ResourceName string `json:"resource_name"`
 	// UserID 是人员能力档案关联的平台 user_id：实施计划的人员行既可按档案编号、
 	// 也可按平台 user_id 提交，服务端统一解析到档案行，消除人员标识双轨制。
 	// 仅 PERSON 类型有意义；设备行保持空。
-	UserID        string    `json:"user_id,omitempty"`
-	Codes         []string  `json:"codes"`
-	ValidFrom     time.Time `json:"valid_from"`
-	ValidUntil    time.Time `json:"valid_until"`
-	Status        string    `json:"status"`
+	UserID     string    `json:"user_id,omitempty"`
+	Codes      []string  `json:"codes"`
+	ValidFrom  time.Time `json:"valid_from"`
+	ValidUntil time.Time `json:"valid_until"`
+	Status     string    `json:"status"`
 	// UsageScope 为 ANY（可借出）或 COMPANY_ONLY（仅在公司使用，不可借出）。
 	UsageScope string `json:"usage_scope"`
 	// IdentityStatus 是人员档案与基础平台负责人目录的复核结果：
@@ -63,9 +63,9 @@ type Capability struct {
 	// Presence 是派生状态：IN_COMPANY / OUT_OF_COMPANY（借出中）。仅设备有意义。
 	Presence string `json:"presence,omitempty"`
 	// BorrowedBy 在借出中时说明占用方（项目号）；BorrowedServiceItemID 供设备维护页发起归还。
-	BorrowedBy            string `json:"borrowed_by,omitempty"`
-	BorrowedServiceItemID string `json:"borrowed_service_item_id,omitempty"`
-	BorrowedWindow        string `json:"borrowed_window,omitempty"`
+	BorrowedBy            string    `json:"borrowed_by,omitempty"`
+	BorrowedServiceItemID string    `json:"borrowed_service_item_id,omitempty"`
+	BorrowedWindow        string    `json:"borrowed_window,omitempty"`
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
@@ -89,6 +89,9 @@ type DecompositionAdjustmentInput struct {
 
 type TeamAssignmentInput struct {
 	TeamLeadID string `json:"team_lead_id"`
+	// ExpectedVersion 是客户端读取到的服务项版本；非 0 且与服务端不一致时返回 409，
+	// 让"我基于的是旧版本"被显式发现，而不是静默覆盖对方刚提交的修改。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 // ExecutionAssignmentInput 是团队负责人指派项目经理与实施工程师的输入。
@@ -97,6 +100,8 @@ type ExecutionAssignmentInput struct {
 	ProjectManagerID string   `json:"project_manager_id"`
 	EngineerIDs      []string `json:"engineer_ids"`
 	RequiredCodes    []string `json:"required_codes"`
+	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 // PlanResourceInput 是实施计划提交时的人员/设备行：只接受资源标识与使用时段，
@@ -140,6 +145,8 @@ type ImplementationPlanInput struct {
 	// Personnel 是现场实施的人员清单；至少一名人员才能发布计划。
 	// 设备清单在「实施准备」阶段提交，计划阶段不再选择设备。
 	Personnel []PlanResourceInput `json:"personnel"`
+	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 // ImplementationPlan 是与服务项绑定的实施计划读写模型，包含渗透测试专项合规要素。
@@ -179,6 +186,8 @@ type SpecialMethodReviewInput struct {
 
 type ReportStatusInput struct {
 	Phase string `json:"phase"`
+	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 // PreparationInput 是实施准备提交的内容。设备申领不再是自由文本：设备清单
@@ -186,6 +195,8 @@ type ReportStatusInput struct {
 type PreparationInput struct {
 	TravelRequestID string `json:"travel_request_id"`
 	Notes           string `json:"notes"`
+	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 	// Equipment 是实施准备确定的设备清单；每行带使用时段，服务端按占用区间硬拦重叠。
 	Equipment []PlanResourceInput `json:"equipment"`
 }
@@ -194,6 +205,8 @@ type FieldRecordInput struct {
 	RawData      string   `json:"raw_data"`
 	Environment  string   `json:"environment"`
 	EvidenceURLs []string `json:"evidence_urls"`
+	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 type DeviationInput struct {

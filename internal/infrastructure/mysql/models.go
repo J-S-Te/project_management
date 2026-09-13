@@ -25,6 +25,10 @@ type projectRecord struct {
 	Due               string `gorm:"size:64"`
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+
+	// Version 是项目业务版本：仅在项目自身内容变更（如拆解调整）时自增，
+	// 派生状态/进度的缓存同步不计入，避免版本号因无关写入而失去信号意义。
+	Version uint64 `gorm:"not null;default:1"`
 }
 
 func (projectRecord) TableName() string { return "pm_project" }
@@ -58,9 +62,14 @@ type serviceItemRecord struct {
 	ReportUpdatedAt   *time.Time
 	ReportUpdatedBy   string `gorm:"size:64;not null"`
 	Status            string `gorm:"size:32;not null"`
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	UpdatedBy         string `gorm:"size:64"`
+	// StatusChangedAt 是服务项进入当前状态的时刻，SLA 的「状态停留时长」以此为准；
+	// 不能用 UpdatedAt——无关字段的更新会刷新它，导致计时被意外重置。
+	StatusChangedAt *time.Time
+	// Version 是乐观并发版本号：每次状态变更自增，供客户端做条件更新（冲突即 409）。
+	Version   uint64 `gorm:"not null;default:1"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UpdatedBy string `gorm:"size:64"`
 }
 
 func (serviceItemRecord) TableName() string { return "pm_service_item" }

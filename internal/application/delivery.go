@@ -86,18 +86,34 @@ func (s *Service) ListSlaOverdue(ctx context.Context, p platform.Principal) ([]d
 	if err != nil {
 		return nil, err
 	}
+	computed, unparsablePlannedEnd := computeSlaItems(candidates, rules, time.Now().UTC())
+	if unparsablePlannedEnd > 0 && s.Logger != nil {
+		// 计划完成时间无法解析的服务项会被静默排除在 SLA 口径之外，必须可诊断。
+		s.Logger.Warn("sla skipped items with unparsable planned_end",
+			"tenant_id", p.TenantID, "skipped", unparsablePlannedEnd)
+	}
 	// 与列表/详情同一脱敏口径：该响应会带出 site/category。
-	return s.applyFieldPermissionsToSlaItems(ctx, p, computeSlaItems(candidates, rules, time.Now().UTC()))
+	return s.applyFieldPermissionsToSlaItems(ctx, p, computed)
 }
 
-// computeSlaItems 把未终结服务项展开成 SLA 口径列表：计划完成超期每项一条；
-// 命中启用规则的状态停留超期/临近提醒各一条。
-func computeSlaItems(candidates []domain.SlaOverdueItem, rules []domain.Rule, now time.Time) []domain.SlaOverdueItem {
+// computeSlaItems 把候选服务项展开成两类 SLA 口径：
+//  1. 计划完成时间已过（与配置无关的固定口径），每项一条；
+//  2. 命中启用规则的状态停留超期 / 临近提醒，各一条。
+//
+// 候选集由仓储给出（仅排除终态），两类口径的过滤在这里分别判定：
+// 计划完成口径排除已交付（现场实施完成）的项，否则它们只要计划时间已过就会永久留在超期列表；
+// 状态口径不按计划时间过滤，否则「计划时间未到但已临近超时」的项永远不会被提醒。
+func computeSlaItems(candidates []domain.SlaOverdueItem, rules []domain.Rule, now time.Time) ([]domain.SlaOverdueItem, int) {
 	items := make([]domain.SlaOverdueItem, 0, len(candidates))
+	// 计划完成时间无法解析的服务项会被跳过：它们既进不了超期列表，也不会有任何提示，
+	// 会静默消失在 SLA 口径之外。把数量返回给调用方，由调用方告警。
+	unparsablePlannedEnd := 0
 	for _, candidate := range candidates {
-		if candidate.PlannedEnd != "" {
+		if candidate.Status != domain.ProjectStatusFieldCompleted && candidate.PlannedEnd != "" {
 			plannedEnd, err := time.Parse(time.RFC3339, candidate.PlannedEnd)
-			if err == nil && plannedEnd.Before(now) {
+			if err != nil {
+				unparsablePlannedEnd++
+			} else if plannedEnd.Before(now) {
 				overdue := candidate
 				overdue.Kind = domain.SlaKindPlanEndOverdue
 				overdue.OverdueHours = int64(now.Sub(plannedEnd).Hours())
@@ -105,10 +121,16 @@ func computeSlaItems(candidates []domain.SlaOverdueItem, rules []domain.Rule, no
 			}
 		}
 		for _, rule := range rules {
-			if !rule.Enabled || strings.TrimSpace(rule.Status) != candidate.Status {
+			// 两侧都做 Trim：脏数据（状态带空格）不能让规则静默失效。
+			if !rule.Enabled || strings.TrimSpace(rule.Status) != strings.TrimSpace(candidate.Status) {
 				continue
 			}
-			elapsed := int64(now.Sub(candidate.UpdatedAt).Hours())
+			// 计时基准是「进入当前状态的时刻」。没有基准时不判超期，
+			// 避免把零值时间当成极早的起点而误报天文数字的停留时长。
+			if candidate.StatusChangedAt.IsZero() {
+				continue
+			}
+			elapsed := int64(now.Sub(candidate.StatusChangedAt).Hours())
 			switch {
 			case elapsed > int64(rule.DeadlineHours):
 				breach := candidate
@@ -129,7 +151,7 @@ func computeSlaItems(candidates []domain.SlaOverdueItem, rules []domain.Rule, no
 			}
 		}
 	}
-	return items
+	return items, unparsablePlannedEnd
 }
 
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
@@ -246,8 +268,115 @@ func splitRuleItemStatus(splitRules []domain.Rule, source domain.ContractService
 	return "待确认"
 }
 
+// ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。
+//
+// 这是"主动提醒"的唯一入口：平台此前没有任何周期任务，SLA 只能在有人打开页面查询时可见，
+// 超期不会主动告诉任何人。扫描按租户执行，使用租户边界而非某个登录用户的授权
+// （系统侧任务，不代替用户的权限判断）。
+//
+// 幂等键按「服务项 + 口径 + UTC 日期」生成：同一天重复扫描不会重复打扰，
+// 跨天仍会重新提醒（超期是持续状态，每天都值得提醒一次）。
+func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now time.Time) (int, error) {
+	if s.Notifications == nil || strings.TrimSpace(tenantID) == "" {
+		return 0, nil
+	}
+	filter := platform.ScopeFilter{TenantID: strings.TrimSpace(tenantID), AllowAll: true}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return 0, err
+	}
+	candidates, err := repo.ListSlaOverdue(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	rules, err := s.Repo.ListRules(ctx, filter.TenantID, "sla")
+	if err != nil {
+		return 0, err
+	}
+	items, unparsable := computeSlaItems(candidates, rules, now)
+	if unparsable > 0 && s.Logger != nil {
+		s.Logger.Warn("sla scan skipped items with unparsable planned_end", "tenant_id", tenantID, "skipped", unparsable)
+	}
+	day := now.UTC().Format("2006-01-02")
+	published := 0
+	for _, item := range items {
+		recipients := s.itemAssignees(ctx, filter.TenantID, item.ID)
+		if len(recipients) == 0 {
+			continue
+		}
+		title, content := slaNotificationText(item)
+		notification := platform.NotificationEvent{
+			EventID:        ulid.Make().String(),
+			EventType:      "SLA_" + item.Kind,
+			Scope:          platform.NotificationScopeCrossSystem,
+			Priority:       slaNotificationPriority(item.Kind),
+			Title:          title,
+			Content:        content,
+			ReferenceType:  "service_item",
+			ReferenceID:    item.ID,
+			Recipients:     recipients,
+			OccurredAt:     now.UTC(),
+			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
+		}
+		if err := s.Notifications.Publish(ctx, notification); err != nil {
+			if s.Logger != nil {
+				s.Logger.Warn("publish sla notification failed", "service_item_id", item.ID, "kind", item.Kind, "error", err)
+			}
+			continue
+		}
+		published++
+	}
+	return published, nil
+}
+
+// slaNotificationText 生成 SLA 提醒的标题与正文；超期按高优先级，临近按普通。
+func slaNotificationText(item domain.SlaOverdueItem) (string, string) {
+	switch item.Kind {
+	case domain.SlaKindStatusApproaching:
+		return "服务项临近 SLA 时限", fmt.Sprintf("服务项 %s 停留在「%s」的剩余时间不足，请及时推进。", item.ID, item.Status)
+	case domain.SlaKindStatusOverdue:
+		return "服务项状态停留超期", fmt.Sprintf("服务项 %s 停留在「%s」已超过规则时限 %d 小时（超期 %d 小时）。", item.ID, item.Status, item.DeadlineHours, item.OverdueHours)
+	default:
+		return "服务项计划完成超期", fmt.Sprintf("服务项 %s 的计划完成时间已过 %d 小时。", item.ID, item.OverdueHours)
+	}
+}
+
+// slaNotificationPriority 让超期类提醒不被淹没在普通通知里。
+func slaNotificationPriority(kind string) string {
+	if kind == domain.SlaKindStatusApproaching {
+		return "NORMAL"
+	}
+	return "HIGH"
+}
+
+// verifyExpectedVersion 在写入前校验客户端声明的服务项版本。
+//
+// 这是"先能检测、能提示"的那一半：实际写入已在事务内加行锁并做条件更新，不会产生脏写；
+// 但客户端此前拿不到任何版本信号，两人同时改同一对象时后者会静默覆盖前者的意图。
+// 期望版本为 0 表示调用方未声明版本（内部调用或旧客户端），跳过校验以保持兼容。
+func (s *Service) verifyExpectedVersion(ctx context.Context, p platform.Principal, permission, itemID string, expected uint64) error {
+	if expected == 0 {
+		return nil
+	}
+	filter, err := authorizeProjectScope(p, permission)
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Version != expected {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID string, input domain.TeamAssignmentInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.team.assign", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.team.assign", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
 	if strings.TrimSpace(input.TeamLeadID) == "" {
@@ -260,8 +389,13 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
-	if _, err := s.Repo.GetServiceItem(ctx, filter, itemID); err != nil {
+	existing, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
 		return domain.ConflictCheckResult{}, err
+	}
+	// 客户端声明的版本与服务端不一致即 409：避免后者静默覆盖前者刚提交的指派。
+	if input.ExpectedVersion != 0 && existing.Version != input.ExpectedVersion {
+		return domain.ConflictCheckResult{}, ErrConflict
 	}
 	if input.ProjectManagerID == "" || len(input.EngineerIDs) == 0 {
 		return domain.ConflictCheckResult{}, ErrValidation
@@ -306,6 +440,9 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
 	filter, err := authorizeProjectScope(p, "project.implementation.plan")
 	if err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.plan", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
 	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
@@ -581,6 +718,9 @@ func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, 
 	if err := s.authorizeServiceItem(ctx, p, reportPhasePermission(phase), itemID); err != nil {
 		return err
 	}
+	if err := s.verifyExpectedVersion(ctx, p, reportPhasePermission(phase), itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase}))
 }
 
@@ -596,6 +736,9 @@ func reportPhasePermission(phase string) string {
 func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PreparationInput) error {
 	filter, err := authorizeProjectScope(p, "project.implementation.plan")
 	if err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.plan", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
 	if strings.TrimSpace(input.TravelRequestID) == "" {
@@ -736,6 +879,12 @@ func (s *Service) resolvePreparationEquipment(ctx context.Context, repo Delivery
 
 // equipmentUsageConflicts 返回与该设备行使用时段重叠的其他服务项占用描述。
 // 区间按左闭右开比较：结束日当天不算占用下一天。
+// equipmentUsageConflicts 返回与目标时段重叠的其他设备占用。
+//
+// 时段口径：两端都含当日，与资质有效期保持同一种日期语义。
+// 因此 [1 日..5 日] 与 [5 日..10 日] 在 5 日当天重叠，算冲突（此前用半开区间会漏判）。
+// 占用记录的使用时段解析失败时按「占用」处理：无法证明设备空闲时不得放行，
+// 同时把数据异常显式报出来，避免整段占用检查静默失效。
 func equipmentUsageConflicts(row domain.PlanResource, windowStart, windowEnd time.Time, reserved []domain.EquipmentReservation) []string {
 	conflicts := []string{}
 	for _, reservation := range reserved {
@@ -745,9 +894,13 @@ func equipmentUsageConflicts(row domain.PlanResource, windowStart, windowEnd tim
 		otherStart, startErr := time.Parse("2006-01-02", reservation.WindowStart)
 		otherEnd, endErr := time.Parse("2006-01-02", reservation.WindowEnd)
 		if startErr != nil || endErr != nil {
+			conflicts = append(conflicts, fmt.Sprintf("%s（%s）的占用时段数据异常（%s ~ %s），请先修正该服务项的设备时段",
+				firstNonEmpty(reservation.ProjectID, reservation.ServiceItemID), reservation.ServiceItemID,
+				reservation.WindowStart, reservation.WindowEnd))
 			continue
 		}
-		if !windowStart.Before(otherEnd) || !otherStart.Before(windowEnd) {
+		// 闭区间重叠：任一端晚于对方另一端才算不重叠。
+		if windowStart.After(otherEnd) || otherStart.After(windowEnd) {
 			continue
 		}
 		holder := reservation.ProjectID
@@ -770,6 +923,9 @@ func windowLabel(row domain.PlanResource, planStart, planEnd time.Time) string {
 
 func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, itemID string, input domain.FieldRecordInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.field.execute", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
@@ -1162,8 +1318,166 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
 		return err
 	}
+	s.notifyAssigned(ctx, event)
 	s.fireAutomations(ctx, event)
 	return nil
+}
+
+// itemAssignees 读取服务项当前的被指派人（团队负责人、项目经理、实施工程师）。
+// 供通知这类系统侧派生副作用使用：只按租户边界读取，不叠加调用者授权
+// （调用者已经通过各自的操作权限鉴权，这里只是为了把提醒发给"需要行动的人"）。
+func (s *Service) itemAssignees(ctx context.Context, tenantID, itemID string) []string {
+	if strings.TrimSpace(itemID) == "" {
+		return nil
+	}
+	item, err := s.Repo.GetServiceItem(ctx, platform.ScopeFilter{TenantID: tenantID, AllowAll: true}, itemID)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("resolve notification assignees failed", "service_item_id", itemID, "error", err)
+		}
+		return nil
+	}
+	recipients := make([]string, 0, 3)
+	if teamLead := strings.TrimSpace(item.TeamLeadID); teamLead != "" {
+		recipients = append(recipients, teamLead)
+	}
+	if manager := strings.TrimSpace(item.ProjectManagerID); manager != "" {
+		recipients = append(recipients, manager)
+	}
+	for _, engineer := range item.EngineerIDs {
+		if trimmed := strings.TrimSpace(engineer); trimmed != "" {
+			recipients = append(recipients, trimmed)
+		}
+	}
+	return recipients
+}
+
+// assignmentNotification 描述一条"指派类"事件对应的站内提醒文案。
+type assignmentNotification struct {
+	Title   string
+	Content string
+}
+
+// notifyAssigned 在事件成功落库后，向**被指派人**投递站内提醒。
+//
+// 集中在这里而不是散落到各个业务方法：所有业务节点都经过 applyEvent，通知规则只需维护一处。
+// 收件人取"需要行动的人"（被指派人），而不是操作者本人——这正是提醒的意义。
+// 通知是派生副作用：失败不回滚已落库的事件，但必须留下可诊断的警告，不能静默吞掉。
+func (s *Service) notifyAssigned(ctx context.Context, event domain.DeliveryEvent) {
+	if s.Notifications == nil || strings.TrimSpace(event.ServiceItemID) == "" {
+		return
+	}
+	spec, ok := assignmentNotificationFor(event.Type)
+	if !ok {
+		return
+	}
+	recipients := assignmentRecipients(event)
+	if len(recipients) == 0 {
+		// 载荷里没有收件人时回到服务项的当前被指派人：通知是系统侧的派生副作用，
+		// 只按租户边界读取（调用者已经通过各自的操作鉴权），不叠加用户授权。
+		recipients = s.itemAssignees(ctx, event.TenantID, event.ServiceItemID)
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	notification := platform.NotificationEvent{
+		EventID:   ulid.Make().String(),
+		EventType: event.Type,
+		// 必须是平台白名单取值；写错会让整条通知被判 400。
+		Scope:          platform.NotificationScopeCrossSystem,
+		Priority:       "NORMAL",
+		Title:          spec.Title,
+		Content:        spec.Content,
+		ReferenceType:  "service_item",
+		ReferenceID:    event.ServiceItemID,
+		Recipients:     recipients,
+		OccurredAt:     time.Now().UTC(),
+		IdempotencyKey: event.ID + "-assigned",
+	}
+	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("publish assignment notification failed",
+			"event_id", event.ID, "event_type", event.Type, "error", err)
+	}
+}
+
+// assignmentNotificationFor 给出指派类事件的提醒文案；非指派事件返回 false。
+func assignmentNotificationFor(eventType string) (assignmentNotification, bool) {
+	switch eventType {
+	case EventTeamAssigned:
+		return assignmentNotification{
+			Title:   "已指派团队负责人",
+			Content: "你被指派为服务项的团队负责人，请在「任务分配」中指派项目经理与实施工程师。",
+		}, true
+	case EventExecutionTeamAssigned:
+		return assignmentNotification{
+			Title:   "已指派项目经理与实施工程师",
+			Content: "你被指派到该服务项，请在「实施计划」中确认排期并推进交付。",
+		}, true
+	case EventImplementationPlanned:
+		return assignmentNotification{
+			Title:   "实施计划已发布",
+			Content: "该服务项的实施计划已发布，请按排期推进现场实施。",
+		}, true
+	case EventPreparationStarted:
+		return assignmentNotification{
+			Title:   "实施准备已发起",
+			Content: "该服务项已进入实施准备，请确认设备已就位并按计划开展现场实施。",
+		}, true
+	case EventDeviationReported:
+		return assignmentNotification{
+			Title:   "有偏离待评审",
+			Content: "该服务项上报了实施偏离，请及时安排评审。",
+		}, true
+	case EventReportStatusUpdated:
+		return assignmentNotification{
+			Title:   "报告阶段已推进",
+			Content: "该服务项的报告阶段已推进，请按当前阶段继续处理。",
+		}, true
+	default:
+		return assignmentNotification{}, false
+	}
+}
+
+// assignmentRecipients 从事件载荷取被指派人：团队负责人、项目经理、实施工程师。
+func assignmentRecipients(event domain.DeliveryEvent) []string {
+	recipients := make([]string, 0, 3)
+	if teamLead := payloadText(event.Payload, "team_lead_id"); teamLead != "" {
+		recipients = append(recipients, teamLead)
+	}
+	if manager := payloadText(event.Payload, "project_manager_id"); manager != "" {
+		recipients = append(recipients, manager)
+	}
+	recipients = append(recipients, payloadTextList(event.Payload, "engineer_ids")...)
+	// 实施计划的人员清单就是需要行动的现场实施人员：只取人员行，设备行不作收件人。
+	if resources, ok := event.Payload["personnel"].([]domain.PlanResource); ok {
+		for _, resource := range resources {
+			if !strings.EqualFold(strings.TrimSpace(resource.ResourceType), "PERSON") {
+				continue
+			}
+			if resourceID := strings.TrimSpace(resource.ResourceID); resourceID != "" {
+				recipients = append(recipients, resourceID)
+			}
+		}
+	}
+	return recipients
+}
+
+// payloadText 读取事件载荷里的字符串字段，缺失或类型不符时返回空串。
+func payloadText(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
+// payloadTextList 读取事件载荷里的字符串数组字段，逐项去掉空白并跳过空值。
+func payloadTextList(payload map[string]any, key string) []string {
+	values, _ := payload[key].([]string)
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // fireAutomations 在事件落库后按启用的「自动化触发」规则追加 AUTOMATION_TRIGGERED
@@ -1238,9 +1552,11 @@ func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.Deli
 		return
 	}
 	notification := platform.NotificationEvent{
-		EventID:       ulid.Make().String(),
-		EventType:     EventAutomationTriggered,
-		Scope:         "application",
+		EventID:   ulid.Make().String(),
+		EventType: EventAutomationTriggered,
+		// 必须用平台白名单取值：此前写死 "application"，平台只接受 CROSS_SYSTEM|PLATFORM，
+		// 导致自动化通知必然被判 400，且失败只记 Warn 不易察觉。
+		Scope:         platform.NotificationScopeCrossSystem,
 		Priority:      "NORMAL",
 		Title:         "项目自动化规则触发",
 		Content:       fmt.Sprintf("规则命中的事件：%s。项目 %s，服务项 %s。", event.Type, event.ProjectID, event.ServiceItemID),

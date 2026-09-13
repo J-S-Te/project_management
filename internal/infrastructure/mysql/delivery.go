@@ -55,7 +55,7 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 			return err
 		}
 		for _, item := range items {
-			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
@@ -71,7 +71,7 @@ func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project 
 			return err
 		}
 		for _, item := range items {
-			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
@@ -265,7 +265,24 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		}
 		return application.ErrValidation
 	}
-	return tx.Model(&serviceItemRecord{}).Where("tenant_id=? AND id=?", item.TenantID, item.ID).Updates(updates).Error
+	// 状态真正变化时记录「进入当前状态的时刻」，作为 SLA 停留时长的唯一基准。
+	if _, changed := updates["status"]; changed {
+		updates["status_changed_at"] = event.CreatedAt
+	}
+	// 条件更新 + 版本自增：把"写入必须基于事务内读到的那一版"写成显式不变量。
+	// 当前调用方已在事务内加了 FOR UPDATE，这是防御性的第二道闸；
+	// 将来若有旁路写路径忘记加锁，会以冲突而不是静默覆盖收场。
+	updates["version"] = gorm.Expr("version + 1")
+	result := tx.Model(&serviceItemRecord{}).
+		Where("tenant_id=? AND id=? AND version=?", item.TenantID, item.ID, item.Version).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
 }
 
 // isAuditOnlyEvent 列出不改变服务项状态、仅用于留痕的事件类型。
@@ -323,7 +340,7 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 			if strings.TrimSpace(item.ID) == "" {
 				item.ID = serviceItemIDFor(project.ID, maxSequence+index+1)
 			}
-			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
+			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, Special: item.Special, TestMode: item.TestMode, Status: item.Status, ConflictStatus: item.ConflictStatus, StatusChangedAt: &event.CreatedAt, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
@@ -335,7 +352,19 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 	if len(updates) == 1 {
 		return nil
 	}
-	return tx.Model(&projectRecord{}).Where("tenant_id=? AND id=?", project.TenantID, project.ID).Updates(updates).Error
+	// 项目业务版本：仅在项目自身内容变更时自增（派生状态缓存同步不算业务变更）。
+	// 与条件更新配对，让"我基于的是旧版本"这类并发冲突能被显式发现而不是静默覆盖。
+	updates["version"] = gorm.Expr("version + 1")
+	result := tx.Model(&projectRecord{}).
+		Where("tenant_id=? AND id=? AND version=?", project.TenantID, project.ID, project.Version).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
 }
 
 // serviceItemIDFor 生成服务项编号，与创建、合同激活路径保持同一语义：SI-<项目后缀>-NNN。
@@ -383,19 +412,22 @@ func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
 // 与列表/仪表盘一致地套用服务项数据范围，超期时长由数据库按小时取整。
 func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
 	var rows []struct {
-		ID           string
-		ProjectID    string
-		Site         string
-		Category     string
-		Status       string
-		PlannedEnd   *time.Time
-		OverdueHours int64
+		ID              string
+		ProjectID       string
+		Site            string
+		Category        string
+		Status          string
+		PlannedEnd      *time.Time
+		StatusChangedAt *time.Time
+		OverdueHours    int64
 	}
 	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).
-		Select("id, project_id, site, category, status, planned_end, TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()) AS overdue_hours").
-		// 终态必须用服务项自己的状态常量：服务项永远不会取到项目状态「已完成」，
-		// 用错常量会让已交付（现场实施完成）的项只要计划时间已过就永久留在超期列表。
-		Where("planned_end IS NOT NULL AND planned_end < UTC_TIMESTAMP() AND status NOT IN ?", []string{domain.ProjectStatusFieldCompleted, domain.ProjectStatusTerminated})
+		Select("id, project_id, site, category, status, planned_end, status_changed_at, COALESCE(TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()), 0) AS overdue_hours").
+		// 候选集必须同时覆盖两类口径：①计划完成时间已过（固定口径）②按规则的状态停留超时/临近。
+		// 后者恰恰包含「计划时间未到但已临近超时」的项，因此不能在此按 planned_end 过滤，
+		// 否则提前提醒永远不会触发；计划完成口径的状态过滤下沉到 computeSlaItems。
+		// 唯一在此排除的是终态「已终止」：它没有后续动作，不属于任何 SLA 口径。
+		Where("status <> ?", domain.ProjectStatusTerminated)
 	if err := query.Order("planned_end").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -405,7 +437,11 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 		if row.PlannedEnd != nil {
 			plannedEnd = row.PlannedEnd.Format(time.RFC3339)
 		}
-		items = append(items, domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status, PlannedEnd: plannedEnd, OverdueHours: row.OverdueHours})
+		item := domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status, PlannedEnd: plannedEnd, OverdueHours: row.OverdueHours}
+		if row.StatusChangedAt != nil {
+			item.StatusChangedAt = *row.StatusChangedAt
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -473,7 +509,12 @@ func (r *Repository) FindCapabilities(ctx context.Context, tenant, at string, id
 		return []domain.Capability{}, nil
 	}
 	var records []capabilityRecord
-	err := r.db.WithContext(ctx).Where("tenant_id=? AND resource_id IN ? AND status='ACTIVE' AND (valid_from IS NULL OR valid_from<=?) AND (valid_until IS NULL OR valid_until>=?)", tenant, ids, at, at).Find(&records).Error
+	// 有效期按「日期」口径判定：业务填写的是日期（有效期至 X 日），应含当日。
+	// 若直接比较 valid_until >= now，到期日当天 00:00 之后就会被判为过期，
+	// 等于把"有效期至今天"变成"昨天就失效"，与录入人的理解差一天。
+	err := r.db.WithContext(ctx).Where(
+		"tenant_id=? AND resource_id IN ? AND status='ACTIVE' AND (valid_from IS NULL OR DATE(valid_from)<=DATE(?)) AND (valid_until IS NULL OR DATE(valid_until)>=DATE(?))",
+		tenant, ids, at, at).Find(&records).Error
 	return capabilitiesFromRecords(records), err
 }
 func capabilitiesFromRecords(records []capabilityRecord) []domain.Capability {

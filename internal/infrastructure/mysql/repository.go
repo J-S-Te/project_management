@@ -68,6 +68,7 @@ func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter
 func applyDerivedProjectMetrics(project *domain.Project, items []domain.ProjectStatusItem) {
 	project.Status = domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
 	project.Progress = domain.DeriveProjectProgress(items)
+	project.Risk = domain.IsRiskProject(project.Status, items)
 }
 
 // projectIDsOf 提取项目主键，供后续按项目聚合服务项状态。
@@ -179,7 +180,7 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 		now := time.Now().UTC()
 		update := tx.Model(&serviceItemRecord{}).
 			Where("tenant_id = ? AND id IN ? AND status IN ?", tenant, ids, []string{"待确认", "待复核", "待分配"}).
-			Updates(map[string]any{"status": "待分配", "updated_at": now, "updated_by": actor})
+			Updates(map[string]any{"status": "待分配", "status_changed_at": now, "updated_at": now, "updated_by": actor})
 		if update.Error != nil {
 			return update.Error
 		}
@@ -431,9 +432,13 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 		if status != domain.ProjectStatusCompleted {
 			result.InFlightProjects++
 		}
-		// 风险口径改为派生状态：异常处理中或已终止的项目。
-		if domain.IsRiskProjectStatus(status) {
+		// 风险口径与列表/详情共用同一函数：派生状态为异常处理中/已终止，
+		// 或项目内存在已终止服务项（部分终止的项目派生状态仍是「已完成」）。
+		if domain.IsRiskProject(status, inputs[project.ID]) {
 			result.RiskProjects++
+		}
+		if len(domain.UnknownServiceItemStatuses(inputs[project.ID])) > 0 {
+			result.UnknownStatusItems++
 		}
 	}
 	var count int64
@@ -452,7 +457,7 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: r.Version}
 }
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
@@ -485,7 +490,7 @@ func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilt
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
-	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, Status: r.Status}
+	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, Status: r.Status, Version: r.Version}
 	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
 	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
 	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)

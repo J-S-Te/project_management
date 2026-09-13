@@ -9,12 +9,26 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	notificationIngestScope       = "notification.ingest"
-	notificationIngestPath        = "/internal/v1/notifications/events"
-	maximumNotificationRespBytes  = 64 << 10
+	notificationIngestScope = "notification.ingest"
+	// notificationIngestPath 必须与平台统一站内信摄取端点一致（/api/v1/notifications/events）。
+	// 此前写的是 /internal/v1/...，平台无此路由，通知必然 404；其余子系统都用同一路径。
+	notificationIngestPath = "/api/v1/notifications/events"
+	// maximumNotificationRespBytes 限制读取平台响应的上限，避免异常响应占用内存。
+	maximumNotificationRespBytes = 64 << 10
+	// maximumNotificationRecipientLength 是平台对单个收件人标识的长度上限（平台用户 ID 为 26 位 ULID）。
+	// 超长标识会让整条事件被平台判为非法而全部丢弃，因此在发送前过滤。
+	maximumNotificationRecipientLength = 26
+)
+
+// 平台接受的 notification_scope 取值（平台侧白名单，大小写不敏感）。
+// 注意它与 OAuth scope（notification.ingest）是两件事，不能混用。
+const (
+	NotificationScopeCrossSystem = "CROSS_SYSTEM"
+	NotificationScopePlatform    = "PLATFORM"
 )
 
 // NotificationEvent 是投递给基础平台统一站内信 outbox 的一条事件。
@@ -45,7 +59,8 @@ type notificationPublisher struct {
 }
 
 // NewNotificationPublisher 在缺少凭据时返回 nil，使尚未开通该集成的部署继续可用。
-// 与负责人目录一致：endpoint 为空时回退到平台基址上的内部站内信路径。
+// endpoint 为空时回退到平台基址上的站内信摄取路径（/api/v1/notifications/events）；
+// 该路径必须与平台路由一致，否则投递必然 404。
 func NewNotificationPublisher(baseURL, endpoint, clientID, clientSecret, scope string) NotificationPublisher {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	endpoint = strings.TrimSpace(endpoint)
@@ -90,6 +105,9 @@ func (c *notificationPublisher) Publish(ctx context.Context, event NotificationE
 		if _, exists := seen[id]; exists {
 			continue
 		}
+		if utf8.RuneCountInString(id) > maximumNotificationRecipientLength {
+			continue
+		}
 		seen[id] = struct{}{}
 		recipients = append(recipients, id)
 	}
@@ -106,7 +124,7 @@ func (c *notificationPublisher) Publish(ctx context.Context, event NotificationE
 	}
 	payload := notificationIngestPayload{
 		EventID: event.EventID, EventType: strings.TrimSpace(event.EventType),
-		NotificationScope: firstNonBlankNotificationValue(event.Scope, "application"),
+		NotificationScope: firstNonBlankNotificationValue(event.Scope, NotificationScopeCrossSystem),
 		Priority:          strings.ToUpper(firstNonBlankNotificationValue(event.Priority, "NORMAL")),
 		Title:             strings.TrimSpace(event.Title), Content: strings.TrimSpace(event.Content),
 		ReferenceType: strings.TrimSpace(event.ReferenceType), ReferenceID: strings.TrimSpace(event.ReferenceID),

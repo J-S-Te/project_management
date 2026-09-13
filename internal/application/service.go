@@ -137,7 +137,17 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 	if err != nil {
 		return domain.Dashboard{}, err
 	}
-	return s.Repo.Dashboard(ctx, filter)
+	result, err := s.Repo.Dashboard(ctx, filter)
+	if err != nil {
+		return result, err
+	}
+	// 未知服务项状态会被保守地按最滞后处理，会让项目状态看起来比实际更早期。
+	// 这里显式告警，避免"数据异常导致项目状态静默变化"无人发现。
+	if result.UnknownStatusItems > 0 && s.Logger != nil {
+		s.Logger.Warn("unknown service item statuses detected",
+			"tenant_id", p.TenantID, "project_count", result.UnknownStatusItems)
+	}
+	return result, nil
 }
 func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, projectID string) ([]domain.ServiceItem, error) {
 	filter, err := authorizeProjectScope(p, "project.read")

@@ -98,18 +98,72 @@ func TestIsRiskProjectStatusUsesDerivedStatusVocabulary(t *testing.T) {
 
 // 已终止项不再有剩余工作量，必须同时从分子和分母剔除：
 // 按满分计入会得出「1 终止 + 1 待实施 = 62%」这种与状态口径相反的进度。
+// 全部终止时进度为 0：项目被放弃不等于交付完成（前端把 100% 与成功交付视觉绑定），
+// "存在终止项"这条信息由风险口径 IsRiskProject 承载。
 func TestDeriveProjectProgressExcludesTerminatedItems(t *testing.T) {
 	// 等级表最高级为 8（现场完成 + 报告归档），待实施为 2。
 	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusTerminated}, {Status: ProjectStatusPendingExecution}}); got != 25 {
 		t.Fatalf("一个终止 + 一个待实施 = %d, want 25（只按未终止项计算）", got)
 	}
-	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusTerminated}, {Status: ProjectStatusTerminated}}); got != 100 {
-		t.Fatalf("全部终止 = %d, want 100（没有剩余工作量）", got)
+	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusTerminated}, {Status: ProjectStatusTerminated}}); got != 0 {
+		t.Fatalf("全部终止 = %d, want 0（项目被放弃，不是交付完成）", got)
 	}
 	if got := DeriveProjectProgress(nil); got != 0 {
 		t.Fatalf("无服务项 = %d, want 0", got)
 	}
 	if got := DeriveProjectProgress([]ProjectStatusItem{{Status: ProjectStatusPendingAllocation}, {Status: ProjectStatusPendingAllocation}}); got != 12 {
 		t.Fatalf("两个待分配 = %d, want 12", got)
+	}
+}
+
+// 风险口径必须同时覆盖"派生状态风险"与"存在终止项"两类：
+// 只终止了部分服务项、其余已归档的项目派生状态是「已完成」，
+// 但它确实有被砍掉的工作，管理者必须能在风险口径里看到。
+func TestIsRiskProjectCoversPartialTermination(t *testing.T) {
+	completed := ProjectStatusItem{Status: ProjectStatusFieldCompleted, ReportStatus: "ARCHIVED"}
+	terminated := ProjectStatusItem{Status: ProjectStatusTerminated}
+	pending := ProjectStatusItem{Status: ProjectStatusPendingExecution}
+
+	if !IsRiskProject(ProjectStatusCompleted, []ProjectStatusItem{completed, terminated}) {
+		t.Fatal("含终止项的项目必须计入风险，即使派生状态是「已完成」")
+	}
+	if !IsRiskProject(ProjectStatusTerminated, []ProjectStatusItem{terminated}) {
+		t.Fatal("全终止项目必须计入风险")
+	}
+	if !IsRiskProject(ProjectStatusException, []ProjectStatusItem{{Status: ProjectStatusException}}) {
+		t.Fatal("异常处理中必须计入风险")
+	}
+	if IsRiskProject(ProjectStatusInProgress, []ProjectStatusItem{pending, completed}) {
+		t.Fatal("无终止项且状态正常的项目不应计入风险")
+	}
+	if IsRiskProject(ProjectStatusCompleted, nil) {
+		t.Fatal("无服务项且状态为已完成的项目不应计入风险")
+	}
+}
+
+// 服务项状态等级表必须由单一来源派生：新增状态常量却忘记登记等级，
+// 会让该状态被静默当成最滞后（等级 0），把整个项目状态拖回「待拆解确认」。
+func TestServiceItemStatusRankCoversEveryKnownStatus(t *testing.T) {
+	for _, status := range serviceItemStatusStages[0].Statuses {
+		if _, ok := serviceItemStatusRank[status]; !ok {
+			t.Fatalf("等级表缺少第一阶段状态 %q", status)
+		}
+	}
+	for _, stage := range serviceItemStatusStages {
+		for _, status := range stage.Statuses {
+			if got := serviceItemStatusRank[status]; got != stage.Rank {
+				t.Fatalf("状态 %q 的等级 = %d, want %d", status, got, stage.Rank)
+			}
+		}
+	}
+	// 已知状态不得被识别为未知；未知状态必须能被认出来。
+	known := []ProjectStatusItem{{Status: ProjectStatusPendingExecution}, {Status: ProjectStatusTerminated}}
+	if unknown := UnknownServiceItemStatuses(known); len(unknown) != 0 {
+		t.Fatalf("已知状态被误判为未知: %v", unknown)
+	}
+	broken := []ProjectStatusItem{{Status: ProjectStatusPendingExecution}, {Status: "未来新增状态"}, {Status: "未来新增状态"}}
+	unknown := UnknownServiceItemStatuses(broken)
+	if len(unknown) != 1 || unknown[0] != "未来新增状态" {
+		t.Fatalf("未知状态必须被识别且去重，实际 %v", unknown)
 	}
 }

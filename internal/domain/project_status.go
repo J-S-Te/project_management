@@ -37,16 +37,54 @@ var projectStatusNodes = []string{
 	ProjectStatusCompleted,
 }
 
-// 服务项状态到推进等级的映射；待确认/待复核属于同一「待拆解确认」阶段。
-var serviceItemStatusRank = map[string]int{
-	"待确认":                          0,
-	"待复核":                          0,
-	ProjectStatusPendingAllocation: 1,
-	ProjectStatusPendingExecution:  2,
-	ProjectStatusPreparing:         3,
-	ProjectStatusInProgress:        4,
-	ProjectStatusException:         5,
-	ProjectStatusFieldCompleted:    6,
+// serviceItemStatusStages 是服务项状态到推进等级的**唯一来源**：同阶段的状态取相同等级。
+// rank 表由它派生，避免"新增状态却忘了登记等级"——那种漂移会让该状态被静默当成最滞后（等级 0），
+// 把整个项目的状态拖回「待拆解确认」。
+var serviceItemStatusStages = []struct {
+	Rank     int
+	Statuses []string
+}{
+	{0, []string{"待确认", "待复核"}}, // 待确认/待复核同属「待拆解确认」阶段
+	{1, []string{ProjectStatusPendingAllocation}},
+	{2, []string{ProjectStatusPendingExecution}},
+	{3, []string{ProjectStatusPreparing}},
+	{4, []string{ProjectStatusInProgress}},
+	{5, []string{ProjectStatusException}},
+	{6, []string{ProjectStatusFieldCompleted}},
+}
+
+// serviceItemStatusRank 由上面的阶段表派生，不再手写第二份。
+var serviceItemStatusRank = func() map[string]int {
+	ranks := make(map[string]int, len(serviceItemStatusStages))
+	for _, stage := range serviceItemStatusStages {
+		for _, status := range stage.Statuses {
+			ranks[status] = stage.Rank
+		}
+	}
+	return ranks
+}()
+
+// UnknownServiceItemStatuses 返回投影中无法识别的服务项状态。
+// 未知状态会被保守地按最滞后处理（不误报项目更晚期），但这属于数据异常：
+// 调用方必须把它显式暴露出来，而不是让项目状态静默变化。
+func UnknownServiceItemStatuses(items []ProjectStatusItem) []string {
+	seen := map[string]struct{}{}
+	unknown := make([]string, 0, len(items))
+	for _, item := range items {
+		status := strings.TrimSpace(item.Status)
+		if status == ProjectStatusTerminated {
+			continue
+		}
+		if _, known := serviceItemStatusRank[status]; known {
+			continue
+		}
+		if _, done := seen[status]; done {
+			continue
+		}
+		seen[status] = struct{}{}
+		unknown = append(unknown, status)
+	}
+	return unknown
 }
 
 // ProjectStatusNodes 返回线性推进节点的副本，供校验与展示使用。
@@ -67,6 +105,23 @@ var riskProjectStatuses = map[string]struct{}{
 func IsRiskProjectStatus(status string) bool {
 	_, ok := riskProjectStatuses[status]
 	return ok
+}
+
+// IsRiskProject 判定风险项目：派生状态落在风险集合内，**或项目内存在已终止的服务项**。
+//
+// 后者不可省略：只终止了部分服务项、其余已归档的项目，派生状态是「已完成」，
+// 但它确实有被砍掉的工作，管理者必须能在风险口径里看到；把"是否交付完成"（状态）
+// 与"是否有终止项"（风险）分开表达，两个指标才不会互相矛盾。
+func IsRiskProject(status string, items []ProjectStatusItem) bool {
+	if IsRiskProjectStatus(status) {
+		return true
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item.Status) == ProjectStatusTerminated {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectStatusItem 是派生项目状态所需的最小服务项投影。
@@ -134,6 +189,7 @@ func serviceItemLifecycleRank(item ProjectStatusItem) int {
 // 各服务项等级均值除以最高等级。已终止服务项不再有剩余工作量，既不计入分子也不计入分母：
 // 按满分计入会得出「1 终止 + 1 待实施 = 62%」这种与状态口径相反的进度。
 // 进度不再由事件手工写入固定值，与派生状态共用同一套等级表。
+// 全部终止时返回 0：项目被放弃不等于交付完成，风险由 IsRiskProject 承载。
 func DeriveProjectProgress(items []ProjectStatusItem) int {
 	if len(items) == 0 {
 		return 0
@@ -148,8 +204,11 @@ func DeriveProjectProgress(items []ProjectStatusItem) int {
 		counted++
 	}
 	if counted == 0 {
-		// 全部已终止：没有剩余工作量。
-		return 100
+		// 全部已终止：项目被放弃，完成度按业务直觉是 0，而不是"100% 完成"。
+		// 前端把 100% 与"成功交付"视觉绑定（绿色指标、满格进度条），
+		// 用 100 表达"没有剩余工作量"会让被终止的项目看起来像交付成功。
+		// "存在终止项"这条信息由风险口径承载（IsRiskProject），不靠进度表达。
+		return 0
 	}
 	return total * 100 / (maxRank * counted)
 }
