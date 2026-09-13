@@ -907,3 +907,90 @@ func TestComputeSlaItemsReportsUnparsablePlannedEnd(t *testing.T) {
 		t.Fatalf("可解析的服务项仍应产出计划完成超期，实际 %+v", items)
 	}
 }
+
+// 载荷里没有收件人时（实施准备发起/偏差上报/报告推进），必须回到服务项的当前被指派人：
+// 提醒要发给"需要行动的人"，而不是无人可发。
+func TestNotificationFallsBackToItemAssignees(t *testing.T) {
+	notifications := &notificationStub{}
+	repo := &assigneeRepository{item: domain.ServiceItem{
+		TenantID: "t1", ProjectID: "PJ-1", Status: "实施中",
+		TeamLeadID: "u-lead", ProjectManagerID: "u-pm", EngineerIDs: []string{"u-e1", " u-e2 "},
+	}}
+	service := &Service{Repo: repo, Notifications: notifications}
+	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
+
+	for _, eventType := range []string{EventPreparationStarted, EventDeviationReported, EventReportStatusUpdated} {
+		notifications.published = nil
+		if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", eventType, map[string]any{})); err != nil {
+			t.Fatalf("%s: applyEvent failed: %v", eventType, err)
+		}
+		if len(notifications.published) != 1 {
+			t.Fatalf("%s: 必须发布一条通知，实际 %+v", eventType, notifications.published)
+		}
+		recipients := notifications.published[0].Recipients
+		if len(recipients) != 4 || recipients[0] != "u-lead" || recipients[1] != "u-pm" || recipients[2] != "u-e1" || recipients[3] != "u-e2" {
+			t.Fatalf("%s: 收件人应为服务项被指派人，实际 %+v", eventType, recipients)
+		}
+	}
+}
+
+// assigneeRepository 让 GetServiceItem 返回带被指派人的服务项，其余能力复用 hookRepository。
+type assigneeRepository struct {
+	hookRepository
+	item domain.ServiceItem
+}
+
+func (r *assigneeRepository) GetServiceItem(_ context.Context, _ platform.ScopeFilter, id string) (domain.ServiceItem, error) {
+	item := r.item
+	item.ID = id
+	return item, nil
+}
+
+// 定时扫描必须能主动提醒 SLA 超期/临近：此前没有任何周期任务，超期只有人打开页面才可见。
+// 幂等键按「服务项 + 口径 + UTC 日期」生成，同一天重复扫描不会重复打扰。
+func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
+	now := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
+	repo := &assigneeRepository{
+		hookRepository: hookRepository{
+			overdue: []domain.SlaOverdueItem{{
+				ID: "SI-1", ProjectID: "PJ-1", Status: "实施中",
+				StatusChangedAt: now.Add(-30 * time.Hour), // 已停留 30 小时
+			}},
+			rules: []domain.Rule{{Kind: "sla", Enabled: true, Name: "待实施超期", Status: "实施中", DeadlineHours: 10, RemindHours: 2}},
+		},
+		item: domain.ServiceItem{TenantID: "t1", ProjectID: "PJ-1", TeamLeadID: "u-lead", ProjectManagerID: "u-pm"},
+	}
+	notifications := &notificationStub{}
+	service := &Service{Repo: repo, Notifications: notifications}
+
+	published, err := service.ScanSlaNotifications(context.Background(), "t1", now)
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if published != 1 || len(notifications.published) != 1 {
+		t.Fatalf("应发布一条超期提醒，实际 published=%d %+v", published, notifications.published)
+	}
+	event := notifications.published[0]
+	if len(event.Recipients) != 2 || event.Recipients[0] != "u-lead" || event.Recipients[1] != "u-pm" {
+		t.Fatalf("收件人应为被指派人，实际 %+v", event.Recipients)
+	}
+	if event.Priority != "HIGH" {
+		t.Fatalf("超期提醒应为高优先级，实际 %q", event.Priority)
+	}
+	if event.IdempotencyKey != "sla-SI-1-"+domain.SlaKindStatusOverdue+"-2026-09-13" {
+		t.Fatalf("幂等键必须按服务项+口径+日期生成，实际 %q", event.IdempotencyKey)
+	}
+	if event.Scope != platform.NotificationScopeCrossSystem {
+		t.Fatalf("必须使用平台白名单 scope，实际 %q", event.Scope)
+	}
+
+	// 未开通通知集成时不得报错，也不得因缺少集成而影响其它逻辑。
+	withoutIntegration := &Service{Repo: repo}
+	if count, err := withoutIntegration.ScanSlaNotifications(context.Background(), "t1", now); err != nil || count != 0 {
+		t.Fatalf("未开通集成时应静默跳过: count=%d err=%v", count, err)
+	}
+	// 空租户直接跳过。
+	if count, _ := service.ScanSlaNotifications(context.Background(), "  ", now); count != 0 {
+		t.Fatalf("空租户不应扫描")
+	}
+}

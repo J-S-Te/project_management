@@ -268,6 +268,87 @@ func splitRuleItemStatus(splitRules []domain.Rule, source domain.ContractService
 	return "待确认"
 }
 
+// ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。
+//
+// 这是"主动提醒"的唯一入口：平台此前没有任何周期任务，SLA 只能在有人打开页面查询时可见，
+// 超期不会主动告诉任何人。扫描按租户执行，使用租户边界而非某个登录用户的授权
+// （系统侧任务，不代替用户的权限判断）。
+//
+// 幂等键按「服务项 + 口径 + UTC 日期」生成：同一天重复扫描不会重复打扰，
+// 跨天仍会重新提醒（超期是持续状态，每天都值得提醒一次）。
+func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now time.Time) (int, error) {
+	if s.Notifications == nil || strings.TrimSpace(tenantID) == "" {
+		return 0, nil
+	}
+	filter := platform.ScopeFilter{TenantID: strings.TrimSpace(tenantID), AllowAll: true}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return 0, err
+	}
+	candidates, err := repo.ListSlaOverdue(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	rules, err := s.Repo.ListRules(ctx, filter.TenantID, "sla")
+	if err != nil {
+		return 0, err
+	}
+	items, unparsable := computeSlaItems(candidates, rules, now)
+	if unparsable > 0 && s.Logger != nil {
+		s.Logger.Warn("sla scan skipped items with unparsable planned_end", "tenant_id", tenantID, "skipped", unparsable)
+	}
+	day := now.UTC().Format("2006-01-02")
+	published := 0
+	for _, item := range items {
+		recipients := s.itemAssignees(ctx, filter.TenantID, item.ID)
+		if len(recipients) == 0 {
+			continue
+		}
+		title, content := slaNotificationText(item)
+		notification := platform.NotificationEvent{
+			EventID:        ulid.Make().String(),
+			EventType:      "SLA_" + item.Kind,
+			Scope:          platform.NotificationScopeCrossSystem,
+			Priority:       slaNotificationPriority(item.Kind),
+			Title:          title,
+			Content:        content,
+			ReferenceType:  "service_item",
+			ReferenceID:    item.ID,
+			Recipients:     recipients,
+			OccurredAt:     now.UTC(),
+			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
+		}
+		if err := s.Notifications.Publish(ctx, notification); err != nil {
+			if s.Logger != nil {
+				s.Logger.Warn("publish sla notification failed", "service_item_id", item.ID, "kind", item.Kind, "error", err)
+			}
+			continue
+		}
+		published++
+	}
+	return published, nil
+}
+
+// slaNotificationText 生成 SLA 提醒的标题与正文；超期按高优先级，临近按普通。
+func slaNotificationText(item domain.SlaOverdueItem) (string, string) {
+	switch item.Kind {
+	case domain.SlaKindStatusApproaching:
+		return "服务项临近 SLA 时限", fmt.Sprintf("服务项 %s 停留在「%s」的剩余时间不足，请及时推进。", item.ID, item.Status)
+	case domain.SlaKindStatusOverdue:
+		return "服务项状态停留超期", fmt.Sprintf("服务项 %s 停留在「%s」已超过规则时限 %d 小时（超期 %d 小时）。", item.ID, item.Status, item.DeadlineHours, item.OverdueHours)
+	default:
+		return "服务项计划完成超期", fmt.Sprintf("服务项 %s 的计划完成时间已过 %d 小时。", item.ID, item.OverdueHours)
+	}
+}
+
+// slaNotificationPriority 让超期类提醒不被淹没在普通通知里。
+func slaNotificationPriority(kind string) string {
+	if kind == domain.SlaKindStatusApproaching {
+		return "NORMAL"
+	}
+	return "HIGH"
+}
+
 // verifyExpectedVersion 在写入前校验客户端声明的服务项版本。
 //
 // 这是"先能检测、能提示"的那一半：实际写入已在事务内加行锁并做条件更新，不会产生脏写；
@@ -1242,6 +1323,35 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	return nil
 }
 
+// itemAssignees 读取服务项当前的被指派人（团队负责人、项目经理、实施工程师）。
+// 供通知这类系统侧派生副作用使用：只按租户边界读取，不叠加调用者授权
+// （调用者已经通过各自的操作权限鉴权，这里只是为了把提醒发给"需要行动的人"）。
+func (s *Service) itemAssignees(ctx context.Context, tenantID, itemID string) []string {
+	if strings.TrimSpace(itemID) == "" {
+		return nil
+	}
+	item, err := s.Repo.GetServiceItem(ctx, platform.ScopeFilter{TenantID: tenantID, AllowAll: true}, itemID)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("resolve notification assignees failed", "service_item_id", itemID, "error", err)
+		}
+		return nil
+	}
+	recipients := make([]string, 0, 3)
+	if teamLead := strings.TrimSpace(item.TeamLeadID); teamLead != "" {
+		recipients = append(recipients, teamLead)
+	}
+	if manager := strings.TrimSpace(item.ProjectManagerID); manager != "" {
+		recipients = append(recipients, manager)
+	}
+	for _, engineer := range item.EngineerIDs {
+		if trimmed := strings.TrimSpace(engineer); trimmed != "" {
+			recipients = append(recipients, trimmed)
+		}
+	}
+	return recipients
+}
+
 // assignmentNotification 描述一条"指派类"事件对应的站内提醒文案。
 type assignmentNotification struct {
 	Title   string
@@ -1262,6 +1372,11 @@ func (s *Service) notifyAssigned(ctx context.Context, event domain.DeliveryEvent
 		return
 	}
 	recipients := assignmentRecipients(event)
+	if len(recipients) == 0 {
+		// 载荷里没有收件人时回到服务项的当前被指派人：通知是系统侧的派生副作用，
+		// 只按租户边界读取（调用者已经通过各自的操作鉴权），不叠加用户授权。
+		recipients = s.itemAssignees(ctx, event.TenantID, event.ServiceItemID)
+	}
 	if len(recipients) == 0 {
 		return
 	}
@@ -1302,6 +1417,21 @@ func assignmentNotificationFor(eventType string) (assignmentNotification, bool) 
 		return assignmentNotification{
 			Title:   "实施计划已发布",
 			Content: "该服务项的实施计划已发布，请按排期推进现场实施。",
+		}, true
+	case EventPreparationStarted:
+		return assignmentNotification{
+			Title:   "实施准备已发起",
+			Content: "该服务项已进入实施准备，请确认设备已就位并按计划开展现场实施。",
+		}, true
+	case EventDeviationReported:
+		return assignmentNotification{
+			Title:   "有偏离待评审",
+			Content: "该服务项上报了实施偏离，请及时安排评审。",
+		}, true
+	case EventReportStatusUpdated:
+		return assignmentNotification{
+			Title:   "报告阶段已推进",
+			Content: "该服务项的报告阶段已推进，请按当前阶段继续处理。",
 		}, true
 	default:
 		return assignmentNotification{}, false

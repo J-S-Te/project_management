@@ -358,8 +358,8 @@ GROUP BY p.id, p.status LIMIT 20;
 | ✅ **PM-SLA-04** | `PlannedEnd` 解析失败静默忽略 | `computeSlaItems` 返回被跳过数量，`ListSlaOverdue` 在 >0 时打警告，不再让服务项静默消失在 SLA 口径之外 |
 | ✅ **PM-ADJ-01** | 拆解调整对话框不显示目标项目 | 对话框副标题显示**目标项目（ID · 名称）**并强调"全部服务项会被替换"，降低误操作风险 |
 | ✅ **PM-CONC-01** | 接口不返回版本，客户端无从判断冲突 | 迁移 000016 加 `version`；事件写路径改条件更新 + 版本自增并暴露 `version`；6 个写入口接受 `expected_version`，不符即 **409 `PM_STATE_CONFLICT`**；前端写操作回传版本并在 409 时提示 + 重载 |
-| 🟡 **PM-NOTIFY-01** | 通知链路必然失效（scope/endpoint 双错） | **契约 + 3 个节点已完成**：endpoint 改为 `/api/v1/notifications/events`、scope 改为 `CROSS_SYSTEM`、新增"被指派人"提醒（团队负责人 / 项目经理 / 工程师）并在 `applyEvent` 统一发出口；收件人超长过滤（平台会因单个非法收件人丢整条）。已落地节点：指派（团队负责人/项目经理/工程师）、**实施计划发布（计划人员清单）**。**待办**：实施准备发起、偏差上报、偏差评审完成、报告阶段推进、拆解确认完成、SLA 超期；以及 outbox 持久化（当前失败仅 Warn）。这些节点的收件人要么需要读服务项的被指派人、要么需要按角色解析，机制已在 `notifyAssigned` 一处，扩展点单一 |
-| ⬜ **PM-TASK-01** | 无定时扫描，超期/到期无主动提醒 | **未实施**：需要新增周期任务（仓库仅有 Temporal worker，无 cron/ticker）与"系统身份"概念（扫描不以某个登录用户身份运行）。SLA 计算本身已是纯函数（`computeSlaItems`）+ 一次仓储查询，调度器可直接复用；通知发出口已就绪 |
+| 🟡 **PM-NOTIFY-01** | 通知链路必然失效（scope/endpoint 双错） | **契约 + 3 个节点已完成**：endpoint 改为 `/api/v1/notifications/events`、scope 改为 `CROSS_SYSTEM`、新增"被指派人"提醒（团队负责人 / 项目经理 / 工程师）并在 `applyEvent` 统一发出口；收件人超长过滤（平台会因单个非法收件人丢整条）。已落地节点（7/8）：指派（团队负责人/项目经理/工程师）、实施计划发布（计划人员清单）、实施准备发起、偏差上报、报告阶段推进，以及 **SLA 超期/临近**（由 `ScanSlaNotifications` 主动提醒）。收件人不足时统一回退到服务项当前被指派人。**待办**：偏差评审完成 → 上报人（需要新增按 deviation_id 查上报人的仓储方法）、拆解确认完成（该时点尚无被指派人）；以及 outbox 持久化（当前投递失败仅 Warn，平台不可用时会丢通知） |
+| ✅ **PM-TASK-01** | 无定时扫描，超期/到期无主动提醒 | 新增 `Service.ScanSlaNotifications(ctx, tenantID, now)`：按租户边界扫描 SLA 超期/临近项并投递提醒（幂等键＝服务项+口径+UTC 日期，同日不重复打扰，超期用 HIGH 优先级）；新增 `cmd/sla-notifier` 周期任务（`SLA_SCAN_TENANTS` 显式限定租户、`SLA_SCAN_INTERVAL` 默认 15m），已接入镜像与 compose 并实测启动 |
 | ❌ **PM-EVT-01（已推翻）** | ~~交付事件无唯一键，重投会二次执行状态机~~ | **经核实不成立**：事件 ID 由本系统本地生成（每次投递都是新 ULID），加唯一键防不住重投；合同重投的真实防线是 `uk_pm_project_contract_version`，命中后返回 `ErrDuplicateContract` 并由同一事务回滚，不落重复事件、不二次执行状态机。**不实施无效果改动** |
 
 ### 9.2 判定为设计意图（不修，但需文档化）

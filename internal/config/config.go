@@ -53,7 +53,11 @@ type Config struct {
 	PlatformOwnerDirectoryScope    string
 
 	// Notification 集成：自动化规则命中后把站内信投递给基础平台的统一 outbox。
-	NotificationEnabled              bool
+	NotificationEnabled bool
+	// SLA 扫描：SLA 超期/临近的主动提醒需要周期任务；租户列表显式给出，
+	// 避免一条命令扫全库（系统侧任务不代替用户授权，必须限定范围）。
+	SlaScanTenants                   []string
+	SlaScanInterval                  time.Duration
 	PlatformNotificationURL          string
 	PlatformNotificationClientID     string
 	PlatformNotificationSecret       string
@@ -134,6 +138,13 @@ func Load() (Config, error) {
 	if c.NotificationEnabled, err = strconv.ParseBool(env("NOTIFICATION_ENABLED", "false")); err != nil {
 		return Config{}, fmt.Errorf("NOTIFICATION_ENABLED: %w", err)
 	}
+	if c.SlaScanInterval, err = time.ParseDuration(env("SLA_SCAN_INTERVAL", "15m")); err != nil {
+		return c, fmt.Errorf("SLA_SCAN_INTERVAL: %w", err)
+	}
+	if c.SlaScanInterval <= 0 {
+		return c, fmt.Errorf("SLA_SCAN_INTERVAL must be positive")
+	}
+	c.SlaScanTenants = splitList(os.Getenv("SLA_SCAN_TENANTS"))
 	if c.OwnerDirectoryEnabled, err = strconv.ParseBool(env("OWNER_DIRECTORY_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("OWNER_DIRECTORY_ENABLED: %w", err)
 	}
@@ -363,4 +374,23 @@ func encryptionKey(key string) ([]byte, error) {
 func placeholder(value string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(value))
 	return strings.Contains(upper, "PENDING") || strings.Contains(upper, "CHANGEME") || strings.Contains(upper, "EXAMPLE.COM")
+}
+
+// splitList 把逗号分隔的环境变量解析成去空、去重的列表。
+func splitList(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
