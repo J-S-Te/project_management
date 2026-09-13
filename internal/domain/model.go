@@ -27,6 +27,13 @@ type Project struct {
 	Due               string    `json:"due"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+
+	// Risk 是服务端派生的风险标记：派生状态为异常处理中/已终止，或存在已终止服务项。
+	// 由服务端统一计算，前端不得复刻该口径（此前前后端各写一遍，口径调整即不一致）。
+	Risk bool `json:"risk"`
+	// Version 是项目业务版本：读取方据此识别"我看到的是不是最新一版"，
+	// 写入方可带上期望版本做条件更新（不匹配即 409 冲突）。
+	Version uint64 `json:"version"`
 }
 
 type ServiceItem struct {
@@ -59,6 +66,10 @@ type ServiceItem struct {
 	ReportUpdatedBy    string              `json:"report_updated_by,omitempty"`
 	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
+
+	// Version 是服务项状态版本：每次状态变更自增。读取方据此识别自己拿到的是不是最新一版，
+	// 写入方可带上期望版本做条件更新（不匹配即 409 冲突），避免"后者静默覆盖前者"。
+	Version uint64 `json:"version"`
 }
 
 type Rule struct {
@@ -94,12 +105,15 @@ type Snapshot struct {
 }
 
 type Dashboard struct {
-	TenantID         string         `json:"tenant_id,omitempty"`
-	ProjectCount     int            `json:"project_count"`
-	InFlightProjects int            `json:"in_flight_projects"`
-	RiskProjects     int            `json:"risk_projects"`
-	ServiceItems     int            `json:"service_items"`
-	StatusCounts     map[string]int `json:"status_counts"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	ProjectCount     int    `json:"project_count"`
+	InFlightProjects int    `json:"in_flight_projects"`
+	RiskProjects     int    `json:"risk_projects"`
+	// UnknownStatusItems 是无法识别的服务项状态数量（数据异常）。
+	// 这类状态会被保守地按最滞后处理，因此必须显式暴露，避免项目状态静默变化而无人发现。
+	UnknownStatusItems int            `json:"unknown_status_items"`
+	ServiceItems       int            `json:"service_items"`
+	StatusCounts       map[string]int `json:"status_counts"`
 }
 
 // SlaOverdueItem 是超期/临近超期服务项的投影。Kind 区分两类口径：
@@ -119,6 +133,8 @@ type SlaOverdueItem struct {
 	DeadlineHours int    `json:"deadline_hours,omitempty"`
 	// UpdatedAt 供应用层按 SLA 规则计算停留时长，不对外输出。
 	UpdatedAt time.Time `json:"-"`
+	// StatusChangedAt 是服务项进入当前状态的时刻，是 SLA 停留时长的唯一基准。
+	StatusChangedAt time.Time `json:"-"`
 }
 
 // SLA 口径常量。

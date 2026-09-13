@@ -2,3 +2,7 @@
 /data/
 .env.local
 .ai
+
+# 环境文件的时间戳备份（含数据库口令等凭据），只保留在本地，不得提交。
+.env.local.bak-*
+.env*.bak-*

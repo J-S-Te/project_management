@@ -206,10 +206,11 @@ func TestResolvePreparationEquipmentRejectsOverlappingReservation(t *testing.T) 
 		}
 	}
 
-	// 首尾相接不算重叠：8-20 结束、下一段从 8-20 开始。
+	// 首尾相接算冲突：使用时段两端都含当日，他人占用到 8-20，则 8-20 当天已被占用。
+	// （此前按半开区间判定，把"结束日当天"让给了下一段，与录入人的理解不一致。）
 	if _, err := service.resolvePreparationEquipment(context.Background(), repo, "tenant-1", "SI-SELF",
-		[]domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", WindowStart: "2026-08-20", WindowEnd: "2026-08-22"}}, start, end); err != nil {
-		t.Fatalf("touching windows must not conflict: %v", err)
+		[]domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", WindowStart: "2026-08-20", WindowEnd: "2026-08-22"}}, start, end); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("touching windows must conflict because both include the end day, got %v", err)
 	}
 
 	// 全覆盖同样算重叠：留空使用时段即占用整个计划窗口。
@@ -574,9 +575,10 @@ func TestListSlaOverdueForwardsScopeFilterToRepository(t *testing.T) {
 }
 
 // 状态停留超期由 pm_sla 规则驱动：只有启用的规则、且状态匹配才产生条目。
+// 计时基准必须是「进入当前状态的时刻」StatusChangedAt，不能用行更新时间 UpdatedAt。
 func TestListSlaOverdueConsumesSlaRules(t *testing.T) {
 	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
-	candidate := domain.SlaOverdueItem{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施", UpdatedAt: time.Now().UTC().Add(-30 * time.Hour)}
+	candidate := domain.SlaOverdueItem{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施", StatusChangedAt: time.Now().UTC().Add(-30 * time.Hour)}
 	repo := &hookRepository{
 		overdue: []domain.SlaOverdueItem{candidate},
 		rules:   []domain.Rule{{Kind: "sla", Enabled: true, Name: "待实施超期", Status: "待实施", DeadlineHours: 24, RemindHours: 4}},
@@ -589,7 +591,27 @@ func TestListSlaOverdueConsumesSlaRules(t *testing.T) {
 	if len(items) != 1 || items[0].Kind != domain.SlaKindStatusOverdue || items[0].RuleName != "待实施超期" {
 		t.Fatalf("enabled sla rule must produce a status-deadline item: %+v", items)
 	}
+	// 计时基准缺失时不得判超期：零值时间会让 now.Sub 溢出成天文数字，
+	// 从而把刚进入状态的项误报为超期。这条断言防止该缺陷回归。
+	repo.overdue = []domain.SlaOverdueItem{{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施"}}
+	items, err = service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("missing status-change timestamp must not be judged overdue: %+v", items)
+	}
+	// 行更新时间不参与判定：只有 UpdatedAt 而没有 StatusChangedAt 时同样不应产生条目。
+	repo.overdue = []domain.SlaOverdueItem{{ID: "SI-2", ProjectID: "PJ-1", Status: "待实施", UpdatedAt: time.Now().UTC().Add(-30 * time.Hour)}}
+	items, err = service.ListSlaOverdue(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("ListSlaOverdue failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("row update time must not drive sla timing: %+v", items)
+	}
 	// 规则停用后不应再产生条目。
+	repo.overdue = []domain.SlaOverdueItem{candidate}
 	repo.rules[0].Enabled = false
 	items, err = service.ListSlaOverdue(context.Background(), principal)
 	if err != nil {
@@ -728,4 +750,160 @@ func (stub roleDirectoryStub) List(_ context.Context, query platform.OwnerDirect
 		}
 	}
 	return platform.OwnerDirectoryPage{Items: items, Page: 1, PageSize: len(items)}, nil
+}
+
+// 指派类事件必须给「被指派人」发站内提醒：提醒要发给需要行动的人，而不是操作者本人。
+// 此前项目系统的通知链路 endpoint 与 scope 双错，任何通知都发不出去，本用例锁定该行为。
+func TestAssignmentNotificationGoesToAssignees(t *testing.T) {
+	notifications := &notificationStub{}
+	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
+
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventTeamAssigned,
+		map[string]any{"team_lead_id": "u-lead"})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 1 {
+		t.Fatalf("team assignment must publish one notification, got %+v", notifications.published)
+	}
+	first := notifications.published[0]
+	if first.EventType != EventTeamAssigned || first.Scope != platform.NotificationScopeCrossSystem {
+		t.Fatalf("notification must carry event type and platform scope: %+v", first)
+	}
+	if len(first.Recipients) != 1 || first.Recipients[0] != "u-lead" {
+		t.Fatalf("recipient must be the assigned team lead: %+v", first.Recipients)
+	}
+	if first.IdempotencyKey == "" || first.ReferenceID != "SI-1" {
+		t.Fatalf("notification must be idempotent and reference the service item: %+v", first)
+	}
+
+	// 执行分配：项目经理与工程师都是被指派人。
+	notifications.published = nil
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned,
+		map[string]any{"project_manager_id": "u-pm", "engineer_ids": []string{"u-e1", " u-e2 ", ""}})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 1 {
+		t.Fatalf("execution assignment must publish one notification, got %+v", notifications.published)
+	}
+	recipients := notifications.published[0].Recipients
+	if len(recipients) != 3 || recipients[0] != "u-pm" || recipients[1] != "u-e1" || recipients[2] != "u-e2" {
+		t.Fatalf("recipients must be project manager plus engineers: %+v", recipients)
+	}
+}
+
+// 非指派事件不在此路径发提醒（其余业务节点另行按口径补齐），且未开通集成时静默跳过。
+func TestAssignmentNotificationStaysQuietOtherwise(t *testing.T) {
+	notifications := &notificationStub{}
+	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
+
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventFieldRecordSubmitted,
+		map[string]any{"raw_data": "{}"})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 0 {
+		t.Fatalf("non-assignment event must not publish here: %+v", notifications.published)
+	}
+
+	// 指派事件但缺收件人：不发空通知。
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventTeamAssigned,
+		map[string]any{"team_lead_id": "  "})); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 0 {
+		t.Fatalf("assignment without recipients must not publish: %+v", notifications.published)
+	}
+
+	// 未开通站内信集成：不得 panic，也不影响主事件。
+	withoutIntegration := &Service{Repo: &hookRepository{}}
+	if err := withoutIntegration.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventTeamAssigned,
+		map[string]any{"team_lead_id": "u-lead"})); err != nil {
+		t.Fatalf("applyEvent without notification integration failed: %v", err)
+	}
+}
+
+// 设备占用按「两端含当日」的闭区间判定，与资质有效期同一日期口径：
+// [10-01..10-05] 与 [10-05..10-10] 在 10-05 当天重叠，必须算冲突；
+// 占用记录时段数据异常时按占用处理，避免整段检查静默失效。
+func TestEquipmentUsageConflictsUsesInclusiveDayRange(t *testing.T) {
+	day := func(text string) time.Time {
+		parsed, err := time.Parse("2006-01-02", text)
+		if err != nil {
+			t.Fatalf("parse %s: %v", text, err)
+		}
+		return parsed
+	}
+	row := domain.PlanResource{ResourceID: "EQ-1", ResourceName: "频谱仪"}
+	reservation := func(start, end string) domain.EquipmentReservation {
+		return domain.EquipmentReservation{ResourceID: "EQ-1", ServiceItemID: "SI-OTHER", ProjectID: "PJ-OTHER", WindowStart: start, WindowEnd: end}
+	}
+
+	// 相邻一天重叠（半开区间会漏判的情况）。
+	if conflicts := equipmentUsageConflicts(row, day("2026-10-05"), day("2026-10-10"), []domain.EquipmentReservation{reservation("2026-10-01", "2026-10-05")}); len(conflicts) != 1 {
+		t.Fatalf("结束日当天的重叠必须判为冲突，实际 %+v", conflicts)
+	}
+	// 同一天完全重合。
+	if conflicts := equipmentUsageConflicts(row, day("2026-10-05"), day("2026-10-05"), []domain.EquipmentReservation{reservation("2026-10-05", "2026-10-05")}); len(conflicts) != 1 {
+		t.Fatalf("同一天必须判为冲突，实际 %+v", conflicts)
+	}
+	// 完全不重叠：中间隔一天。
+	if conflicts := equipmentUsageConflicts(row, day("2026-10-06"), day("2026-10-08"), []domain.EquipmentReservation{reservation("2026-10-01", "2026-10-05")}); len(conflicts) != 0 {
+		t.Fatalf("不重叠时段不应判为冲突，实际 %+v", conflicts)
+	}
+	// 占用记录数据异常：按占用处理并给出可修正的提示。
+	conflicts := equipmentUsageConflicts(row, day("2026-10-06"), day("2026-10-08"), []domain.EquipmentReservation{reservation("坏数据", "2026-10-05")})
+	if len(conflicts) != 1 || !strings.Contains(conflicts[0], "数据异常") {
+		t.Fatalf("异常占用记录必须按占用处理并说明原因，实际 %+v", conflicts)
+	}
+	// 其它设备不受影响。
+	other := domain.EquipmentReservation{ResourceID: "EQ-2", ServiceItemID: "SI-OTHER", WindowStart: "2026-10-01", WindowEnd: "2026-10-05"}
+	if conflicts := equipmentUsageConflicts(row, day("2026-10-01"), day("2026-10-05"), []domain.EquipmentReservation{other}); len(conflicts) != 0 {
+		t.Fatalf("不同设备不应互判冲突，实际 %+v", conflicts)
+	}
+}
+
+// 实施计划发布后必须提醒现场实施人员：收件人取自计划的人员清单（只取人员行，设备行不算人）。
+func TestImplementationPlanNotificationNotifiesPersonnel(t *testing.T) {
+	notifications := &notificationStub{}
+	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
+	payload := map[string]any{
+		"planned_start": "2026-10-01T09:00:00Z",
+		"personnel": []domain.PlanResource{
+			{ResourceType: "PERSON", ResourceID: "u-eng-1", ResourceName: "张三"},
+			{ResourceType: "PERSON", ResourceID: "u-eng-2", ResourceName: "李四"},
+			{ResourceType: "EQUIPMENT", ResourceID: "EQ-1", ResourceName: "频谱仪"},
+		},
+	}
+	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventImplementationPlanned, payload)); err != nil {
+		t.Fatalf("applyEvent failed: %v", err)
+	}
+	if len(notifications.published) != 1 {
+		t.Fatalf("implementation plan must publish one notification, got %+v", notifications.published)
+	}
+	event := notifications.published[0]
+	if event.EventType != EventImplementationPlanned {
+		t.Fatalf("notification event type = %q", event.EventType)
+	}
+	if len(event.Recipients) != 2 || event.Recipients[0] != "u-eng-1" || event.Recipients[1] != "u-eng-2" {
+		t.Fatalf("recipients must be the plan's people only: %+v", event.Recipients)
+	}
+}
+
+// 计划完成时间无法解析的服务项会被跳过，不能静默消失在 SLA 口径之外：
+// 跳过数量要返回给调用方用于告警。
+func TestComputeSlaItemsReportsUnparsablePlannedEnd(t *testing.T) {
+	now := time.Now().UTC()
+	candidates := []domain.SlaOverdueItem{
+		{ID: "SI-OK", ProjectID: "PJ-1", Status: "实施中", PlannedEnd: now.Add(-48 * time.Hour).Format(time.RFC3339), StatusChangedAt: now.Add(-time.Hour)},
+		{ID: "SI-BAD", ProjectID: "PJ-1", Status: "实施中", PlannedEnd: "不是时间"},
+	}
+	items, skipped := computeSlaItems(candidates, nil, now)
+	if skipped != 1 {
+		t.Fatalf("必须报告被跳过的服务项数量，实际 skipped=%d", skipped)
+	}
+	if len(items) != 1 || items[0].ID != "SI-OK" {
+		t.Fatalf("可解析的服务项仍应产出计划完成超期，实际 %+v", items)
+	}
 }
