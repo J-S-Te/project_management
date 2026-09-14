@@ -39,6 +39,10 @@ var e2eRolePermissions = map[string][]string{
 		"project.field.complete", "project.report.manage"},
 	"engineer":           {"project.read", "project.field.execute", "project.deviation.report"},
 	"technical_director": {"project.read", "project.resource.read", "project.deviation.review", "project.special_method.review", "project.report.archive"},
+	"quality_manager":    {"project.read", "project_rule.manage", "project.resource.read", "project.resource.manage", "project.report.manage", "project.report.archive"},
+	// admin 持有全部权限：规则配置里「字段级权限」走 project.field_permission.manage，
+	// 只有 admin/system_admin 同时具备，用它覆盖六种规则类型。
+	"admin": {"project.read", "project.create", "service_item.confirm", "project_rule.manage", "project.contract.import", "project.decomposition.manage", "project.resource.read", "project.resource.manage", "project.device.read", "project.device.manage", "project.team.assign", "project.execution.assign", "project.implementation.plan", "project.field.execute", "project.deviation.report", "project.deviation.review", "project.special_method.review", "project.field.complete", "project.report.manage", "project.report.archive", "project.field_permission.manage"},
 }
 
 // switchIdentity 按请求头 X-E2E-Role 返回对应角色的 Principal，用于在一个路由实例上
