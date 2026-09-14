@@ -1170,6 +1170,10 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrResourceConflict):
 		// 设备等资源的占用冲突必须把占用方与日期返给用户，否则无法调整时段。
 		writeError(c, http.StatusConflict, "PM_RESOURCE_CONFLICT", serviceMessage(err, "该资源在所选时段已被占用"))
+	case errors.Is(err, application.ErrDuplicateProject):
+		// 同一合同版本已有项目：这是业务可判断的重复操作，必须给出项目编号与替代动作，
+		// 不能让它以 MySQL 1062 的形式兜底成 500「服务暂不可用」。
+		writeError(c, http.StatusConflict, "PM_DUPLICATE_PROJECT", serviceMessage(err, "该合同版本已存在项目，不能重复创建"))
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):
