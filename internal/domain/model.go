@@ -65,6 +65,7 @@ type ServiceItem struct {
 	ReportStatus       string              `json:"report_status,omitempty"`
 	ReportUpdatedAt    string              `json:"report_updated_at,omitempty"`
 	ReportUpdatedBy    string              `json:"report_updated_by,omitempty"`
+	ReportRevision     uint64              `json:"report_revision"`
 	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
 

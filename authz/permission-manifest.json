@@ -1,6 +1,6 @@
 {
   "catalog_version": "5",
-  "claims_role_config_hash": "project-management-v2-compact-identity-online-authorization",
+  "claims_role_config_hash": "project-management-v3-reversible-assignment",
   "policy": {"max_effective_roles": 16},
   "permissions": [
     {"code":"project.read","name":"查看项目与执行数据","action":"read","resource_code":"project","resource_name":"项目","risk_level":"LOW"},
@@ -14,8 +14,13 @@
     ,{"code":"project.device.read","name":"查看设备基础信息与能力","action":"read","resource_code":"equipment","resource_name":"设备","risk_level":"LOW"}
     ,{"code":"project.device.manage","name":"维护设备、停用与检定信息","action":"manage","resource_code":"equipment","resource_name":"设备","risk_level":"HIGH"}
     ,{"code":"project.team.assign","name":"业务管理员分配团队负责人","action":"assign_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.team.revoke","name":"撤销团队负责人分配","action":"revoke_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.execution.assign","name":"团队负责人指派项目经理和实施工程师","action":"assign_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.execution.revoke","name":"撤销项目经理和实施工程师分配","action":"revoke_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.implementation.plan","name":"制定实施计划与准备事项","action":"plan","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"}
+    ,{"code":"project.implementation.revoke","name":"撤销实施计划与实施准备","action":"revoke_plan","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.rollback.request","name":"申请现场或报告阶段回退","action":"request_rollback","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.rollback.approve","name":"审批现场或报告阶段回退","action":"approve_rollback","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.field.execute","name":"签到并提交现场实施记录","action":"execute","resource_code":"field_record","resource_name":"现场记录","risk_level":"MEDIUM"}
     ,{"code":"project.deviation.report","name":"停止任务并上报偏离","action":"report","resource_code":"deviation","resource_name":"现场偏离","risk_level":"HIGH"}
     ,{"code":"project.deviation.review","name":"评审偏离并决定放行终止或重测","action":"review","resource_code":"deviation","resource_name":"现场偏离","risk_level":"HIGH"}
@@ -23,15 +28,17 @@
     ,{"code":"project.field.complete","name":"确认现场实施完成","action":"complete","resource_code":"project","resource_name":"项目","risk_level":"HIGH"}
     ,{"code":"project.report.manage","name":"编制审核签发项目报告","action":"manage","resource_code":"report","resource_name":"项目报告","risk_level":"MEDIUM"}
     ,{"code":"project.report.archive","name":"归档项目报告","action":"archive","resource_code":"report","resource_name":"项目报告","risk_level":"HIGH"}
+    ,{"code":"project.report.correction.request","name":"申请已签发报告更正","action":"request_correction","resource_code":"report","resource_name":"项目报告","risk_level":"HIGH"}
+    ,{"code":"project.report.correction.approve","name":"审批已签发报告更正","action":"approve_correction","resource_code":"report","resource_name":"项目报告","risk_level":"HIGH"}
     ,{"code":"project.field_permission.manage","name":"管理字段级脱敏策略","action":"manage","resource_code":"field_permission","resource_name":"字段级权限","risk_level":"HIGH"}
   ],
   "roles": [
-    {"code":"admin","name":"项目系统管理员","description":"详细授权来自 authorization-context；APPLICATION/ENVIRONMENT/TENANT 为全量，ORG/SELF/PROJECT 为行级范围。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
-    {"code":"system_admin","name":"平台系统管理员","description":"平台级系统管理员，拥有项目管理全量权限；详细授权来自 authorization-context。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.team.assign","project.execution.assign","project.implementation.plan","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
-    {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign"]},
-    {"code":"team_lead","name":"团队负责人","permissions":["project.read","project.resource.read","project.execution.assign","project.deviation.review"]},
-    {"code":"technical_director","name":"技术总监","permissions":["project.read","project.resource.read","project.deviation.review","project.special_method.review","project.report.archive"]},
-    {"code":"project_manager","name":"项目经理","permissions":["project.read","project.resource.read","project.implementation.plan","project.field.complete","project.report.manage"]},
+    {"code":"admin","name":"项目系统管理员","description":"详细授权来自 authorization-context；APPLICATION/ENVIRONMENT/TENANT 为全量，ORG/SELF/PROJECT 为行级范围。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.team.assign","project.team.revoke","project.execution.assign","project.execution.revoke","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.rollback.approve","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
+    {"code":"system_admin","name":"平台系统管理员","description":"平台级系统管理员，拥有项目管理全量权限；详细授权来自 authorization-context。","permissions":["project.read","project.create","service_item.confirm","project_rule.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.team.assign","project.team.revoke","project.execution.assign","project.execution.revoke","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.rollback.approve","project.field.execute","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.archive","project.field_permission.manage"]},
+    {"code":"business_admin","name":"业务管理员","permissions":["project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign","project.team.revoke"]},
+    {"code":"team_lead","name":"团队负责人","permissions":["project.read","project.resource.read","project.execution.assign","project.execution.revoke","project.rollback.request","project.deviation.review"]},
+    {"code":"technical_director","name":"技术总监","permissions":["project.read","project.resource.read","project.rollback.approve","project.report.correction.approve","project.deviation.review","project.special_method.review","project.report.archive"]},
+    {"code":"project_manager","name":"项目经理","permissions":["project.read","project.resource.read","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.report.correction.request","project.field.complete","project.report.manage"]},
     {"code":"engineer","name":"实施工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
     {"code":"penetration_engineer","name":"渗透测试工程师","permissions":["project.read","project.field.execute","project.deviation.report"]},
     {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage","project.resource.read","project.resource.manage","project.report.manage","project.report.archive"]},

@@ -94,6 +94,44 @@ type TeamAssignmentInput struct {
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
+// AssignmentRevokeInput 用于待分配阶段的受控撤销。原因不是可选备注：撤销会改变
+// 已通知的责任链，必须在交付事件中留下可审计的业务依据。
+type AssignmentRevokeInput struct {
+	Reason          string `json:"reason"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+
+// PhaseRevokeInput 用于尚未进入现场的计划/准备补偿；原因与版本保证撤销可审计且不覆盖新状态。
+type PhaseRevokeInput struct {
+	Reason          string `json:"reason"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+
+// RollbackRequestInput/DecisionInput 用于现场与报告阶段的双人复核补偿。现场证据和报告事件
+// 永不删除；批准只把服务项重新打开，并把请求及审批分别写成不可变事件。
+type RollbackRequestInput struct {
+	Kind            string `json:"kind"`
+	Reason          string `json:"reason"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+type RollbackDecisionInput struct {
+	Decision        string `json:"decision"`
+	Comment         string `json:"comment"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+type RollbackWithdrawInput struct {
+	Reason string `json:"reason"`
+}
+type ReportCorrectionRequestInput struct {
+	Reason          string `json:"reason"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+type ReportCorrectionDecisionInput struct {
+	Decision        string `json:"decision"`
+	Comment         string `json:"comment"`
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+
 // ExecutionAssignmentInput 是团队负责人指派项目经理与实施工程师的输入。
 // 设备清单已在「实施准备」阶段登记，不再随指派提交。
 type ExecutionAssignmentInput struct {

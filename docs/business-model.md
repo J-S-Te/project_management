@@ -57,6 +57,12 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | `TEAM_ASSIGNED` | status = 待分配 | 不变（待分配） | 写入 `team_lead_id` |
 | `EXECUTION_TEAM_ASSIGNED` | status = 待分配 **且 `team_lead_id` 非空** | 不变（待分配） | 写入项目经理、工程师、所需能力码、能力校验结论 |
+| `TEAM_ASSIGNMENT_REVOKED` | status = 待分配 **且 `team_lead_id` 非空**；必须填写撤销原因 | 不变（待分配） | 清空团队负责人、执行团队、能力校验及尚未使用的设备选择；事件保留原责任链 |
+| `EXECUTION_ASSIGNMENT_REVOKED` | status = 待分配 **且团队负责人、项目经理均非空**；必须填写撤销原因 | 不变（待分配） | 清空项目经理、工程师、能力校验及尚未使用的设备选择；保留团队负责人 |
+| `IMPLEMENTATION_PLAN_REVOKED` | status = 待实施；必须填写撤销原因 | **待分配** | 清空当前有效计划快照；保留责任分配、能力结论和全部历史事件 |
+| `PREPARATION_REVOKED` | status = 实施准备中；必须填写撤销原因 | **待实施** | 清空当前设备清单并释放设备预约；计划及设备历史留在事件流 |
+| `ROLLBACK_REQUESTED` | 现场实施中可申请回到实施准备；报告编制中/已审核可申请返工 | 不变 | 仅创建不可变申请事件，不删除证据 |
+| `ROLLBACK_APPROVED` | 申请存在且未被审批；技术总监或系统管理员批准 | 现场→**实施准备中**；报告→**实施中** | 现场/报告原始事件保留；报告返工仅允许未签发、未归档阶段 |
 | `IMPLEMENTATION_PLANNED` | status = 待分配；`project_manager_id` 非空；`conflict_status = PASSED`；若是特殊方法则 `tech_review_status = APPROVED`；渗透测试须填专项计划 | **待实施** | 写入计划起止、实施计划、人员清单 |
 | `PREPARATION_STARTED` | status = 待实施 | **实施准备中** | 写入设备清单（含使用时段） |
 | `FIELD_RECORD_SUBMITTED` | status ∈ {待实施, 实施准备中, 实施中} | **实施中** | 现场记录 |
@@ -78,6 +84,8 @@ stateDiagram-v2
 ## 3. 项目状态派生规则
 
 `项目状态 = f(全部服务项状态, 服务项报告状态, supplement_status, 已存储状态)`
+
+项目访问权限只决定某个角色能否查看项目；项目一旦可见，状态、进度和风险均必须从该项目**全部**服务项派生，不能按当前角色可见的服务项子集计算。
 
 **判定优先级（自上而下）**【事实】：
 
@@ -131,6 +139,11 @@ stateDiagram-v2
 | 确认拆解 | `service_item.confirm` | 业务管理员（**项目经理不持有**） |
 | 分配团队负责人 | `project.team.assign` | 业务管理员 |
 | 分配项目经理与工程师 | `project.execution.assign` | 团队负责人 |
+| 撤销团队负责人分配（同时撤销下游执行团队） | `project.team.revoke` | 业务管理员（系统管理员可代办） |
+| 撤销执行团队分配 | `project.execution.revoke` | 团队负责人（系统管理员可代办） |
+| 撤销实施计划、实施准备 | `project.implementation.revoke` | 项目经理（系统管理员可代办） |
+| 申请现场/报告回退 | `project.rollback.request` | 项目经理、团队负责人（系统管理员可代办） |
+| 审批现场/报告回退 | `project.rollback.approve` | 技术总监、系统管理员 |
 | 发布实施计划 / 发起实施准备 | `project.implementation.plan` | 项目经理 |
 | 提交现场记录 | `project.field.execute` | 工程师、渗透测试工程师 |
 | 上报偏离 | `project.deviation.report` | 工程师、渗透测试工程师 |

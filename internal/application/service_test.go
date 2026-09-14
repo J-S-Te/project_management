@@ -212,7 +212,7 @@ func TestListPersonnelRequiresDirectoryReadPermissionAndConfiguredDirectory(t *t
 	if _, err := service.ListPersonnel(context.Background(), principalWith("project.create"), "", "", nil, nil, 0, 0); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("ListPersonnel() without directory read permission error = %v, want %v", err, ErrForbidden)
 	}
-	for _, permission := range []string{"project.read", "project.team.assign", "project.execution.assign"} {
+	for _, permission := range []string{"project.read", "project.team.assign", "project.execution.assign", "project.resource.manage"} {
 		if _, err := service.ListPersonnel(context.Background(), principalWith(permission), "", "", nil, nil, 0, 0); !errors.Is(err, ErrPersonnelUnavailable) {
 			t.Fatalf("ListPersonnel() with %s and no directory error = %v, want %v", permission, err, ErrPersonnelUnavailable)
 		}
@@ -364,6 +364,15 @@ func (r *capabilityRepository) FindProjectForDeviation(context.Context, platform
 func (r *capabilityRepository) UpsertCapability(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
 	r.saved = append(r.saved, item)
 	return item, nil
+}
+func (r *capabilityRepository) DeleteEquipment(_ context.Context, _ string, resourceID string) error {
+	for index, item := range r.capabilities {
+		if item.ResourceType == "EQUIPMENT" && item.ResourceID == resourceID {
+			r.capabilities = append(r.capabilities[:index], r.capabilities[index+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 func (r *capabilityRepository) ListCapabilities(_ context.Context, _ string, typ string) ([]domain.Capability, error) {
 	// 与真实仓储一致地按资源类型过滤：人员资质复核只应看到 PERSON 档案。

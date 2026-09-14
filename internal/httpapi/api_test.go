@@ -96,6 +96,15 @@ func (r *repo) UpsertCapability(_ context.Context, item domain.Capability, _ str
 	r.capabilities = append(r.capabilities, item)
 	return item, nil
 }
+func (r *repo) DeleteEquipment(_ context.Context, _ string, resourceID string) error {
+	for index, item := range r.capabilities {
+		if item.ResourceType == "EQUIPMENT" && item.ResourceID == resourceID {
+			r.capabilities = append(r.capabilities[:index], r.capabilities[index+1:]...)
+			return nil
+		}
+	}
+	return application.ErrNotFound
+}
 func (r *repo) UpdateCapabilityIdentities(context.Context, string, map[string]string, time.Time) error {
 	return nil
 }
@@ -182,11 +191,39 @@ func (a *audit) Report(_ context.Context, e platform.AuditEvent) error {
 
 func router(t *testing.T, permissions map[string]bool, reporter platform.AuditReporter) http.Handler {
 	t.Helper()
-	repository := &repo{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}}}
+	return routerWithItems(t, permissions, reporter, []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}})
+}
+
+func routerWithItems(t *testing.T, permissions map[string]bool, reporter platform.AuditReporter, items []domain.ServiceItem) http.Handler {
+	t.Helper()
+	repository := &repo{items: items}
 	service := &application.Service{Repo: repository}
 	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
 	return httpapi.NewRouter(service, id, reporter, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
+
+func TestAssignmentRevocationRequiresPermissionAndReason(t *testing.T) {
+	items := []domain.ServiceItem{{ID: "SI-1", Status: "待分配", TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
+	denied := perform(routerWithItems(t, map[string]bool{}, nil, items), http.MethodPost, "/api/v1/service-items/SI-1/team-assignment/revoke", `{"reason":"调整负责人"}`)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("missing revoke permission status=%d body=%s", denied.Code, denied.Body.String())
+	}
+
+	handler := routerWithItems(t, map[string]bool{"project.team.revoke": true, "project.execution.revoke": true}, nil, items)
+	missingReason := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/team-assignment/revoke", `{}`)
+	if missingReason.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing reason status=%d body=%s", missingReason.Code, missingReason.Body.String())
+	}
+	team := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/team-assignment/revoke", `{"reason":"负责人分配有误","expected_version":0}`)
+	if team.Code != http.StatusOK {
+		t.Fatalf("team revoke status=%d body=%s", team.Code, team.Body.String())
+	}
+	execution := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/execution-assignment/revoke", `{"reason":"执行团队需重排"}`)
+	if execution.Code != http.StatusOK {
+		t.Fatalf("execution revoke status=%d body=%s", execution.Code, execution.Body.String())
+	}
+}
+
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -808,6 +845,13 @@ func TestDirectoryReadsAreAvailableToProjectReaders(t *testing.T) {
 	}
 }
 
+func TestDeleteEquipmentRequiresDeviceManagePermission(t *testing.T) {
+	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodDelete, "/api/v1/equipment/EQ-001", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing device manage permission status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPermissionWithoutDataScopeIsForbidden(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}
@@ -958,10 +1002,6 @@ func TestImplementationPlanValidationNamesTheInvalidField(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-16T02:00:00Z","site_plan":"   "}`)
-	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "请填写现场计划") {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
 }
 
 // 人员姓名批量解析：目录未开通时明确返回 503，而不是让界面显示一串 ULID。
@@ -1069,7 +1109,7 @@ func TestImplementationPlanCarriesResolvedPersonnel(t *testing.T) {
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	body := `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-20T02:00:00Z","site_plan":"现场实施步骤","personnel":[{"resource_type":"PERSON","resource_id":"P-001"}]}`
+	body := `{"planned_start":"2026-09-15T02:00:00Z","planned_end":"2026-09-20T02:00:00Z","personnel":[{"resource_type":"PERSON","resource_id":"P-001"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/implementation-plan", body)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())

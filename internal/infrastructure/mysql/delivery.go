@@ -34,7 +34,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 		return domain.Project{}, err
 	}
 	project := projectFromRecord(record)
-	inputs, err := r.projectStatusInputs(ctx, filter, []string{record.ID})
+	inputs, err := r.projectStatusInputs(ctx, filter.TenantID, []string{record.ID})
 	if err != nil {
 		return domain.Project{}, err
 	}
@@ -143,6 +143,11 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 }
 
 func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	// 先前置读取、再事务行锁之间可能已有其他命令完成。撤销命令把客户端看到的版本
+	// 带入事件，在锁内二次比较，避免后到的撤销覆盖最新责任链。
+	if expected := expectedVersionValue(event.Payload); expected != 0 && item.Version != expected {
+		return application.ErrConflict
+	}
 	updates := map[string]any{"updated_at": event.CreatedAt, "updated_by": event.ActorUserID}
 	switch event.Type {
 	case application.EventTeamAssigned:
@@ -150,6 +155,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 		updates["team_lead_id"] = stringValue(event.Payload, "team_lead_id")
+	case application.EventTeamAssignmentRevoked:
+		if item.Status != "待分配" || item.TeamLeadID == "" {
+			return application.ErrValidation
+		}
+		updates["team_lead_id"] = ""
+		updates["project_manager_id"] = ""
+		updates["engineer_ids"] = jsonValue([]string{})
+		updates["equipment_ids"] = jsonValue([]string{})
+		updates["required_codes"] = jsonValue([]string{})
+		updates["conflict_status"] = "UNCHECKED"
 	case application.EventExecutionTeamAssigned:
 		if item.Status != "待分配" {
 			return application.ErrValidation
@@ -162,6 +177,15 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["equipment_ids"] = jsonValue(event.Payload["equipment_ids"])
 		updates["required_codes"] = jsonValue(event.Payload["required_codes"])
 		updates["conflict_status"] = stringValue(event.Payload, "conflict_status")
+	case application.EventExecutionAssignmentRevoked:
+		if item.Status != "待分配" || item.TeamLeadID == "" || item.ProjectManagerID == "" {
+			return application.ErrValidation
+		}
+		updates["project_manager_id"] = ""
+		updates["engineer_ids"] = jsonValue([]string{})
+		updates["equipment_ids"] = jsonValue([]string{})
+		updates["required_codes"] = jsonValue([]string{})
+		updates["conflict_status"] = "UNCHECKED"
 	case application.EventImplementationPlanned:
 		// 与 PlanImplementation 共用同一套前置规则：行锁内复查可覆盖读后状态变化的竞态，
 		// 并且仍然返回可执行的原因而不是笼统的参数错误。
@@ -180,6 +204,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if err := upsertImplPlan(tx, item, event); err != nil {
 			return err
 		}
+	case application.EventImplementationPlanRevoked:
+		if item.Status != "待实施" {
+			return application.ErrValidation
+		}
+		if err := clearImplPlan(tx, item, event, true); err != nil {
+			return err
+		}
+		updates["planned_start"] = nil
+		updates["planned_end"] = nil
+		updates["status"] = "待分配"
 	case application.EventSpecialMethodReviewed:
 		if item.Special != "是" {
 			return application.ErrValidation
@@ -228,6 +262,50 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 		updates["status"] = "实施准备中"
+	case application.EventPreparationRevoked:
+		if item.Status != "实施准备中" {
+			return application.ErrValidation
+		}
+		if err := clearImplPlan(tx, item, event, false); err != nil {
+			return err
+		}
+		updates["status"] = "待实施"
+	case application.EventRollbackApproved:
+		if err := validateRollbackApproval(tx, item, event); err != nil {
+			return err
+		}
+		switch stringValue(event.Payload, "kind") {
+		case "FIELD_TO_PREPARATION":
+			if item.Status != "实施中" {
+				return application.ErrValidation
+			}
+			updates["status"] = "实施准备中"
+		case "REPORT_TO_FIELD":
+			if item.Status != "现场实施完成" || (item.ReportStatus != "COMPILING" && item.ReportStatus != "REVIEWED") {
+				return application.ErrValidation
+			}
+			updates["status"] = "实施中"
+			updates["report_status"] = "NONE"
+			updates["report_updated_at"] = event.CreatedAt
+			updates["report_updated_by"] = event.ActorUserID
+		default:
+			return application.ErrValidation
+		}
+	case application.EventRollbackWithdrawn:
+		if err := validateRollbackWithdrawal(tx, item, event); err != nil {
+			return err
+		}
+	case application.EventReportCorrectionApproved:
+		if err := validateReportCorrectionApproval(tx, item, event); err != nil {
+			return err
+		}
+		if item.Status != "现场实施完成" || (item.ReportStatus != "ISSUED" && item.ReportStatus != "ARCHIVED") {
+			return application.ErrValidation
+		}
+		updates["report_status"] = "COMPILING"
+		updates["report_revision"] = item.ReportRevision + 1
+		updates["report_updated_at"] = event.CreatedAt
+		updates["report_updated_by"] = event.ActorUserID
 	case application.EventFieldRecordSubmitted:
 		// 现场记录（原始数据 / 环境条件）是进入"实施中"的真实动作。
 		// 原先由坐标签到承担这个状态推进，但那份坐标没有任何证明力，已删除；
@@ -295,7 +373,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 func isAuditOnlyEvent(eventType string) bool {
 	switch eventType {
 	case application.EventContractActivated, application.EventContractStampStatus,
-		application.EventWarningTriggered, application.EventAutomationTriggered:
+		application.EventWarningTriggered, application.EventAutomationTriggered,
+		application.EventRollbackRequested, application.EventRollbackRejected,
+		application.EventReportCorrectionRequested, application.EventReportCorrectionRejected:
 		return true
 	}
 	return false
@@ -503,6 +583,22 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "user_id", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
 	return item, err
 }
+
+// DeleteEquipment 物理删除设备主数据。业务历史使用的是实施计划和交付事件中的设备快照，
+// 因而不会随着目录记录删除而丢失；活动占用的保护由应用层在同一租户边界内先行校验。
+func (r *Repository) DeleteEquipment(ctx context.Context, tenantID, resourceID string) error {
+	result := r.db.WithContext(ctx).
+		Where("tenant_id = ? AND resource_type = ? AND resource_id = ?", tenantID, "EQUIPMENT", strings.TrimSpace(resourceID)).
+		Delete(&capabilityRecord{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return application.ErrNotFound
+	}
+	return nil
+}
+
 func (r *Repository) ListCapabilities(ctx context.Context, tenant, typ string) ([]domain.Capability, error) {
 	q := r.db.WithContext(ctx).Where("tenant_id=?", tenant)
 	if typ != "" {
@@ -629,6 +725,99 @@ func updateImplPlanEquipment(tx *gorm.DB, item *serviceItemRecord, event domain.
 		Updates(map[string]any{"equipment": equipment, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error
 }
 
+// clearImplPlan 只清除当前有效计划行，完整旧计划/设备快照仍保留在产生它的交付事件中。
+// 计划撤销清空人员与合规要素；准备撤销仅释放设备预约，允许在同一计划上重新准备。
+func clearImplPlan(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent, clearPlan bool) error {
+	updates := map[string]any{"equipment": nil, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}
+	if clearPlan {
+		updates["planned_start"] = nil
+		updates["planned_end"] = nil
+		updates["site_plan"] = ""
+		updates["penetration_test_plan"] = ""
+		updates["auth_doc_no"] = ""
+		updates["auth_start"] = nil
+		updates["auth_end"] = nil
+		updates["auth_scope"] = ""
+		updates["test_scope"] = ""
+		updates["test_window"] = ""
+		updates["emergency_contact"] = ""
+		updates["rollback_plan"] = ""
+		updates["personnel"] = nil
+	}
+	return tx.Model(&implPlanRecord{}).Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).Updates(updates).Error
+}
+
+// validateRollbackApproval 在服务项行锁保护下确认请求存在、属于当前项且从未被批准，防止双击
+// 或两个审批人并发把同一补偿申请重复执行。
+func validateRollbackApproval(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	requestID := stringValue(event.Payload, "request_id")
+	if requestID == "" {
+		return application.ErrValidation
+	}
+	var request deliveryEventRecord
+	if err := tx.Where("tenant_id=? AND id=? AND service_item_id=? AND event_type=?", item.TenantID, requestID, item.ID, application.EventRollbackRequested).First(&request).Error; err != nil {
+		return mapNotFound(err)
+	}
+	if request.ActorUserID == event.ActorUserID {
+		return application.ErrForbidden
+	}
+	if stringValue(event.Payload, "kind") == "" {
+		return application.ErrValidation
+	}
+	var count int64
+	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventRollbackApproved, application.EventRollbackRejected, application.EventRollbackWithdrawn}, requestID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+func validateRollbackWithdrawal(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	requestID := stringValue(event.Payload, "request_id")
+	if requestID == "" {
+		return application.ErrValidation
+	}
+	var request deliveryEventRecord
+	if err := tx.Where("tenant_id=? AND id=? AND service_item_id=? AND event_type=?", item.TenantID, requestID, item.ID, application.EventRollbackRequested).First(&request).Error; err != nil {
+		return mapNotFound(err)
+	}
+	if request.ActorUserID != event.ActorUserID {
+		return application.ErrForbidden
+	}
+	var count int64
+	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventRollbackApproved, application.EventRollbackRejected, application.EventRollbackWithdrawn}, requestID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+func validateReportCorrectionApproval(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	requestID := stringValue(event.Payload, "request_id")
+	if requestID == "" {
+		return application.ErrValidation
+	}
+	var request deliveryEventRecord
+	if err := tx.Where("tenant_id=? AND id=? AND service_item_id=? AND event_type=?", item.TenantID, requestID, item.ID, application.EventReportCorrectionRequested).First(&request).Error; err != nil {
+		return mapNotFound(err)
+	}
+	if request.ActorUserID == event.ActorUserID {
+		return application.ErrForbidden
+	}
+	var count int64
+	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventReportCorrectionApproved, application.EventReportCorrectionRejected}, requestID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
 // jsonBytes 把事件载荷里的嵌套结构重新编码成可直接写入 JSON 列的字节；
 // 键不存在或值为空时返回 nil，让列保持 NULL。
 func jsonBytes(values map[string]any, key string) []byte {
@@ -674,6 +863,27 @@ func jsonValue(v any) []byte { b, _ := json.Marshal(v); return b }
 func stringValue(values map[string]any, key string) string {
 	v, _ := values[key].(string)
 	return strings.TrimSpace(v)
+}
+func expectedVersionValue(values map[string]any) uint64 {
+	switch value := values["expected_version"].(type) {
+	case uint64:
+		return value
+	case uint:
+		return uint64(value)
+	case int:
+		if value > 0 {
+			return uint64(value)
+		}
+	case int64:
+		if value > 0 {
+			return uint64(value)
+		}
+	case float64:
+		if value > 0 && value == float64(uint64(value)) {
+			return uint64(value)
+		}
+	}
+	return 0
 }
 func rfc3339Value(values map[string]any, key string) any {
 	value := stringValue(values, key)
