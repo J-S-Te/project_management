@@ -99,6 +99,7 @@ func (s *Service) SaveDetectionCategory(ctx context.Context, p platform.Principa
 		Category:               strings.TrimSpace(input.Category),
 		SystemStandard:         strings.TrimSpace(input.SystemStandard),
 		RequiredQualifications: strings.TrimSpace(input.RequiredQualifications),
+		RequiredCodes:          strings.Join(domain.SplitCapabilityCodes(input.RequiredCodes), ","),
 		SpecialMethod:          strings.ToUpper(strings.TrimSpace(input.SpecialMethod)),
 		Enabled:                input.Enabled,
 	}
@@ -197,6 +198,8 @@ type SplitOutcome struct {
 	MissingRule bool
 	// RequiredQualifications 是检测类别域给出的必备资质（默认），供页面与分配环节提示。
 	RequiredQualifications string
+	// RequiredCodes 是检测类别域给出的必检能力码（默认），随服务项落库供分配校验。
+	RequiredCodes []string
 }
 
 // resolveSplitPlan 解析一次合同拆解生效的分组与状态方案：
@@ -306,6 +309,7 @@ func resolveSplitOutcome(plan SplitPlan, category string, sourceMode, sourceSyst
 	return SplitOutcome{
 		Status: plan.DefaultStatus, TestMode: mode, Special: yesNo(mode == "PENETRATION"),
 		SystemStandard: systemStandard, RequiredQualifications: entry.RequiredQualifications,
+		RequiredCodes: domain.SplitCapabilityCodes(entry.RequiredCodes),
 	}
 }
 
@@ -463,4 +467,51 @@ func payloadStringSlice(value any) []string {
 	default:
 		return nil
 	}
+}
+
+// DetectionCategoryImportResult 是检测类别域导入的结果摘要。
+type DetectionCategoryImportResult struct {
+	Imported int      `json:"imported"`
+	Skipped  int      `json:"skipped"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+// ImportDetectionCategories 批量导入检测类别域（CSV 导入的后端入口）。
+// 逐行校验：类别为空、特殊方法取值非法、必检能力码过长等行会被跳过并返回行号原因，
+// 其余行按「租户 + 类别」幂等写入，不会因为一行错误整批失败。
+func (s *Service) ImportDetectionCategories(ctx context.Context, p platform.Principal, rows []domain.DetectionCategory) (DetectionCategoryImportResult, error) {
+	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
+		return DetectionCategoryImportResult{}, err
+	}
+	repo, err := s.splitConfigRepo()
+	if err != nil {
+		return DetectionCategoryImportResult{}, err
+	}
+	result := DetectionCategoryImportResult{}
+	for index, row := range rows {
+		line := fmt.Sprintf("数据行 %d", index+1)
+		normalized := domain.DetectionCategory{
+			Category:               strings.TrimSpace(row.Category),
+			SystemStandard:         strings.TrimSpace(row.SystemStandard),
+			RequiredQualifications: strings.TrimSpace(row.RequiredQualifications),
+			RequiredCodes:          strings.Join(domain.SplitCapabilityCodes(row.RequiredCodes), ","),
+			SpecialMethod:          strings.ToUpper(strings.TrimSpace(row.SpecialMethod)),
+			Enabled:                row.Enabled,
+		}
+		if normalized.SpecialMethod == "" {
+			normalized.SpecialMethod = domain.SpecialMethodNo
+		}
+		if err := domain.ValidateDetectionCategory(normalized); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": "+err.Error())
+			continue
+		}
+		if _, err := repo.SaveDetectionCategory(ctx, p.TenantID, normalized, p.UserID); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": "+err.Error())
+			continue
+		}
+		result.Imported++
+	}
+	return result, nil
 }

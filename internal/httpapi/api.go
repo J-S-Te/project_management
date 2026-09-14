@@ -144,6 +144,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.PUT("/split-policy", require("project_rule.manage"), h.saveSplitPolicy)
 	api.GET("/detection-categories", require("project.read"), h.listDetectionCategories)
 	api.POST("/detection-categories", require("project_rule.manage"), h.saveDetectionCategory)
+	api.POST("/detection-categories/import", require("project_rule.manage"), h.importDetectionCategories)
 	api.DELETE("/detection-categories/:category", require("project_rule.manage"), h.deleteDetectionCategory)
 	api.GET("/split-overrides", require("project.read"), h.listSplitOverrides)
 	api.POST("/split-overrides", require("project_rule.manage"), h.saveSplitOverride)
@@ -1040,6 +1041,22 @@ func (h *Handler) saveDetectionCategory(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+
+// importDetectionCategories 批量导入检测类别域（页面的「导入」入口）。
+func (h *Handler) importDetectionCategories(c *gin.Context) {
+	var input struct {
+		Items []domain.DetectionCategory `json:"items"`
+	}
+	if !decode(c, &input) {
+		return
+	}
+	result, err := h.service.ImportDetectionCategories(c.Request.Context(), principal(c), input.Items)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
 }
 
 func (h *Handler) deleteDetectionCategory(c *gin.Context) {

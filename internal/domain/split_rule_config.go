@@ -152,6 +152,21 @@ func ValidateSplitPolicy(policy SplitPolicy) error {
 	return nil
 }
 
+// SplitCapabilityCodes 把逗号分隔的必检能力码解析成去重列表（兼容中英文逗号）。
+func SplitCapabilityCodes(value string) []string {
+	codes := make([]string, 0, 4)
+	seen := map[string]bool{}
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '，' || r == ';' || r == '；' }) {
+		code := strings.TrimSpace(part)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		codes = append(codes, code)
+	}
+	return codes
+}
+
 // DetectionCategory 是检测类别（服务类型）域的一项。
 type DetectionCategory struct {
 	TenantID string `json:"-"`
@@ -159,8 +174,11 @@ type DetectionCategory struct {
 	Category string `json:"category"`
 	// SystemStandard 是默认体系要求（等保 2.0 / ISO 9001 / ISO 27001 …）。
 	SystemStandard string `json:"system_standard"`
-	// RequiredQualifications 是必备资质（默认），自由文本。
+	// RequiredQualifications 是必备资质（默认），自由文本，供展示与分配提示。
 	RequiredQualifications string `json:"required_qualifications"`
+	// RequiredCodes 是必检能力码（默认），逗号分隔；填写后拆解出来的服务项会带上它，
+	// 分配工程师时按此做能力校验。留空表示不额外校验（渗透测试仍自动加 PENETRATION_TEST）。
+	RequiredCodes string `json:"required_codes"`
 	// SpecialMethod 取 SpecialMethodNo / SpecialMethodMarkable / SpecialMethodRequired。
 	SpecialMethod string `json:"special_method"`
 	Enabled       bool   `json:"enabled"`
@@ -181,6 +199,11 @@ func ValidateDetectionCategory(item DetectionCategory) error {
 	case SpecialMethodNo, SpecialMethodMarkable, SpecialMethodRequired:
 	default:
 		return fmt.Errorf("是否特殊方法取值不合法：%s", item.SpecialMethod)
+	}
+	for _, code := range SplitCapabilityCodes(item.RequiredCodes) {
+		if len([]rune(code)) > 64 {
+			return fmt.Errorf("必检能力码过长：%s", code)
+		}
 	}
 	return nil
 }

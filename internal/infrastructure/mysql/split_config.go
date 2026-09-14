@@ -42,6 +42,7 @@ type detectionCategoryRecord struct {
 	Category               string
 	SystemStandard         string
 	RequiredQualifications string
+	RequiredCodes          string
 	SpecialMethod          string
 	Enabled                bool
 	CreatedAt              time.Time
@@ -82,6 +83,7 @@ func detectionCategoryFromRecord(record detectionCategoryRecord) domain.Detectio
 	return domain.DetectionCategory{
 		TenantID: record.TenantID, ID: record.ID, Category: record.Category,
 		SystemStandard: record.SystemStandard, RequiredQualifications: record.RequiredQualifications,
+		RequiredCodes: record.RequiredCodes,
 		SpecialMethod: record.SpecialMethod, Enabled: record.Enabled,
 		Updated: record.UpdatedAt.Format("2006-01-02 15:04"),
 	}
@@ -177,8 +179,9 @@ func (r *Repository) seedDetectionCategories(ctx context.Context, tenant string)
 	for _, item := range domain.DefaultDetectionCategories() {
 		records = append(records, detectionCategoryRecord{
 			TenantID: tenant, Category: item.Category, SystemStandard: item.SystemStandard,
-			RequiredQualifications: item.RequiredQualifications, SpecialMethod: item.SpecialMethod,
-			Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: "system-seed",
+			RequiredQualifications: item.RequiredQualifications, RequiredCodes: item.RequiredCodes,
+			SpecialMethod: item.SpecialMethod,
+			Enabled:       item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: "system-seed",
 		})
 	}
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&records).Error; err != nil {
@@ -215,13 +218,15 @@ func (r *Repository) SaveDetectionCategory(ctx context.Context, tenant string, i
 	now := time.Now().UTC()
 	record := detectionCategoryRecord{
 		TenantID: tenant, Category: item.Category, SystemStandard: item.SystemStandard,
-		RequiredQualifications: item.RequiredQualifications, SpecialMethod: item.SpecialMethod,
-		Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: actor,
+		RequiredQualifications: item.RequiredQualifications, RequiredCodes: item.RequiredCodes,
+		SpecialMethod: item.SpecialMethod,
+		Enabled:       item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: actor,
 	}
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "category"}},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"system_standard", "required_qualifications", "special_method", "enabled", "updated_at", "updated_by",
+			"system_standard", "required_qualifications", "required_codes", "special_method", "enabled",
+			"updated_at", "updated_by",
 		}),
 	}).Create(&record).Error; err != nil {
 		return domain.DetectionCategory{}, err

@@ -158,4 +158,13 @@ func TestSplitRuleConfigMigration(t *testing.T) {
 	if !strings.Contains(string(tertiary), "dimension_tertiary VARCHAR(32) NOT NULL DEFAULT ''") {
 		t.Fatal("tertiary dimension migration is missing")
 	}
+	// 必检能力码：检测类别域的「必备资质」是资质名称，能力校验比对的是能力码，
+	// 两者不是同一套编码，因此单独给出能力码列（默认留空，避免凭空造码导致分配一律冲突）。
+	codes, err := Files.ReadFile("000019_detection_category_required_codes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codes), "required_codes VARCHAR(255) NOT NULL DEFAULT ''") {
+		t.Fatal("required codes migration is missing")
+	}
 }

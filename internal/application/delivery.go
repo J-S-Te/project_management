@@ -219,7 +219,8 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if outcome.Special == "是" && outcome.Status == domain.ServiceItemStatusPendingAssign {
 			techReview = "PENDING"
 		}
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, ConflictStatus: "UNCHECKED"})
+		// 必检能力码来自检测类别域：分配工程师时按此校验，留空则只保留渗透测试的固定要求。
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
@@ -473,6 +474,11 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
 	required := append([]string{}, input.RequiredCodes...)
+	if len(required) == 0 {
+		// 调用方未显式给出必检能力码时，回落到服务项自身携带的（来自检测类别域）能力码，
+		// 否则"按检测类别配置必检能力"就只是页面上的说明文字，能力校验形同虚设。
+		required = append(required, existing.RequiredCodes...)
+	}
 	items, err := s.Repo.ListServiceItems(ctx, filter, "")
 	if err != nil {
 		return domain.ConflictCheckResult{}, err

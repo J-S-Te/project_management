@@ -281,3 +281,172 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 		t.Fatalf("合同回写后确认拆解应放行: HTTP %d %s", status, body)
 	}
 }
+
+// 检测类别域的「必检能力码（默认）」必须真的驱动能力校验：拆解时落到服务项，
+// 分配工程师时（调用方未显式给码）按它比对，而不是只当页面上的说明文字。
+func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
+	dsn := os.Getenv("PM_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set PM_TEST_DSN to exercise detection category codes")
+	}
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	ctx := context.Background()
+	const tenant = "PM-SPLIT-CODES-TENANT"
+	cleanup := func() {
+		for _, statement := range []string{
+			`DELETE FROM pm_capability WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_service_item WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_project WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_delivery_event WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_detection_category WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_split_policy WHERE tenant_id = '` + tenant + `'`,
+		} {
+			db.WithContext(ctx).Exec(statement)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	repository := store.NewRepository(db)
+	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// 缺规则处理按默认（待人工确认），但默认进入状态设为待分配，便于直接进入分配环节。
+	status, body := e2eCall(handler, "admin", http.MethodPut, "/api/v1/split-policy",
+		`{"dimension_primary":"batch","dimension_secondary":"category","default_status":"待分配","generate_requirement_summary":true,"missing_rule_action":"HUMAN_CONFIRM","scope_change_detection":false,"enabled":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("保存默认分组规则失败: HTTP %d %s", status, body)
+	}
+	// 给等保测评配置必检能力码（覆盖初始域里留空的那条）。
+	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories",
+		`{"category":"等保测评","system_standard":"等保 2.0","required_qualifications":"等级保护测评师（中级+）","required_codes":"DJCP, ISO27001","special_method":"NO","enabled":true}`)
+	if status < 200 || status > 299 {
+		t.Fatalf("保存检测类别失败: HTTP %d %s", status, body)
+	}
+	// 未配置必检能力码的类别不得凭空带出能力码。
+	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories",
+		`{"category":"漏洞扫描","special_method":"NO","enabled":true}`)
+	if status < 200 || status > 299 {
+		t.Fatalf("保存检测类别失败: HTTP %d %s", status, body)
+	}
+
+	activation := `{"contract_id":"HT-CODES-1","contract_version":"v1","contract_name":"能力码走查合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
+		"services":[
+			{"source_id":"C1","site":"杭州机房","batch":"B1","category":"等保测评"},
+			{"source_id":"C2","site":"杭州机房","batch":"B2","category":"漏洞扫描"}
+		]}`
+	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/contracts/activate", activation)
+	if status != http.StatusCreated {
+		t.Fatalf("合同激活失败: HTTP %d %s", status, body)
+	}
+	type itemRow struct {
+		ID            string
+		Category      string
+		RequiredCodes []byte
+	}
+	var rows []itemRow
+	if err := db.WithContext(ctx).Raw(
+		`SELECT id, category, required_codes FROM pm_service_item WHERE tenant_id = ? ORDER BY id`, tenant).
+		Scan(&rows).Error; err != nil {
+		t.Fatalf("读取服务项失败: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("应有 2 条服务项，实际 %d", len(rows))
+	}
+	var codes []string
+	if err := json.Unmarshal(rows[0].RequiredCodes, &codes); err != nil {
+		t.Fatalf("解析必检能力码失败: %v (%s)", err, string(rows[0].RequiredCodes))
+	}
+	t.Logf("等保测评服务项必检能力码 = %v；漏洞扫描 = %s", codes, string(rows[1].RequiredCodes))
+	if len(codes) != 2 || codes[0] != "DJCP" || codes[1] != "ISO27001" {
+		t.Fatalf("检测类别的必检能力码应落到服务项，实际 %v", codes)
+	}
+	if string(rows[1].RequiredCodes) == "" || string(rows[1].RequiredCodes) == "null" {
+		// 未配置能力码的类别必须落空数组，不能凭空生成。
+		empty := []string{}
+		_ = json.Unmarshal(rows[1].RequiredCodes, &empty)
+		if len(empty) != 0 {
+			t.Fatalf("未配置能力码的类别不应带出能力码，实际 %v", empty)
+		}
+	}
+
+	// 两名工程师：一人具备 DJCP + ISO27001，一人只有 OTHER。
+	now := "2026-09-14 00:00:00"
+	for _, seed := range []struct{ id, name, codesJSON string }{
+		{"ENG-OK", "合格工程师", `["DJCP","ISO27001"]`},
+		{"ENG-BAD", "缺证工程师", `["OTHER"]`},
+	} {
+		statement := `INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
+			VALUES ('CAP-` + seed.id + `', '` + tenant + `', 'PERSON', '` + seed.id + `', '` + seed.name + `', JSON_ARRAY(` +
+			strings.Trim(seed.codesJSON, "[]") + `), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`
+		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
+			t.Fatalf("seed 能力失败: %v", err)
+		}
+	}
+	_ = now
+
+	itemID := rows[0].ID
+	status, body = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/service-items/"+itemID+"/team-assignment",
+		`{"team_lead_id":"PM-SPLIT-LEAD"}`)
+	if status < 200 || status > 299 {
+		t.Fatalf("分配团队负责人失败: HTTP %d %s", status, body)
+	}
+	// 调用方不传 required_codes：必须回落到服务项上的必检能力码，缺证工程师判冲突。
+	status, body = e2eCall(handler, "team_lead", http.MethodPost, "/api/v1/service-items/"+itemID+"/execution-assignment",
+		`{"project_manager_id":"PM-SPLIT-PM","engineer_ids":["ENG-BAD"]}`)
+	if status < 200 || status > 299 {
+		t.Fatalf("执行分配失败: HTTP %d %s", status, body)
+	}
+	var conflictStatus string
+	if err := db.WithContext(ctx).Raw(`SELECT conflict_status FROM pm_service_item WHERE tenant_id = ? AND id = ?`, tenant, itemID).
+		Scan(&conflictStatus).Error; err != nil {
+		t.Fatalf("读取校验结论失败: %v", err)
+	}
+	if conflictStatus != "CONFLICT" {
+		t.Fatalf("缺证工程师应判能力冲突，实际 %q（必检能力码没有生效？）", conflictStatus)
+	}
+	status, body = e2eCall(handler, "team_lead", http.MethodPost, "/api/v1/service-items/"+itemID+"/execution-assignment",
+		`{"project_manager_id":"PM-SPLIT-PM","engineer_ids":["ENG-OK"]}`)
+	if status < 200 || status > 299 {
+		t.Fatalf("执行分配失败: HTTP %d %s", status, body)
+	}
+	if err := db.WithContext(ctx).Raw(`SELECT conflict_status FROM pm_service_item WHERE tenant_id = ? AND id = ?`, tenant, itemID).
+		Scan(&conflictStatus).Error; err != nil {
+		t.Fatalf("读取校验结论失败: %v", err)
+	}
+	if conflictStatus != "PASSED" {
+		t.Fatalf("持证工程师应校验通过，实际 %q", conflictStatus)
+	}
+
+	// 批量导入：合法行写入、非法行跳过并给出行号原因。
+	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories/import",
+		`{"items":[{"category":"导入类别A","system_standard":"ISO 27001","required_codes":"A1，A2","special_method":"MARKABLE","enabled":true},{"category":"","special_method":"NO","enabled":true},{"category":"导入类别B","special_method":"不存在的取值","enabled":true}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("导入检测类别失败: HTTP %d %s", status, body)
+	}
+	var imported struct {
+		Data struct {
+			Imported int      `json:"imported"`
+			Skipped  int      `json:"skipped"`
+			Errors   []string `json:"errors"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &imported); err != nil {
+		t.Fatalf("解析导入结果失败: %v (%s)", err, body)
+	}
+	t.Logf("导入结果：成功 %d，跳过 %d，原因 %v", imported.Data.Imported, imported.Data.Skipped, imported.Data.Errors)
+	if imported.Data.Imported != 1 || imported.Data.Skipped != 2 {
+		t.Fatalf("导入应有 1 行成功、2 行跳过，实际 %+v", imported.Data)
+	}
+	var storedCodes string
+	if err := db.WithContext(ctx).Raw(`SELECT required_codes FROM pm_detection_category WHERE tenant_id = ? AND category = '导入类别A'`, tenant).
+		Scan(&storedCodes).Error; err != nil {
+		t.Fatalf("读取导入结果失败: %v", err)
+	}
+	if storedCodes != "A1,A2" {
+		t.Fatalf("中文逗号分隔的能力码应被规范化，实际 %q", storedCodes)
+	}
+}
