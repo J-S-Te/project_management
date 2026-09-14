@@ -347,6 +347,40 @@ func (r *Repository) GetRule(ctx context.Context, tenant, kind string, id int64)
 	return ruleFromRow(row), nil
 }
 
+// DeleteRule 物理删除一条配置规则。六套配置表各自成表，因此删除必须同时限定目标表
+// （由 kind 决定）、租户与主键：只按主键删除会跨类型误删，主键在六张表里各自自增。
+// 回读发生在删除之前，所以「不存在」只会在确实没有命中行时返回——创建接口曾因回读用
+// 客户端传入的 0 主键把成功写入报成 404，删除不能重复这类错误。
+func (r *Repository) DeleteRule(ctx context.Context, tenant, kind string, id int64) (domain.Rule, error) {
+	table := ruleTable(kind)
+	if table == "" {
+		return domain.Rule{}, application.ErrValidation
+	}
+	var removed domain.Rule
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row ruleRow
+		if err := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Scan(&row).Error; err != nil {
+			return err
+		}
+		if row.ID == 0 {
+			return application.ErrNotFound
+		}
+		result := tx.Table(table).Where("tenant_id = ? AND id = ?", tenant, id).Delete(&ruleRow{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return application.ErrNotFound
+		}
+		removed = ruleFromRow(row)
+		return nil
+	})
+	if err != nil {
+		return domain.Rule{}, err
+	}
+	return removed, nil
+}
+
 func (r *Repository) SetRuleEnabled(ctx context.Context, tenant, kind string, id int64, enabled bool, actor string) (domain.Rule, error) {
 	table := ruleTable(kind)
 	if table == "" {
