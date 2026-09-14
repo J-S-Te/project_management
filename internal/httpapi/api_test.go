@@ -152,6 +152,18 @@ func (r *repo) UpdateRule(_ context.Context, _ string, _ string, id int64, item 
 func (r *repo) SetRuleEnabled(_ context.Context, _ string, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
 	return domain.Rule{ID: id, Enabled: enabled}, nil
 }
+
+// DeleteRule 按 kind + 租户 + 主键删除：类型不匹配时视为不存在，与真实仓储一致
+// （六套配置表各自成表，主键在不同表里重复）。
+func (r *repo) DeleteRule(_ context.Context, _ string, kind string, id int64) (domain.Rule, error) {
+	for index, rule := range r.rules {
+		if rule.ID == id && (rule.Kind == kind || rule.Kind == "") {
+			r.rules = append(append([]domain.Rule{}, r.rules[:index]...), r.rules[index+1:]...)
+			return rule, nil
+		}
+	}
+	return domain.Rule{}, application.ErrNotFound
+}
 func (r *repo) Dashboard(_ context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
 	r.dashboardScope = filter
 	if r.dashboard.StatusCounts == nil {
@@ -255,6 +267,94 @@ func TestRoleCatalogRequiresProjectRead(t *testing.T) {
 	response := perform(router(t, map[string]bool{}, nil), http.MethodGet, "/api/v1/role-catalog", "")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// ruleRouter 构造带预置规则的处理器：删除用例需要同时断言响应与仓储中的剩余行。
+func ruleRouter(t *testing.T, permissions map[string]bool, rules []domain.Rule) (http.Handler, *repo) {
+	t.Helper()
+	repository := &repo{rules: rules}
+	service := &application.Service{Repo: repository}
+	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
+	return httpapi.NewRouter(service, id, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), repository
+}
+
+// 规则配置必须可删除：删除按 kind 定位配置表，租户 + 主键限定，删掉的规则不再出现在列表里。
+func TestDeleteRuleRemovesConfiguration(t *testing.T) {
+	rules := []domain.Rule{
+		{ID: 3, Kind: "split-rules", Name: "走查拆解规则", Scope: "浙江", Enabled: true},
+		{ID: 3, Kind: "sla", Name: "走查 SLA", Status: "实施中", Enabled: true},
+	}
+	handler, repository := ruleRouter(t, map[string]bool{"project_rule.manage": true, "project.read": true}, rules)
+
+	response := perform(handler, http.MethodDelete, "/api/v1/rules/3?kind=split-rules", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			ID   int64  `json:"id"`
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v body=%s", err, response.Body.String())
+	}
+	// 返回被删除的那一条：前端据此提示名称，测试据此确认删的是目标行而不是同 ID 的其它类型。
+	if payload.Data.ID != 3 || payload.Data.Kind != "split-rules" || payload.Data.Name != "走查拆解规则" {
+		t.Fatalf("删除响应不回显被删规则: %s", response.Body.String())
+	}
+	if len(repository.rules) != 1 || repository.rules[0].Kind != "sla" {
+		t.Fatalf("应只删掉 split-rules 那条，剩余 %+v", repository.rules)
+	}
+
+	response = perform(handler, http.MethodGet, "/api/v1/rules?kind=split-rules", "")
+	if strings.Contains(response.Body.String(), "走查拆解规则") {
+		t.Fatalf("删除后列表仍返回该规则: %s", response.Body.String())
+	}
+	response = perform(handler, http.MethodGet, "/api/v1/rules?kind=sla", "")
+	if !strings.Contains(response.Body.String(), "走查 SLA") {
+		t.Fatalf("其它类型的同 ID 规则被误删: %s", response.Body.String())
+	}
+}
+
+func TestDeleteRuleRejectsUnknownAndUnauthorized(t *testing.T) {
+	rules := []domain.Rule{{ID: 3, Kind: "split-rules", Name: "走查拆解规则"}}
+	handler, _ := ruleRouter(t, map[string]bool{"project_rule.manage": true}, rules)
+
+	// 重复删除：必须 404，而不是把已经不存在的行报成成功。
+	perform(handler, http.MethodDelete, "/api/v1/rules/3?kind=split-rules", "")
+	response := perform(handler, http.MethodDelete, "/api/v1/rules/3?kind=split-rules", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("重复删除 status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 类型不匹配：同 ID 命中别的表时不能删（六套配置表主键各自自增）。
+	response = perform(handler, http.MethodDelete, "/api/v1/rules/3?kind=sla", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("类型不匹配 status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 缺少 kind：删除必须显式给出类型，不能猜默认表。
+	response = perform(handler, http.MethodDelete, "/api/v1/rules/3", "")
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("缺少 kind status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 非法编号。
+	response = perform(handler, http.MethodDelete, "/api/v1/rules/abc?kind=sla", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("非法编号 status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 无规则管理权限：路由层直接拒绝。
+	blind := router(t, map[string]bool{"project.read": true}, nil)
+	response = perform(blind, http.MethodDelete, "/api/v1/rules/3?kind=split-rules", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("越权删除 status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 只有 project_rule.manage 的角色不能删除字段级权限规则（应用层按 kind 判权）。
+	fieldPermission := router(t, map[string]bool{"project_rule.manage": true}, nil)
+	response = perform(fieldPermission, http.MethodDelete, "/api/v1/rules/3?kind=permissions", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("字段级权限删除 status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

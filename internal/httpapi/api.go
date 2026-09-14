@@ -134,6 +134,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/rules", require("project_rule.manage"), h.createRule)
 	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
 	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
+	// 删除与新建、编辑同权：路由层按 kind 的两种权限并集粗放行（字段级权限由
+	// project.field_permission.manage 把关），具体 kind 的判定在应用层 DeleteRule。
+	api.DELETE("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage"), h.deleteRule)
 	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
 	// 报告推进到"已归档"才需要 project.report.archive；现场执行角色不应顺带获得归档权。
 	// 路由层只做粗粒度放行：具体阶段权限（编制/审核/签发用 project.report.manage，
@@ -957,6 +960,22 @@ func (h *Handler) updateConfigRule(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+
+// deleteRule 删除一条配置规则。kind 从查询串取（与启停接口一致）：六套配置各自成表，
+// 只有 kind 能确定目标表，缺少时应用层直接拒绝而不是猜一个默认类型。
+func (h *Handler) deleteRule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_ID", "规则编号不合法")
+		return
+	}
+	removed, err := h.service.DeleteRule(c.Request.Context(), principal(c), c.Query("kind"), id)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, removed)
 }
 
 // reviewSpecialMethod 技术总监对特殊方法服务项复核，通过后才能发布渗透测试专项计划。

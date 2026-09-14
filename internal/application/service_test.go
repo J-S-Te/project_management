@@ -63,6 +63,9 @@ func (r *scopeRepository) UpdateRule(_ context.Context, _ string, _ string, _ in
 func (r *scopeRepository) SetRuleEnabled(_ context.Context, _ string, _ string, id int64, enabled bool, _ string) (domain.Rule, error) {
 	return domain.Rule{ID: id, Enabled: enabled}, nil
 }
+func (r *scopeRepository) DeleteRule(_ context.Context, _ string, kind string, id int64) (domain.Rule, error) {
+	return domain.Rule{ID: id, Kind: kind}, nil
+}
 func (r *scopeRepository) Dashboard(_ context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
 	r.lastFilter = filter
 	return domain.Dashboard{}, nil
@@ -163,6 +166,31 @@ func TestFullDataScopeCanManageTenantWideRules(t *testing.T) {
 	principal := principalWith("project_rule.manage", platform.DataScope{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"})
 	if _, err := service.CreateRule(context.Background(), principal, domain.Rule{Name: "规则", Scope: "tenant"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 删除与新建、编辑同权：删除字段级权限规则必须持有 project.field_permission.manage，
+// 只有 project_rule.manage 的角色不能通过删除接口绕过字段级权限的配置权。
+func TestDeleteRuleFollowsKindPermission(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}}
+	tenantScope := platform.DataScope{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"}
+	ruleManager := principalWith("project_rule.manage", tenantScope)
+	if _, err := service.DeleteRule(context.Background(), ruleManager, "split-rules", 1); err != nil {
+		t.Fatalf("普通配置类型的删除: %v", err)
+	}
+	if _, err := service.DeleteRule(context.Background(), ruleManager, "permissions", 1); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("字段级权限的删除应要求 project.field_permission.manage，实际 error=%v", err)
+	}
+	fieldPermissionManager := principalWith("project.field_permission.manage", tenantScope)
+	if _, err := service.DeleteRule(context.Background(), fieldPermissionManager, "permissions", 7); err != nil {
+		t.Fatalf("字段级权限的删除: %v", err)
+	}
+	// kind 决定目标表，缺省「全部类型」只适用于查询：删除必须显式给出类型。
+	if _, err := service.DeleteRule(context.Background(), ruleManager, "  ", 1); !errors.Is(err, ErrValidation) {
+		t.Fatalf("缺少 kind 应拒绝，实际 error=%v", err)
+	}
+	if _, err := service.DeleteRule(context.Background(), ruleManager, "split-rules", 0); !errors.Is(err, ErrValidation) {
+		t.Fatalf("非法编号应拒绝，实际 error=%v", err)
 	}
 }
 

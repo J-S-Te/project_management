@@ -79,6 +79,7 @@ type Repository interface {
 	CreateRule(context.Context, domain.Rule) (domain.Rule, error)
 	UpdateRule(context.Context, string, string, int64, domain.Rule) (domain.Rule, error)
 	SetRuleEnabled(context.Context, string, string, int64, bool, string) (domain.Rule, error)
+	DeleteRule(context.Context, string, string, int64) (domain.Rule, error)
 	Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error)
 }
 
@@ -508,6 +509,23 @@ func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind
 		return domain.Rule{}, err
 	}
 	return s.Repo.SetRuleEnabled(ctx, p.TenantID, strings.TrimSpace(kind), id, enabled, p.UserID)
+}
+
+// DeleteRule 删除一条配置规则。kind 必填：六套配置各自成表，只有 kind 才能确定目标表，
+// 缺省「全部类型」的语义只适用于查询。删除同样按 kind 判权限（字段级权限走
+// project.field_permission.manage），与新建、编辑保持一致，避免「能建不能删」。
+func (s *Service) DeleteRule(ctx context.Context, p platform.Principal, kind string, id int64) (domain.Rule, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return domain.Rule{}, ValidationError("规则类型不能为空")
+	}
+	if err := requireApplicationAuthorization(p, ruleKindPermission(kind)); err != nil {
+		return domain.Rule{}, err
+	}
+	if id <= 0 {
+		return domain.Rule{}, ValidationError("规则编号不合法")
+	}
+	return s.Repo.DeleteRule(ctx, p.TenantID, kind, id)
 }
 
 func authorizeProjectScope(p platform.Principal, permission string) (platform.ScopeFilter, error) {
