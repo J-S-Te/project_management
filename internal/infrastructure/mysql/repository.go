@@ -300,7 +300,35 @@ func (r *Repository) CreateRule(ctx context.Context, item domain.Rule) (domain.R
 	if err := r.db.WithContext(ctx).Create(record).Error; err != nil {
 		return item, err
 	}
-	return r.GetRule(ctx, item.TenantID, item.Kind, item.ID)
+	// 规则主键是数据库自增生成的：必须用 Create 回填后的真实 ID 回读。
+	// 此前用的是入参 ID——客户端新建时不传 ID（值为 0），GetRule 因此判定「不存在」，
+	// 把已经成功写入的创建报成 404 资源不存在；用户看到失败会重复点击，每次再插一条重复规则。
+	createdID := ruleRecordPrimaryKey(record)
+	if createdID == 0 {
+		return item, application.ErrNotFound
+	}
+	return r.GetRule(ctx, item.TenantID, item.Kind, createdID)
+}
+
+// ruleRecordPrimaryKey 取出创建后由数据库回填的自增主键。
+// 六种规则记录各自成表，但主键都是 int64 自增，这里显式列出以免遗漏新增类型。
+func ruleRecordPrimaryKey(record any) int64 {
+	switch typed := record.(type) {
+	case *splitRuleRecord:
+		return typed.ID
+	case *warningRuleRecord:
+		return typed.ID
+	case *automationRecord:
+		return typed.ID
+	case *fieldPermissionRecord:
+		return typed.ID
+	case *slaRecord:
+		return typed.ID
+	case *standardRecord:
+		return typed.ID
+	default:
+		return 0
+	}
 }
 
 // GetRule 按表/租户/ID 重新读取配置行，供创建、编辑、启停后回显。

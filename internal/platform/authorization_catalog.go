@@ -15,6 +15,44 @@ type AuthorizationCatalog struct {
 	permissions map[string]struct{}
 }
 
+// RoleOption 是应用角色目录的一项：Code 是规则的存储值与授权比对值，Name 仅用于界面展示。
+type RoleOption struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// RoleCatalog 按权限清单的声明顺序返回本应用的角色目录。按角色配置的界面（字段级权限）
+// 必须用这份目录渲染选项：规则里写入目录之外的角色码既不会报错、也永远不会命中任何主体，
+// 属于只在运行期静默失效的错误，因此角色选项只能由服务端下发，前端不得自行硬编码。
+func RoleCatalog() ([]RoleOption, error) {
+	var manifest struct {
+		Roles []struct {
+			Code string `json:"code"`
+			Name string `json:"name"`
+		} `json:"roles"`
+	}
+	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
+		return nil, fmt.Errorf("decode project permission catalog: %w", err)
+	}
+	options := make([]RoleOption, 0, len(manifest.Roles))
+	seen := make(map[string]struct{}, len(manifest.Roles))
+	for _, item := range manifest.Roles {
+		code, name := strings.TrimSpace(item.Code), strings.TrimSpace(item.Name)
+		if code == "" || code != item.Code || name == "" {
+			return nil, errors.New("project role catalog is malformed")
+		}
+		if _, duplicate := seen[code]; duplicate {
+			return nil, errors.New("project role catalog contains duplicate codes")
+		}
+		seen[code] = struct{}{}
+		options = append(options, RoleOption{Code: code, Name: name})
+	}
+	if len(options) == 0 {
+		return nil, errors.New("project role catalog is empty")
+	}
+	return options, nil
+}
+
 func LoadAuthorizationCatalog() (AuthorizationCatalog, error) {
 	var manifest struct {
 		CatalogVersion string `json:"catalog_version"`

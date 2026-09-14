@@ -1,0 +1,94 @@
+package httpapi_test
+
+// 规则创建必须成功并返回数据库生成的主键。
+//
+// 回归背景：六种规则（拆解/预警/自动化/字段级权限/SLA/检测标准）新建时都返回
+// 404「资源不存在」，而行其实已经写入——根因是回读用了客户端未提供的 ID（0），
+// 把创建成功报成失败；用户据此重复点击会插入重复规则。
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"testing"
+
+	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/httpapi"
+	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"io"
+	"log/slog"
+
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+)
+
+func TestRulesCreateReturnsGeneratedID(t *testing.T) {
+	dsn := os.Getenv("PM_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set PM_TEST_DSN to reproduce the rule creation defect")
+	}
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	const tenant = "PM-RULE-TENANT"
+	for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard"} {
+		db.Exec("DELETE FROM " + table + " WHERE tenant_id = '" + tenant + "'")
+	}
+	t.Cleanup(func() {
+		for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard"} {
+			db.Exec("DELETE FROM " + table + " WHERE tenant_id = '" + tenant + "'")
+		}
+	})
+
+	repository := store.NewRepository(db)
+	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	cases := []struct {
+		kind  string
+		body  string
+		table string
+	}{
+		{"split-rules", `{"kind":"split-rules","name":"走查拆解规则","scope":"浙江","enabled":true}`, "pm_split_rule"},
+		{"warning-rules", `{"kind":"warning-rules","name":"走查预警规则","check_type":"超期","threshold":"3","enabled":true}`, "pm_warning_rule"},
+		{"automations", `{"kind":"automations","name":"走查自动化","trigger":"DEVIATION_REPORTED","target":"technical_director","enabled":true}`, "pm_automation"},
+		{"permissions", `{"kind":"permissions","name":"走查字段权限","role_code":"engineer","field_name":"customer","access_level":"view","enabled":true}`, "pm_field_permission"},
+		{"sla", `{"kind":"sla","name":"走查 SLA","status":"实施中","deadline_hours":24,"remind_hours":4,"enabled":true}`, "pm_sla"},
+		{"standards", `{"kind":"standards","name":"走查标准","scope":"GB/T 28448","enabled":true}`, "pm_standard"},
+	}
+	for _, testCase := range cases {
+		status, response := e2eCall(handler, "admin", http.MethodPost, "/api/v1/rules", testCase.body)
+		var rows int64
+		if err := db.Raw("SELECT COUNT(*) FROM "+testCase.table+" WHERE tenant_id = ?", tenant).Scan(&rows).Error; err != nil {
+			t.Fatalf("count %s: %v", testCase.table, err)
+		}
+		var payload struct {
+			Data struct {
+				ID   int64  `json:"id"`
+				Kind string `json:"kind"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(response), &payload); err != nil {
+			t.Fatalf("%s: 解析响应失败: %v (%s)", testCase.kind, err, response)
+		}
+		t.Logf("%-15s -> HTTP %d | 库中行数=%d | 返回 id=%d", testCase.kind, status, rows, payload.Data.ID)
+		if status < 200 || status > 299 {
+			t.Fatalf("%s: 新建规则必须成功，实际 HTTP %d %s", testCase.kind, status, response)
+		}
+		if rows != 1 {
+			t.Fatalf("%s: 应恰好写入一行，实际 %d", testCase.kind, rows)
+		}
+		// 返回的 id 必须是数据库生成的真实主键：此前返回 0 并在回读时报「资源不存在」。
+		var storedID int64
+		if err := db.Raw("SELECT id FROM "+testCase.table+" WHERE tenant_id = ?", tenant).Scan(&storedID).Error; err != nil {
+			t.Fatalf("read id %s: %v", testCase.table, err)
+		}
+		if payload.Data.ID == 0 || payload.Data.ID != storedID {
+			t.Fatalf("%s: 返回 id=%d 与库中 id=%d 不一致", testCase.kind, payload.Data.ID, storedID)
+		}
+		if payload.Data.Kind != testCase.kind {
+			t.Fatalf("%s: 返回 kind=%q", testCase.kind, payload.Data.Kind)
+		}
+	}
+}
