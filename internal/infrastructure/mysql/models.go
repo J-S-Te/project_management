@@ -105,7 +105,7 @@ type implPlanRecord struct {
 
 func (implPlanRecord) TableName() string { return "pm_impl_plan" }
 
-// ruleRow 是五套配置表的统一读取视图。各表只拥有自己需要的列，读取时用同一条
+// ruleRow 是多套配置表的统一读取视图。各表只拥有自己需要的列，读取时用同一条
 // SELECT 扫描进该结构，未出现在目标表中的列保持零值。
 type ruleRow struct {
 	ID            int64
@@ -156,6 +156,23 @@ type standardRecord struct {
 }
 
 func (standardRecord) TableName() string { return "pm_standard" }
+
+// capabilityCodeRecord 是租户级资质/能力编码目录。它复用 Rule 的
+// Scope=编码、CheckType=资源类型字段，但物理上独立存储，便于唯一约束与审计。
+type capabilityCodeRecord struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	TenantID  string `gorm:"size:64;not null;uniqueIndex:uk_pm_capability_code_tenant_type_code,priority:1;index:idx_pm_capability_code_tenant_enabled,priority:1"`
+	Kind      string `gorm:"size:64;not null"`
+	Name      string `gorm:"size:255;not null"`
+	Scope     string `gorm:"size:128;not null;uniqueIndex:uk_pm_capability_code_tenant_type_code,priority:3"`
+	CheckType string `gorm:"size:16;not null;uniqueIndex:uk_pm_capability_code_tenant_type_code,priority:2;index:idx_pm_capability_code_tenant_enabled,priority:2"`
+	Enabled   bool   `gorm:"index:idx_pm_capability_code_tenant_enabled,priority:3"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UpdatedBy string `gorm:"size:64"`
+}
+
+func (capabilityCodeRecord) TableName() string { return "pm_capability_code" }
 
 type warningRuleRecord struct {
 	ID        int64  `gorm:"primaryKey;autoIncrement"`

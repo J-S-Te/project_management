@@ -19,6 +19,7 @@ const (
 	EventContractActivated          = "CONTRACT_ACTIVATED"
 	EventContractStampStatus        = "CONTRACT_STAMP_STATUS_SYNCED"
 	EventDecompositionAdjusted      = "DECOMPOSITION_ADJUSTED"
+	EventDecompositionReturned      = "DECOMPOSITION_RETURNED"
 	EventTeamAssigned               = "TEAM_ASSIGNED"
 	EventTeamAssignmentRevoked      = "TEAM_ASSIGNMENT_REVOKED"
 	EventExecutionTeamAssigned      = "EXECUTION_TEAM_ASSIGNED"
@@ -496,6 +497,42 @@ func (s *Service) RevokeTeamAssignment(ctx context.Context, p platform.Principal
 	previous := append([]string{item.TeamLeadID, item.ProjectManagerID}, item.EngineerIDs...)
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssignmentRevoked, map[string]any{"reason": strings.TrimSpace(input.Reason), "expected_version": input.ExpectedVersion, "previous_team_lead_id": item.TeamLeadID, "previous_project_manager_id": item.ProjectManagerID, "previous_engineer_ids": item.EngineerIDs, "revoked_user_ids": previous}))
 }
+
+// ReturnToDecomposition 把尚未进入实施阶段的服务项退回拆解确认。该动作与撤销分配不同：
+// 它会改变服务项阶段，因此必须使用拆解管理权限并留下原因、原责任链和版本快照。
+func (s *Service) ReturnToDecomposition(ctx context.Context, p platform.Principal, itemID string, input domain.AssignmentRevokeInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.decomposition.manage", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.decomposition.manage", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" {
+		return ValidationError("请填写退回拆解确认的原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.decomposition.manage")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "待分配" {
+		return PreconditionError("仅可将待分配服务项退回拆解确认")
+	}
+	previous := append([]string{item.TeamLeadID, item.ProjectManagerID}, item.EngineerIDs...)
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventDecompositionReturned, map[string]any{
+		"reason":                      reason,
+		"expected_version":            input.ExpectedVersion,
+		"previous_team_lead_id":       item.TeamLeadID,
+		"previous_project_manager_id": item.ProjectManagerID,
+		"previous_engineer_ids":       item.EngineerIDs,
+		"revoked_user_ids":            previous,
+	}))
+}
+
 func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal, itemID string, input domain.ExecutionAssignmentInput) (domain.ConflictCheckResult, error) {
 	filter, err := authorizeProjectScope(p, "project.execution.assign")
 	if err != nil {
@@ -512,12 +549,12 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if input.ProjectManagerID == "" || len(input.EngineerIDs) == 0 {
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
-	required := append([]string{}, input.RequiredCodes...)
-	if len(required) == 0 {
-		// 调用方未显式给出必检能力码时，回落到服务项自身携带的（来自检测类别域）能力码，
-		// 否则"按检测类别配置必检能力"就只是页面上的说明文字，能力校验形同虚设。
-		required = append(required, existing.RequiredCodes...)
-	}
+	// 服务项自身携带的必检能力码来自检测类别配置，是服务端可信的最低要求。
+	// 客户端可以追加本次分配的额外要求，但不能通过少传/改传 required_codes
+	// 缩减服务项要求，否则可绕过资质校验把任务分给不具备必备资质的工程师。
+	required := append([]string{}, existing.RequiredCodes...)
+	required = append(required, input.RequiredCodes...)
+	required = normalizeCapabilityCodes(required)
 	items, err := s.Repo.ListServiceItems(ctx, filter, "")
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
@@ -528,6 +565,7 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 			found = true
 			if item.TestMode == "PENETRATION" {
 				required = append(required, "PENETRATION_TEST")
+				required = normalizeCapabilityCodes(required)
 			}
 			break
 		}
@@ -1515,7 +1553,12 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	if e != nil {
 		return item, e
 	}
+	normalizeCapability(&item)
 	item.TenantID = p.TenantID
+	existing, err := repo.ListCapabilities(ctx, p.TenantID, item.ResourceType)
+	if err != nil {
+		return item, err
+	}
 	// 人员资质必须绑定基础平台当前可见的在职人员。资源名称是平台目录的显示名，
 	// 不能信任浏览器提交的任意文本，以免出现“资质档案姓名”和身份主体不一致。
 	if item.ResourceType == "PERSON" {
@@ -1530,23 +1573,22 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		item.UserID = ""
 	}
 	if strings.TrimSpace(item.ResourceID) == "" {
-		existing, err := repo.ListCapabilities(ctx, p.TenantID, item.ResourceType)
-		if err != nil {
-			return item, err
-		}
 		assignResourceID(existing, &item)
 	}
 	if err := validateCapability(item); err != nil {
+		return item, err
+	}
+	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
+	if err != nil {
+		return item, err
+	}
+	if err := validateCapabilityCodesAgainstCatalog(codeRules, item.ResourceType, item.Codes, existingCapabilityCodes(existing, item.ResourceType, item.ResourceID)); err != nil {
 		return item, err
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	// 使用范围只对设备有意义：调用方没有提交时必须沿用该设备的既有设置，
 	// 否则从"资质与能力管理"改一个名称就会把「仅在公司使用」静默改回可借出。
 	if item.ResourceType == "EQUIPMENT" && strings.TrimSpace(item.UsageScope) == "" {
-		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
-		if err != nil {
-			return item, err
-		}
 		item.UsageScope = existingUsageScope(existing, item.ResourceID)
 	}
 	return repo.UpsertCapability(ctx, item, p.UserID)
@@ -1592,15 +1634,24 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 	if err != nil {
 		return CapabilityImportResult{}, err
 	}
+	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
+	if err != nil {
+		return CapabilityImportResult{}, err
+	}
 	for i := range rows {
 		line := fmt.Sprintf("数据行 %d", i+1)
+		normalizeCapability(&rows[i])
 		assignResourceID(known, &rows[i])
 		if err := validateCapability(rows[i]); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": 资源类型、编号、名称或能力码不完整")
 			continue
 		}
-		known = append(known, rows[i])
+		if err := validateCapabilityCodesAgainstCatalog(codeRules, rows[i].ResourceType, rows[i].Codes, existingCapabilityCodes(known, rows[i].ResourceType, rows[i].ResourceID)); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": "+err.Error())
+			continue
+		}
 		rows[i].TenantID = p.TenantID
 		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
 		// CSV 不携带使用范围；导入既有设备时必须保留原设置，不能被批量改回可借出。
@@ -1609,6 +1660,17 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": "+err.Error())
 			continue
+		}
+		updated := false
+		for knownIndex := range known {
+			if known[knownIndex].ResourceType == rows[i].ResourceType && known[knownIndex].ResourceID == rows[i].ResourceID {
+				known[knownIndex] = rows[i]
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			known = append(known, rows[i])
 		}
 		result.Imported++
 	}
@@ -1767,7 +1829,8 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 	if err := requireApplicationAuthorization(p, "project.device.manage"); err != nil {
 		return item, err
 	}
-	if item.ResourceType != "EQUIPMENT" || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
+	normalizeCapability(&item)
+	if item.ResourceType != "EQUIPMENT" || item.ResourceID == "" || item.ResourceName == "" || len(item.Codes) == 0 {
 		return item, ErrValidation
 	}
 	repo, e := s.deliveryRepo()
@@ -1775,12 +1838,19 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 		return item, e
 	}
 	item.TenantID = p.TenantID
+	existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
+	if err != nil {
+		return item, err
+	}
+	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
+	if err != nil {
+		return item, err
+	}
+	if err := validateCapabilityCodesAgainstCatalog(codeRules, item.ResourceType, item.Codes, existingCapabilityCodes(existing, item.ResourceType, item.ResourceID)); err != nil {
+		return item, err
+	}
 	// 未提交使用范围时沿用既有设置，避免"编辑设备"顺手把「仅在公司使用」改回可借出。
 	if strings.TrimSpace(item.UsageScope) == "" {
-		existing, err := repo.ListCapabilities(ctx, p.TenantID, "EQUIPMENT")
-		if err != nil {
-			return item, err
-		}
 		item.UsageScope = existingUsageScope(existing, item.ResourceID)
 	}
 	item.UsageScope = strings.ToUpper(strings.TrimSpace(firstNonEmpty(item.UsageScope, domain.EquipmentUsageAny)))
@@ -1929,6 +1999,11 @@ func assignmentNotificationFor(eventType string) (assignmentNotification, bool) 
 		return assignmentNotification{
 			Title:   "执行团队分配已撤销",
 			Content: "你不再负责该服务项；撤销原因已记录，请关注后续重新分配。",
+		}, true
+	case EventDecompositionReturned:
+		return assignmentNotification{
+			Title:   "服务项已退回拆解确认",
+			Content: "该服务项已退出任务分配并退回拆解确认；原分配已失效，退回原因已记录。",
 		}, true
 	case EventRollbackApproved:
 		return assignmentNotification{Title: "回退申请已批准", Content: "你的项目回退申请已批准，服务项已按补偿规则回退。"}, true

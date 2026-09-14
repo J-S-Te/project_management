@@ -2,7 +2,7 @@ package httpapi_test
 
 // 规则创建必须成功并返回数据库生成的主键。
 //
-// 回归背景：六种规则（拆解/预警/自动化/字段级权限/SLA/检测标准）新建时都返回
+// 回归背景：多种规则（拆解/预警/自动化/字段级权限/SLA/检测标准/能力编码）新建时都必须返回
 // 404「资源不存在」，而行其实已经写入——根因是回读用了客户端未提供的 ID（0），
 // 把创建成功报成失败；用户据此重复点击会插入重复规则。
 
@@ -24,7 +24,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ruleCreateCases 是六种配置各自的合法创建载荷与目标表。
+// ruleCreateCases 是各种配置的合法创建载荷与目标表。
 var ruleCreateCases = []struct {
 	kind  string
 	name  string
@@ -37,6 +37,7 @@ var ruleCreateCases = []struct {
 	{"permissions", "走查字段权限", `{"kind":"permissions","name":"走查字段权限","role_code":"engineer","field_name":"customer","access_level":"view","enabled":true}`, "pm_field_permission"},
 	{"sla", "走查 SLA", `{"kind":"sla","name":"走查 SLA","status":"实施中","deadline_hours":24,"remind_hours":4,"enabled":true}`, "pm_sla"},
 	{"standards", "走查标准", `{"kind":"standards","name":"走查标准","scope":"GB/T 28448","enabled":true}`, "pm_standard"},
+	{"capability-codes", "CISP-PTE", `{"kind":"capability-codes","name":"CISP-PTE","scope":" cisp-pte ","check_type":" person ","enabled":true}`, "pm_capability_code"},
 }
 
 func TestRulesCreateReturnsGeneratedID(t *testing.T) {
@@ -49,11 +50,11 @@ func TestRulesCreateReturnsGeneratedID(t *testing.T) {
 		t.Fatalf("open database: %v", err)
 	}
 	const tenant = "PM-RULE-TENANT"
-	for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard"} {
+	for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard", "pm_capability_code"} {
 		db.Exec("DELETE FROM " + table + " WHERE tenant_id = '" + tenant + "'")
 	}
 	t.Cleanup(func() {
-		for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard"} {
+		for _, table := range []string{"pm_split_rule", "pm_warning_rule", "pm_automation", "pm_field_permission", "pm_sla", "pm_standard", "pm_capability_code"} {
 			db.Exec("DELETE FROM " + table + " WHERE tenant_id = '" + tenant + "'")
 		}
 	})

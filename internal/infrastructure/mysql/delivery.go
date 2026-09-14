@@ -165,6 +165,20 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["equipment_ids"] = jsonValue([]string{})
 		updates["required_codes"] = jsonValue([]string{})
 		updates["conflict_status"] = "UNCHECKED"
+	case application.EventDecompositionReturned:
+		if item.Status != "待分配" {
+			return application.ErrValidation
+		}
+		updates["status"] = "待确认"
+		updates["team_lead_id"] = ""
+		updates["project_manager_id"] = ""
+		updates["engineer_ids"] = jsonValue([]string{})
+		updates["equipment_ids"] = jsonValue([]string{})
+		updates["conflict_status"] = "UNCHECKED"
+		updates["tech_review_status"] = "NONE"
+		updates["tech_reviewed_at"] = nil
+		updates["tech_reviewed_by"] = ""
+		updates["tech_review_comment"] = ""
 	case application.EventExecutionTeamAssigned:
 		if item.Status != "待分配" {
 			return application.ErrValidation

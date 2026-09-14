@@ -168,3 +168,30 @@ func TestSplitRuleConfigMigration(t *testing.T) {
 		t.Fatal("required codes migration is missing")
 	}
 }
+
+// 资质/能力编码使用独立的租户目录，并从存量能力档案回填，
+// 避免上线后旧编码因未手工重录而立即失效。
+func TestCapabilityCodeCatalogMigration(t *testing.T) {
+	body, err := Files.ReadFile("000021_capability_code_catalog.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS pm_capability_code",
+		"scope VARCHAR(128) NOT NULL",
+		"check_type VARCHAR(16) NOT NULL",
+		"UNIQUE KEY uk_pm_capability_code_tenant_type_code (tenant_id, check_type, scope)",
+		"JOIN JSON_TABLE(",
+		"capability.capability_codes",
+		"UPPER(TRIM(code_row.code))",
+		"UPPER(TRIM(capability.resource_type)) IN ('PERSON', 'EQUIPMENT')",
+		"FROM pm_service_item AS service_item",
+		"COALESCE(service_item.required_codes, JSON_ARRAY())",
+		"'PERSON'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("capability code migration missing %q", required)
+		}
+	}
+}

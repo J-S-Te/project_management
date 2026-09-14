@@ -102,6 +102,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/internal/v1/contracts/activate` | 合同系统内部网络投递入口，不使用浏览器会话 |
 | POST | `/api/v1/projects/{id}/decomposition-adjustments` | 调整拆解并记录补充协议引用 |
 | POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
+| POST | `/api/v1/service-items/{id}/decomposition-return` | 业务管理员将待分配服务项退回拆解确认；必须填写原因，并清空原责任分配与校验结果 |
 | POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理与工程师并校验能力；设备不在该阶段选取 |
 | POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布实施计划；必须携带实施人员清单（`personnel`，至少一名人员，资质有效期需覆盖使用时段），渗透测试项还必须包含专项计划 |
 | POST | `/api/v1/service-items/{id}/preparation` | 登记行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |

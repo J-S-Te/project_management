@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -248,8 +249,8 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 	return result, err
 }
 
-// ruleKinds 六套真实配置表对应的 kind 标识。列表中顺序即 ListRules 不指定 kind 时的合并顺序。
-var ruleKinds = []string{"split-rules", "warning-rules", "automations", "permissions", "sla", "standards"}
+// ruleKinds 真实配置表对应的 kind 标识。列表中顺序即 ListRules 不指定 kind 时的合并顺序。
+var ruleKinds = []string{"split-rules", "warning-rules", "automations", "permissions", "sla", "standards", "capability-codes"}
 
 func ruleTable(kind string) string {
 	switch kind {
@@ -265,6 +266,8 @@ func ruleTable(kind string) string {
 		return "pm_field_permission"
 	case "sla":
 		return "pm_sla"
+	case "capability-codes":
+		return "pm_capability_code"
 	default:
 		return ""
 	}
@@ -305,6 +308,10 @@ func (r *Repository) CreateRule(ctx context.Context, item domain.Rule) (domain.R
 		return item, err
 	}
 	if err := r.db.WithContext(ctx).Create(record).Error; err != nil {
+		var mysqlError *drivermysql.MySQLError
+		if item.Kind == "capability-codes" && errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
+			return item, application.ValidationError("同一类型的资质 / 能力编码已存在")
+		}
 		return item, err
 	}
 	// 规则主键是数据库自增生成的：必须用 Create 回填后的真实 ID 回读。
@@ -333,6 +340,8 @@ func ruleRecordPrimaryKey(record any) int64 {
 		return typed.ID
 	case *standardRecord:
 		return typed.ID
+	case *capabilityCodeRecord:
+		return typed.ID
 	default:
 		return 0
 	}
@@ -354,8 +363,8 @@ func (r *Repository) GetRule(ctx context.Context, tenant, kind string, id int64)
 	return ruleFromRow(row), nil
 }
 
-// DeleteRule 物理删除一条配置规则。六套配置表各自成表，因此删除必须同时限定目标表
-// （由 kind 决定）、租户与主键：只按主键删除会跨类型误删，主键在六张表里各自自增。
+// DeleteRule 物理删除一条配置规则。各类配置表分别成表，因此删除必须同时限定目标表
+// （由 kind 决定）、租户与主键：只按主键删除会跨类型误删，主键在各表里分别自增。
 // 回读发生在删除之前，所以「不存在」只会在确实没有命中行时返回——创建接口曾因回读用
 // 客户端传入的 0 主键把成功写入报成 404，删除不能重复这类错误。
 func (r *Repository) DeleteRule(ctx context.Context, tenant, kind string, id int64) (domain.Rule, error) {
@@ -418,6 +427,40 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, tenant, kind string, id
 	return r.GetRule(ctx, tenant, kind, id)
 }
 
+// CountCapabilityCodeReferences 统计目录编码在能力档案、服务项和检测类别中的引用。
+// capability_codes / 服务项 required_codes 是 JSON 数组；检测类别 required_codes
+// 是兼容历史的逗号分隔字符串。
+// 检测类别的必检码只指向 PERSON 资质，设备编码不计入该引用。
+func (r *Repository) CountCapabilityCodeReferences(ctx context.Context, tenant, resourceType, code string) (int64, error) {
+	resourceType = strings.ToUpper(strings.TrimSpace(resourceType))
+	code = strings.ToUpper(strings.TrimSpace(code))
+	var capabilityCount int64
+	if err := r.db.WithContext(ctx).Table("pm_capability").
+		Where("tenant_id = ? AND UPPER(TRIM(resource_type)) = ?", tenant, resourceType).
+		Where("EXISTS (SELECT 1 FROM JSON_TABLE(pm_capability.capability_codes, '$[*]' COLUMNS(code VARCHAR(512) PATH '$')) AS referenced_code WHERE UPPER(TRIM(referenced_code.code)) = ?)", code).
+		Count(&capabilityCount).Error; err != nil {
+		return 0, err
+	}
+	if resourceType != "PERSON" {
+		return capabilityCount, nil
+	}
+	var serviceItemCount int64
+	if err := r.db.WithContext(ctx).Table("pm_service_item").
+		Where("tenant_id = ?", tenant).
+		Where("EXISTS (SELECT 1 FROM JSON_TABLE(COALESCE(pm_service_item.required_codes, JSON_ARRAY()), '$[*]' COLUMNS(code VARCHAR(512) PATH '$')) AS referenced_code WHERE UPPER(TRIM(referenced_code.code)) = ?)", code).
+		Count(&serviceItemCount).Error; err != nil {
+		return 0, err
+	}
+	var categoryCount int64
+	if err := r.db.WithContext(ctx).Table("pm_detection_category").
+		Where("tenant_id = ?", tenant).
+		Where("FIND_IN_SET(?, UPPER(REPLACE(REPLACE(REPLACE(required_codes, '，', ','), '；', ','), ';', ','))) > 0", code).
+		Count(&categoryCount).Error; err != nil {
+		return 0, err
+	}
+	return capabilityCount + serviceItemCount + categoryCount, nil
+}
+
 // UpdateRule 整行更新配置：名称、启停开关和该 kind 专属字段。
 func (r *Repository) UpdateRule(ctx context.Context, tenant, kind string, id int64, item domain.Rule) (domain.Rule, error) {
 	now := time.Now().UTC()
@@ -435,6 +478,10 @@ func (r *Repository) UpdateRule(ctx context.Context, tenant, kind string, id int
 		columns = map[string]any{"name": item.Name, "status": item.Status, "deadline_hours": item.DeadlineHours, "remind_hours": item.RemindHours, "enabled": item.Enabled}
 	case "standards":
 		columns = map[string]any{"name": item.Name, "scope": item.Scope, "enabled": item.Enabled}
+	case "capability-codes":
+		// 编码和资源类型是历史能力档案的语义键，创建后不可改。
+		// 如需新编码应新建目录项，旧项禁用后仍保留历史引用。
+		columns = map[string]any{"name": item.Name, "enabled": item.Enabled}
 	default:
 		return domain.Rule{}, application.ErrValidation
 	}
@@ -479,6 +526,8 @@ func ruleRecordFor(item domain.Rule, now time.Time) (any, error) {
 		return &slaRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Status: item.Status, DeadlineHours: item.DeadlineHours, RemindHours: item.RemindHours, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
 	case "standards":
 		return &standardRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Scope: item.Scope, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
+	case "capability-codes":
+		return &capabilityCodeRecord{TenantID: item.TenantID, Kind: item.Kind, Name: item.Name, Scope: item.Scope, CheckType: item.CheckType, Enabled: item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: item.UpdatedBy}, nil
 	default:
 		return nil, application.ErrValidation
 	}
