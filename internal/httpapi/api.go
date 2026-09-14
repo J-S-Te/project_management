@@ -437,12 +437,18 @@ func navigationSections(roles []string) []string {
 		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director":   {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards", "reports"},
-		"project_manager":      {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
-		"device_admin":         {"dashboard", "projects", "equipment", "sites"},
-		"quality_manager":      {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "reports"},
-		"engineer":             {"projects", "implementation", "exceptions"},
-		"penetration_engineer": {"projects", "planning", "implementation", "exceptions"},
+		"technical_director": {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards", "reports"},
+		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
+		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）：只给 sites
+		// 不给 qualifications 会让这份权限无处使用，资质维护只剩质量管理员一条路径。
+		"device_admin": {"dashboard", "projects", "equipment", "sites", "qualifications"},
+		// 六类配置（含 standards/检测标准）都由 project_rule.manage 把守：配置维护者必须
+		// 能看到全部六类，否则「检测标准」这一类规则没有可维护它的角色。
+		"quality_manager": {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "standards", "reports"},
+		"engineer":        {"projects", "implementation", "exceptions"},
+		// 渗透测试工程师不持有 project.implementation.plan（该权限按职责矩阵只授予项目经理），
+		// 因此不能看到 planning：那里是实施计划与设备清单的录入表单，能填却没有提交按钮。
+		"penetration_engineer": {"projects", "implementation", "exceptions"},
 	}
 	seen := map[string]bool{}
 	sections := make([]string, 0, len(allNavigationSections))

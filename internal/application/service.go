@@ -395,27 +395,23 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		}
 		return input, nil
 	}
-	// 拆解规则执行语义统一由 splitRuleItemStatus 实现：存在启用规则时，未命中任何
-	// 规则的常规批次自动确认（Status=待分配，跳过人工确认），命中规则范围的批次保留
-	// 待确认以便重点复核；未配置规则时全部待确认。
-	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
-	if err != nil {
-		return input, err
-	}
+	// 手动创建的项目一律从「待确认」开始，不套用拆解规则的自动放行：拆解规则服务于
+	// 「合同激活 / 拆解调整」这类由系统生成的清单（常规批次可跳过人工确认），而手动清单
+	// 是业务管理员逐条录入的，必须走「服务项拆解确认」——它同时也是特殊方法项进入技术总监
+	// 复核窗口（tech_review_status=PENDING）的唯一入口，跳过它会让渗透测试项无法复核、
+	// 无法发布实施计划，项目就此卡死。
 	items := make([]domain.ServiceItem, 0, len(requested))
 	for index, source := range requested {
 		mode := strings.ToUpper(firstNonEmpty(source.TestMode, "STANDARD"))
 		if strings.TrimSpace(source.Site) == "" || mode != "STANDARD" && mode != "PENETRATION" {
 			return input, ErrValidation
 		}
-		// 与合同激活、拆解调整共用同一套规则语义，避免三条入口各自演化。
-		itemStatus := splitRuleItemStatus(splitRules, source)
 		items = append(items, domain.ServiceItem{
 			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
 			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category),
 			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
-			Status: itemStatus, ConflictStatus: "UNCHECKED",
+			Status: "待确认", ConflictStatus: "UNCHECKED",
 		})
 	}
 	input.Services = len(items)

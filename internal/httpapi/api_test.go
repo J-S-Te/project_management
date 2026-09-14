@@ -358,6 +358,131 @@ func TestDeleteRuleRejectsUnknownAndUnauthorized(t *testing.T) {
 	}
 }
 
+// 权限矩阵与栏目可见性必须对齐，三类缺口都会变成线上问题：
+// ①孤儿模块：某个写模块没有任何持有对应权限的角色能看到它（能力无处使用）；
+// ②孤儿权限：某个角色持有权限，但它把守的模块一个都看不到；
+// ③能看不能做：角色能看到某写模块，却不持有该模块写操作的任何权限（能填不能提交）。
+func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
+	// 模块 → 写操作权限：一个权限可以对应多个模块（project.resource.manage 同时把守
+	// 资质与能力、站点档案），但每个模块都必须至少有一个持有者能看到。
+	modules := map[string][]string{
+		"split-rules": {"project_rule.manage"}, "warning-rules": {"project_rule.manage"},
+		"automations": {"project_rule.manage"}, "sla": {"project_rule.manage"},
+		"standards": {"project_rule.manage"}, "permissions": {"project.field_permission.manage"},
+		"qualifications": {"project.resource.manage"}, "sites": {"project.resource.manage"},
+		"decomposition":  {"service_item.confirm", "project.decomposition.manage"},
+		"planning":       {"project.implementation.plan"},
+		"preparation":    {"project.implementation.plan"},
+		"methods":        {"project.special_method.review"},
+		"reports":        {"project.report.manage", "project.report.archive"},
+		"allocation":     {"project.team.assign", "project.execution.assign"},
+		"assignments":    {"project.execution.assign"},
+		"inbox":          {"project.execution.assign"},
+		"equipment":      {"project.device.manage"},
+		"implementation": {"project.field.execute", "project.field.complete"},
+		"exceptions":     {"project.deviation.report", "project.deviation.review"},
+	}
+	// 只读入口不算缺口：能看到这些模块但不持有写权限是允许的（看板、列表、评估视图）。
+	readOnlyAllowed := map[string]bool{
+		"qualifications": true, "sites": true, "equipment": true, "implementation": true,
+		"standards": true, "reports": true, "decomposition": true, "exceptions": true,
+		"inbox": true, "allocation": true, "assignments": true, "planning": true, "preparation": true,
+		"methods": true,
+	}
+	rolePermissions := map[string][]string{
+		"admin":                {"project_rule.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"system_admin":         {"project_rule.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"business_admin":       {"service_item.confirm", "project.decomposition.manage", "project.team.assign", "project.resource.read"},
+		"team_lead":            {"project.execution.assign", "project.deviation.review", "project.resource.read"},
+		"technical_director":   {"project.special_method.review", "project.report.archive", "project.deviation.review", "project.resource.read"},
+		"project_manager":      {"project.implementation.plan", "project.report.manage", "project.field.complete", "project.resource.read"},
+		"quality_manager":      {"project_rule.manage", "project.report.manage", "project.report.archive", "project.resource.manage", "project.resource.read"},
+		"device_admin":         {"project.device.manage", "project.device.read", "project.resource.manage", "project.resource.read"},
+		"engineer":             {"project.field.execute", "project.deviation.report"},
+		"penetration_engineer": {"project.field.execute", "project.deviation.report"},
+	}
+	visible := map[string]map[string]bool{}
+	for role := range rolePermissions {
+		body := navigationBodyForRole(t, role)
+		visible[role] = map[string]bool{}
+		for section := range modules {
+			if strings.Contains(body, `"`+section+`"`) {
+				visible[role][section] = true
+			}
+		}
+	}
+	holds := func(role, permission string) bool {
+		for _, held := range rolePermissions[role] {
+			if held == permission {
+				return true
+			}
+		}
+		return false
+	}
+	// ① 每个写模块至少有一个持有者能看到（孤儿模块会永远无法维护）。
+	for section, permissions := range modules {
+		readable := false
+		for role := range rolePermissions {
+			if !visible[role][section] {
+				continue
+			}
+			for _, permission := range permissions {
+				if holds(role, permission) {
+					readable = true
+				}
+			}
+		}
+		if !readable {
+			t.Fatalf("模块 %s 没有任何持有者能看到，能力无处使用（权限：%v）", section, permissions)
+		}
+	}
+	// ② 每个权限都必须至少对应一个该角色看得到的模块（否则权限白给）。
+	// 只读目录权限（*.read）不参与：它们是人员/资质/设备目录的数据源，服务于其它模块的
+	// 表单渲染，本身不构成某个模块的入口。
+	for role, permissions := range rolePermissions {
+		for _, permission := range permissions {
+			if strings.HasSuffix(permission, ".read") {
+				continue
+			}
+			entry := false
+			for section, sectionPermissions := range modules {
+				for _, candidate := range sectionPermissions {
+					if candidate == permission && visible[role][section] {
+						entry = true
+					}
+				}
+			}
+			if !entry && permission != "project.read" {
+				t.Fatalf("角色 %s 持有 %s，但对应模块一个都看不到", role, permission)
+			}
+		}
+	}
+	// ③ 能看到写模块的角色必须持有该模块写操作的某个权限；只读视图（看板/列表/评估）
+	// 除外——实施看板对团队负责人就是只读的，规划表单却不是。
+	for role := range rolePermissions {
+		for section, permissions := range modules {
+			if !visible[role][section] || readOnlyAllowed[section] {
+				continue
+			}
+			allowed := false
+			for _, permission := range permissions {
+				if holds(role, permission) {
+					allowed = true
+				}
+			}
+			if !allowed {
+				t.Fatalf("角色 %s 能看到 %s，却不持有其写操作权限 %v（会出现能填不能提交）", role, section, permissions)
+			}
+		}
+		// 规划/准备是录入表单：看不到提交按钮的填充体验即为此类缺陷，专门兜一条硬约束。
+		for _, section := range []string{"planning", "preparation"} {
+			if visible[role][section] && !holds(role, "project.implementation.plan") {
+				t.Fatalf("角色 %s 能看到 %s 却没有 project.implementation.plan", role, section)
+			}
+		}
+	}
+}
+
 func navigationBodyForRole(t *testing.T, role string) string {
 	t.Helper()
 	repository := &repo{}
