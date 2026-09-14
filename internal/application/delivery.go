@@ -187,6 +187,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	}
 	// 拆解规则在合同激活主路径同样生效：存在启用规则时，未命中任何规则的服务项
 	// 直接进入待分配，命中规则的保留待确认以便重点复核；无规则时全部待确认。
+	// 特殊方法项即使被自动放行，也必须同步进入技术总监复核窗口。
 	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
 	if err != nil {
 		return domain.Project{}, err
@@ -203,7 +204,8 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return domain.Project{}, ErrValidation
 		}
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: splitRuleItemStatus(splitRules, source), ConflictStatus: "UNCHECKED"})
+		status, techReview := splitRuleInitialState(splitRules, source, mode == "PENETRATION")
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: status, TechReviewStatus: techReview, ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
@@ -252,20 +254,29 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 			return ErrValidation
 		}
 		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突；
-		// 拆解规则与创建/激活路径共用同一语义。
-		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: splitRuleItemStatus(splitRules, source), ConflictStatus: "UNCHECKED"})
+		// 拆解规则与合同激活路径共用同一语义（含特殊方法项的复核窗口）。
+		status, techReview := splitRuleInitialState(splitRules, source, mode == "PENETRATION")
+		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: status, TechReviewStatus: techReview, ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items}))
 }
 
-// splitRuleItemStatus 决定一个服务项在拆解时的初始状态：存在启用规则且未命中任何
-// 规则的服务项自动确认（待分配，跳过人工确认），命中规则的保留待确认以便重点复核；
-// 未配置规则时全部待确认。三条拆解入口（手工创建、合同激活、拆解调整）共用此语义。
-func splitRuleItemStatus(splitRules []domain.Rule, source domain.ContractService) string {
+// splitRuleInitialState 决定「系统生成清单」（合同激活、拆解调整）中一个服务项的初始状态：
+// 存在启用规则且未命中任何规则范围的常规批次自动放行（待分配，跳过人工拆解确认），
+// 命中规则范围的保留待确认以便重点复核；未配置规则时全部待确认。
+//
+// 自动放行只跳过人工拆解确认，不能跳过技术复核：特殊方法（渗透测试）项在自动放行时必须
+// 同时置 tech_review_status=PENDING，否则它既无法被技术总监复核（复核前置为 PENDING/
+// REJECTED），也无法发布实施计划（前置为 APPROVED），项目会永久卡死在这两步之间。
+// 手动创建的项目不套用此语义（见 CreateProjectWithServiceItems）。
+func splitRuleInitialState(splitRules []domain.Rule, source domain.ContractService, special bool) (status, techReview string) {
 	if hasEnabledSplitRule(splitRules) && !matchesSplitRule(splitRules, source.Batch, source.Site, source.Category) {
-		return "待分配"
+		if special {
+			return "待分配", "PENDING"
+		}
+		return "待分配", ""
 	}
-	return "待确认"
+	return "待确认", ""
 }
 
 // ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。

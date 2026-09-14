@@ -419,28 +419,64 @@ func (r *splitRuleRepository) ListRules(context.Context, string, string) ([]doma
 	return r.rules, nil
 }
 
-// 存在启用拆解规则时：未命中适用范围的常规批次自动确认（待分配），命中的保留待确认。
-func TestSplitRulesAutoConfirmNonMatchingItems(t *testing.T) {
+// 手动创建项目不套用拆解规则的自动放行：服务项一律待确认，必须走「服务项拆解确认」。
+// 回归背景：此前手动清单同样套用「存在启用规则且未命中 → 待分配」，导致业务管理员
+// 新建项目后项目直接进入待分配，从未出现在拆解确认里；而确认拆解是特殊方法项进入
+// 技术总监复核窗口的唯一入口，渗透测试项因此既不能复核也不能发布实施计划。
+func TestManualProjectCreationAlwaysWaitsForConfirmation(t *testing.T) {
 	repository := &splitRuleRepository{rules: []domain.Rule{{Enabled: true, Name: "大额批次", Scope: "金额超过 50 万元"}}}
 	service := &Service{Repo: repository}
 	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"})
-	_, err := service.CreateProjectWithServiceItems(context.Background(), principal,
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principal,
 		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"},
 		[]domain.ContractService{
 			{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"},
 			{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "STANDARD"},
+			{Site: "杭州机房", Batch: "第一批", TestMode: "PENETRATION"},
 		})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.items) != 2 {
+	if created.Status != "待拆解确认" {
+		t.Fatalf("项目状态=%q，期望「待拆解确认」", created.Status)
+	}
+	if len(repository.items) != 3 {
 		t.Fatalf("items=%+v", repository.items)
 	}
-	if repository.items[0].Status != "待分配" {
-		t.Fatalf("non-matching item should auto-confirm, got %q", repository.items[0].Status)
+	for _, item := range repository.items {
+		if item.Status != "待确认" {
+			t.Fatalf("服务项 %s 状态=%q，期望「待确认」", item.ID, item.Status)
+		}
+		// 待确认阶段还不该进入复核窗口：确认拆解时才置 PENDING。
+		if item.TechReviewStatus != "" {
+			t.Fatalf("服务项 %s 复核状态=%q，期望空", item.ID, item.TechReviewStatus)
+		}
 	}
-	if repository.items[1].Status != "待确认" {
-		t.Fatalf("matching item should remain manual-confirm, got %q", repository.items[1].Status)
+}
+
+// 系统生成清单（合同激活）仍按拆解规则自动放行常规批次，但特殊方法项必须同时进入
+// 技术总监复核窗口，否则自动放行会把它卡在「无法复核 / 无法发布实施计划」之间。
+func TestSplitRulesAutoConfirmOnlyForGeneratedServices(t *testing.T) {
+	rules := []domain.Rule{{Enabled: true, Name: "大额批次", Scope: "金额超过 50 万元"}}
+	status, techReview := splitRuleInitialState(rules,
+		domain.ContractService{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"}, false)
+	if status != "待分配" || techReview != "" {
+		t.Fatalf("常规批次应自动放行到待分配且无需复核，实际 status=%q techReview=%q", status, techReview)
+	}
+	status, techReview = splitRuleInitialState(rules,
+		domain.ContractService{Site: "杭州机房", Batch: "第一批", TestMode: "PENETRATION"}, true)
+	if status != "待分配" || techReview != "PENDING" {
+		t.Fatalf("特殊方法项自动放行时必须进入复核窗口，实际 status=%q techReview=%q", status, techReview)
+	}
+	status, techReview = splitRuleInitialState(rules,
+		domain.ContractService{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "PENETRATION"}, true)
+	if status != "待确认" || techReview != "" {
+		t.Fatalf("命中规则范围的批次应保留待确认，实际 status=%q techReview=%q", status, techReview)
+	}
+	// 未配置规则时全部待确认（不回退到自动放行）。
+	status, techReview = splitRuleInitialState(nil, domain.ContractService{Batch: "第一批"}, false)
+	if status != "待确认" || techReview != "" {
+		t.Fatalf("无规则时应全部待确认，实际 status=%q techReview=%q", status, techReview)
 	}
 }
 
