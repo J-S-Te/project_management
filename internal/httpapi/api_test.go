@@ -204,6 +204,60 @@ func TestProjectCreationAndRead(t *testing.T) {
 	}
 }
 
+// 字段级权限的角色下拉只能选目录内的角色：接口必须下发全部应用角色（含中文展示名），
+// 并且不依赖当前主体自己的角色 —— 配置者通常不是被配置的那个人。
+func TestRoleCatalogExposesEveryApplicationRole(t *testing.T) {
+	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodGet, "/api/v1/role-catalog", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Roles []struct {
+				Code string `json:"code"`
+				Name string `json:"name"`
+			} `json:"roles"`
+			CatalogVersion string `json:"catalog_version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, response.Body.String())
+	}
+	if len(body.Data.Roles) < 10 {
+		t.Fatalf("role count = %d, want the full application catalog", len(body.Data.Roles))
+	}
+	// /api/v1/navigation 返回的是「当前主体的角色」，两者不能混用：这里必须是全量目录。
+	if len(body.Data.Roles) == 1 {
+		t.Fatalf("role catalog collapsed to the caller role: %s", response.Body.String())
+	}
+	codes := map[string]string{}
+	for _, role := range body.Data.Roles {
+		if role.Code == "" || role.Name == "" {
+			t.Fatalf("role entry is incomplete: %+v", role)
+		}
+		if _, duplicate := codes[role.Code]; duplicate {
+			t.Fatalf("duplicate role %q", role.Code)
+		}
+		codes[role.Code] = role.Name
+	}
+	for _, code := range []string{"admin", "system_admin", "business_admin", "team_lead", "technical_director", "project_manager", "engineer", "penetration_engineer", "quality_manager", "device_admin"} {
+		if codes[code] == "" {
+			t.Fatalf("role %q missing from catalog: %s", code, response.Body.String())
+		}
+	}
+	if codes["admin"] != "项目系统管理员" {
+		t.Fatalf("admin name = %q, want 项目系统管理员", codes["admin"])
+	}
+}
+
+// 没有 project.read 的主体不得读角色目录（与 /navigation、/rules 的准入条件一致）。
+func TestRoleCatalogRequiresProjectRead(t *testing.T) {
+	response := perform(router(t, map[string]bool{}, nil), http.MethodGet, "/api/v1/role-catalog", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func navigationBodyForRole(t *testing.T, role string) string {
 	t.Helper()
 	repository := &repo{}

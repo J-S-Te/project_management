@@ -89,6 +89,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.Use(h.authenticate(), h.auditWrites())
 	api.GET("/auth/me", h.me)
 	api.GET("/navigation", require("project.read"), h.navigation)
+	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.POST("/projects", require("project.create"), h.createProject)
@@ -397,6 +398,19 @@ func (h *Handler) navigation(c *gin.Context) {
 		"authorization_revision": p.AuthorizationRevision,
 		"catalog_version":        p.CatalogVersion,
 	})
+}
+
+// roleCatalog 下发本应用的角色目录，供字段级权限等「按角色配置」的界面渲染下拉选项。
+// 与 /navigation 的 roles（当前主体的有效角色）不同，这里是全量角色定义：角色码写错既不会
+// 被规则接口拒绝、也永远不会命中任何主体，所以选项必须来自服务端清单而不是前端硬编码。
+func (h *Handler) roleCatalog(c *gin.Context) {
+	roles, err := platform.RoleCatalog()
+	if err != nil {
+		h.logger.Error("load project role catalog", "error", err)
+		writeError(c, http.StatusInternalServerError, "PM_INTERNAL", "角色目录不可用")
+		return
+	}
+	writeData(c, http.StatusOK, map[string]any{"roles": roles, "catalog_version": principal(c).CatalogVersion})
 }
 
 // allNavigationSections 是本子系统前端已实现的全部工作区栏目，顺序与页面分组一致。
