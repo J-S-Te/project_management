@@ -454,31 +454,127 @@ func TestManualProjectCreationAlwaysWaitsForConfirmation(t *testing.T) {
 	}
 }
 
-// 系统生成清单（合同激活）仍按拆解规则自动放行常规批次，但特殊方法项必须同时进入
-// 技术总监复核窗口，否则自动放行会把它卡在「无法复核 / 无法发布实施计划」之间。
-func TestSplitRulesAutoConfirmOnlyForGeneratedServices(t *testing.T) {
-	rules := []domain.Rule{{Enabled: true, Name: "大额批次", Scope: "金额超过 50 万元"}}
-	status, techReview := splitRuleInitialState(rules,
-		domain.ContractService{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"}, false)
-	if status != "待分配" || techReview != "" {
-		t.Fatalf("常规批次应自动放行到待分配且无需复核，实际 status=%q techReview=%q", status, techReview)
+// 拆解口径由检测类别域决定（原型 PG-CFG-01 第二块）：
+// 必为特殊方法 → 渗透测试 + 进复核窗口；否 → 以域为准，忽略清单给的特殊方法标记；
+// 可标记 → 沿用清单给的方法类型；体系要求缺省时取域的默认值。
+func TestSplitOutcomeFollowsDetectionCategoryDomain(t *testing.T) {
+	index := map[string]domain.DetectionCategory{
+		"渗透测试":   {Category: "渗透测试", SystemStandard: "ISO 27001", SpecialMethod: domain.SpecialMethodRequired},
+		"等保测评":   {Category: "等保测评", SystemStandard: "等保 2.0", SpecialMethod: domain.SpecialMethodNo},
+		"应急响应服务": {Category: "应急响应服务", SpecialMethod: domain.SpecialMethodMarkable},
 	}
-	status, techReview = splitRuleInitialState(rules,
-		domain.ContractService{Site: "杭州机房", Batch: "第一批", TestMode: "PENETRATION"}, true)
-	if status != "待分配" || techReview != "PENDING" {
-		t.Fatalf("特殊方法项自动放行时必须进入复核窗口，实际 status=%q techReview=%q", status, techReview)
+	plan := SplitPlan{SplitPolicy: domain.DefaultSplitPolicy()}
+
+	required := resolveSplitOutcome(plan, "渗透测试", "STANDARD", "", index)
+	if required.TestMode != "PENETRATION" || required.Special != "是" || required.SystemStandard != "ISO 27001" {
+		t.Fatalf("必为特殊方法应强制渗透测试并补默认体系要求，实际 %+v", required)
 	}
-	status, techReview = splitRuleInitialState(rules,
-		domain.ContractService{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "PENETRATION"}, true)
-	if status != "待确认" || techReview != "" {
-		t.Fatalf("命中规则范围的批次应保留待确认，实际 status=%q techReview=%q", status, techReview)
+	// 清单恶意/误标特殊方法时以域为准：域说「否」，就不能变成特殊方法。
+	denied := resolveSplitOutcome(plan, "等保测评", "PENETRATION", "", index)
+	if denied.TestMode != "STANDARD" || denied.Special != "否" || denied.SystemStandard != "等保 2.0" {
+		t.Fatalf("域标注「否」时应回到标准方法，实际 %+v", denied)
 	}
-	// 未配置规则时全部待确认（不回退到自动放行）。
-	status, techReview = splitRuleInitialState(nil, domain.ContractService{Batch: "第一批"}, false)
-	if status != "待确认" || techReview != "" {
-		t.Fatalf("无规则时应全部待确认，实际 status=%q techReview=%q", status, techReview)
+	markable := resolveSplitOutcome(plan, "应急响应服务", "PENETRATION", "", index)
+	if markable.TestMode != "PENETRATION" || markable.Special != "是" {
+		t.Fatalf("可标记应沿用清单给定的方法类型，实际 %+v", markable)
+	}
+	// 清单自带体系要求时不覆盖，域默认值只作为缺省。
+	explicit := resolveSplitOutcome(plan, "等保测评", "STANDARD", "自定义体系", index)
+	if explicit.SystemStandard != "自定义体系" {
+		t.Fatalf("显式体系要求不应被域默认值覆盖，实际 %q", explicit.SystemStandard)
 	}
 }
+
+// 分组规则缺失时按 missing_rule_action 处理：默认标记「待人工确认」并通知业务管理员，
+// 而不是像旧实现那样自动放行到待分配（原型拆解流程：未命中 → 待人工确认 + 通知）。
+func TestSplitOutcomeMissingRuleActions(t *testing.T) {
+	policy := domain.DefaultSplitPolicy()
+	plan := SplitPlan{SplitPolicy: policy}
+	missing := resolveSplitOutcome(plan, "未配置的类别", "STANDARD", "", map[string]domain.DetectionCategory{})
+	if !missing.MissingRule || missing.Status != domain.ServiceItemStatusPendingConfirm {
+		t.Fatalf("缺规则默认应标记待人工确认，实际 %+v", missing)
+	}
+	policy.MissingRuleAction = domain.SplitMissingDefaultRule
+	policy.DefaultStatus = domain.ServiceItemStatusPendingAssign
+	plan = SplitPlan{SplitPolicy: policy}
+	generated := resolveSplitOutcome(plan, "未配置的类别", "STANDARD", "", map[string]domain.DetectionCategory{})
+	if !generated.MissingRule || generated.Status != domain.ServiceItemStatusPendingAssign {
+		t.Fatalf("按默认规则生成时应落到默认进入状态，实际 %+v", generated)
+	}
+}
+
+// 覆盖规则按优先级取第一条命中，只覆盖显式给出的设置，其余沿用默认规则。
+func TestSplitOverrideAppliesByPriority(t *testing.T) {
+	policy := domain.DefaultSplitPolicy()
+	overrides := []domain.SplitOverride{
+		{Name: "金融行业批量合同", Enabled: true, Priority: 10,
+			Match:    domain.SplitOverrideMatch{CustomerContains: "银行"},
+			Settings: domain.SplitOverrideSettings{DimensionPrimary: stringPtr(domain.SplitDimensionSite)}},
+		{Name: "政务云专项", Enabled: true, Priority: 20,
+			Match:    domain.SplitOverrideMatch{CustomerContains: "银行"},
+			Settings: domain.SplitOverrideSettings{DefaultStatus: stringPtr(domain.ServiceItemStatusPendingConfirm)}},
+		{Name: "停用的覆盖", Enabled: false, Priority: 1,
+			Match:    domain.SplitOverrideMatch{CustomerContains: "银行"},
+			Settings: domain.SplitOverrideSettings{DefaultStatus: stringPtr(domain.ServiceItemStatusPendingAssign)}},
+	}
+	hit := -1
+	for index, override := range overrides {
+		if override.Matches("某某银行", "HT-1", 5, nil) {
+			hit = index
+			applySplitOverride(&policy, override.Settings)
+			break
+		}
+	}
+	if hit != 0 {
+		t.Fatalf("应按优先级取第一条启用且命中的覆盖规则，实际命中索引 %d", hit)
+	}
+	if policy.DimensionPrimary != domain.SplitDimensionSite {
+		t.Fatalf("覆盖应生效：实际维度 1 = %q", policy.DimensionPrimary)
+	}
+	// 未被覆盖的字段必须保留默认规则取值（整行覆盖会静默清掉默认配置）。
+	if policy.DimensionSecondary != domain.SplitDimensionCategory || policy.DefaultStatus != domain.ServiceItemStatusPendingConfirm {
+		t.Fatalf("未覆盖字段应沿用默认规则，实际 %+v", policy)
+	}
+	// 条件不满足时不命中（AND 语义）。
+	if overrides[0].Matches("某某保险", "HT-1", 5, nil) {
+		t.Fatal("客户名不包含条件文本时不应命中")
+	}
+	if !overrides[0].Matches("某某银行", "HT-1", 5, []string{"渗透测试"}) {
+		t.Fatal("未配置类别条件时不应因传入类别而失配")
+	}
+}
+
+// 分组维度由配置决定：默认「批次 + 检测类别」，覆盖规则可改成「场所 + 批次 + 检测类别」。
+func TestSplitGroupingFollowsDimensionConfig(t *testing.T) {
+	index := map[string]domain.DetectionCategory{
+		"等保测评": {Category: "等保测评", SpecialMethod: domain.SpecialMethodNo},
+	}
+	sources := []domain.ContractService{
+		{SourceID: "S1", Site: "杭州机房", Batch: "第一批", Category: "等保测评"},
+		{SourceID: "S2", Site: "杭州机房", Batch: "第一批", Category: "等保测评"},
+		{SourceID: "S3", Site: "上海机房", Batch: "第一批", Category: "等保测评"},
+	}
+	defaultPlan := SplitPlan{SplitPolicy: domain.DefaultSplitPolicy()}
+	grouped, err := groupContractServicesByPlan(defaultPlan, "客户", "HT-1", sources, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 默认维度是批次 + 检测类别：同一批次同一类别合并，跨场所仍是一条，来源清单行拼接保留。
+	if len(grouped) != 1 || grouped[0].Item.SourceID != "S1、S2、S3" {
+		t.Fatalf("默认维度应合并为 1 条，实际 %+v", grouped)
+	}
+	threeDim := defaultPlan
+	threeDim.DimensionPrimary = domain.SplitDimensionSite
+	grouped, err = groupContractServicesByPlan(threeDim, "客户", "HT-1", sources, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grouped) != 2 {
+		t.Fatalf("按场所分组应得到 2 条，实际 %d 条", len(grouped))
+	}
+}
+
+func stringPtr(value string) *string { return &value }
 
 // 未配置任何拆解规则时行为与历史一致：全部服务项待人工确认，不自动放行。
 func TestSplitRulesWithoutRulesKeepManualConfirm(t *testing.T) {

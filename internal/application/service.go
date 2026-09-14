@@ -432,6 +432,11 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 	if len(ids) == 0 {
 		return nil, ErrValidation
 	}
+	// 范围变更检测先于确认执行：拆解结果与合同清单不一致时进入补充协议分支并中止本次确认，
+	// 避免"范围变了却直接确认"把差异带进下游。
+	if err := s.CheckScopeChange(ctx, p, filter, ids); err != nil {
+		return nil, err
+	}
 	// 确认拆解是纯事务性行更新，直接走仓储层加锁事务；不再同步等待 Temporal 工作流，
 	// 避免 Worker 未就绪或活动重试把请求打成网关 504。状态前置校验与数据范围过滤
 	// 都在事务行锁内执行（repository.ConfirmServiceItems）。
@@ -562,43 +567,6 @@ func contains(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
 			return true
-		}
-	}
-	return false
-}
-
-// hasEnabledSplitRule 判断租户是否配置了至少一条启用的拆解规则。无规则时
-// 拆解行为保持历史一致（全部待确认），规则存在后才启用自动确认分支。
-func hasEnabledSplitRule(rules []domain.Rule) bool {
-	for i := range rules {
-		if rules[i].Enabled {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesSplitRule 按双向包含匹配判断服务项批次/站点/类别是否命中规则适用范围。
-// 规则 Scope 是自由文本（如"单批次金额超过 50 万元"），因此用包含关系近似匹配：
-// 文本与范围任一方向包含即视为命中，便于把"大额/特殊批次"写进适用范围。
-func matchesSplitRule(rules []domain.Rule, texts ...string) bool {
-	for i := range rules {
-		rule := &rules[i]
-		if !rule.Enabled {
-			continue
-		}
-		scope := strings.ToLower(strings.TrimSpace(rule.Scope))
-		if scope == "" {
-			continue
-		}
-		for _, text := range texts {
-			value := strings.ToLower(strings.TrimSpace(text))
-			if value == "" {
-				continue
-			}
-			if strings.Contains(value, scope) || strings.Contains(scope, value) {
-				return true
-			}
 		}
 	}
 	return false

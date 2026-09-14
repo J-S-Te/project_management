@@ -129,3 +129,33 @@ func TestSiteRegistryMigrationCreatesCoordinateAwareTable(t *testing.T) {
 		}
 	}
 }
+
+// 合同拆解规则配置 v2：三块配置表 + 服务项体系要求字段 + 存量自由文本规则清理。
+func TestSplitRuleConfigMigration(t *testing.T) {
+	body, err := Files.ReadFile("000017_split_rule_config_v2.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"pm_split_policy", "pm_detection_category", "pm_split_override",
+		"dimension_primary", "dimension_secondary", "default_status",
+		"missing_rule_action", "scope_change_detection",
+		"required_qualifications", "special_method",
+		"match_conditions JSON", "override_settings JSON", "priority INT",
+		"ADD COLUMN system_standard VARCHAR(128) NOT NULL DEFAULT ''",
+		"DELETE FROM pm_split_rule WHERE kind = 'split-rules'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("split rule config migration missing %q", required)
+		}
+	}
+	// 已应用的迁移不得再改：第三维用独立迁移追加。
+	tertiary, err := Files.ReadFile("000018_split_policy_tertiary_dimension.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tertiary), "dimension_tertiary VARCHAR(32) NOT NULL DEFAULT ''") {
+		t.Fatal("tertiary dimension migration is missing")
+	}
+}

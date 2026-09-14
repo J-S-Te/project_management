@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -137,6 +138,16 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 删除与新建、编辑同权：路由层按 kind 的两种权限并集粗放行（字段级权限由
 	// project.field_permission.manage 把关），具体 kind 的判定在应用层 DeleteRule。
 	api.DELETE("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage"), h.deleteRule)
+	// 合同拆解规则配置 v2（原型 PG-CFG-01）：默认分组规则 / 检测类别域 / 覆盖规则。
+	// 读以 project.read 为基线（页面要展示当前配置），写统一由 project_rule.manage 把关。
+	api.GET("/split-policy", require("project.read"), h.getSplitPolicy)
+	api.PUT("/split-policy", require("project_rule.manage"), h.saveSplitPolicy)
+	api.GET("/detection-categories", require("project.read"), h.listDetectionCategories)
+	api.POST("/detection-categories", require("project_rule.manage"), h.saveDetectionCategory)
+	api.DELETE("/detection-categories/:category", require("project_rule.manage"), h.deleteDetectionCategory)
+	api.GET("/split-overrides", require("project.read"), h.listSplitOverrides)
+	api.POST("/split-overrides", require("project_rule.manage"), h.saveSplitOverride)
+	api.DELETE("/split-overrides/:id", require("project_rule.manage"), h.deleteSplitOverride)
 	api.POST("/service-items/:id/special-method-review", require("project.special_method.review"), h.reviewSpecialMethod)
 	// 报告推进到"已归档"才需要 project.report.archive；现场执行角色不应顺带获得归档权。
 	// 路由层只做粗粒度放行：具体阶段权限（编制/审核/签发用 project.report.manage，
@@ -977,6 +988,104 @@ func (h *Handler) deleteRule(c *gin.Context) {
 		return
 	}
 	removed, err := h.service.DeleteRule(c.Request.Context(), principal(c), c.Query("kind"), id)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, removed)
+}
+
+// getSplitPolicy / saveSplitPolicy 读写默认分组规则（原型 PG-CFG-01 第一块）。
+func (h *Handler) getSplitPolicy(c *gin.Context) {
+	policy, err := h.service.GetSplitPolicy(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, policy)
+}
+
+func (h *Handler) saveSplitPolicy(c *gin.Context) {
+	var input domain.SplitPolicy
+	if !decode(c, &input) {
+		return
+	}
+	policy, err := h.service.SaveSplitPolicy(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, policy)
+}
+
+// listDetectionCategories / saveDetectionCategory / deleteDetectionCategory
+// 维护检测类别域（原型第二块）：默认体系要求、必备资质、是否特殊方法。
+func (h *Handler) listDetectionCategories(c *gin.Context) {
+	items, err := h.service.ListDetectionCategories(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
+func (h *Handler) saveDetectionCategory(c *gin.Context) {
+	var input domain.DetectionCategory
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.SaveDetectionCategory(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) deleteDetectionCategory(c *gin.Context) {
+	// 路由参数可能带编码的类别名（含空格/中文），按原值解码后再交给应用层。
+	category, err := url.PathUnescape(c.Param("category"))
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_CATEGORY", "检测类别不合法")
+		return
+	}
+	if err := h.service.DeleteDetectionCategory(c.Request.Context(), principal(c), category); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"category": category})
+}
+
+// listSplitOverrides / saveSplitOverride / deleteSplitOverride 维护覆盖规则（原型第三块）。
+func (h *Handler) listSplitOverrides(c *gin.Context) {
+	items, err := h.service.ListSplitOverrides(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
+func (h *Handler) saveSplitOverride(c *gin.Context) {
+	var input domain.SplitOverride
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.SaveSplitOverride(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) deleteSplitOverride(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_ID", "覆盖规则编号不合法")
+		return
+	}
+	removed, err := h.service.DeleteSplitOverride(c.Request.Context(), principal(c), id)
 	if err != nil {
 		writeServiceError(c, err)
 		return
