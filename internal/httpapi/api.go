@@ -42,6 +42,9 @@ type Handler struct {
 type RouterOptions struct {
 	ContractIntegration  *ContractIntegrationOptions
 	DashboardIntegration *DashboardIntegrationOptions
+	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
+	// 就绪检查直接判为 not_ready，避免带着缺失的列/表对外提供写服务（写路径只会报 500）。
+	PendingMigrations []string
 }
 
 func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, options ...RouterOptions) *gin.Engine {
@@ -52,22 +55,30 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	if audit != nil {
 		auditStatus = "enabled"
 	}
-	router.GET("/healthz", func(c *gin.Context) {
-		writeData(c, http.StatusOK, map[string]string{"status": "ok", "audit": auditStatus})
-	})
-	router.GET("/readyz", func(c *gin.Context) {
-		status := http.StatusOK
-		state := "ready"
-		if auditRequired() && audit == nil {
-			status = http.StatusServiceUnavailable
-			state = "not_ready"
-		}
-		writeData(c, status, map[string]string{"status": state, "audit": auditStatus})
-	})
+	// 就绪与存活分离：/healthz 只表进程活着（并带出待迁移数量，便于巡检发现），
+	// /readyz 在"库结构落后于代码"或审计未就绪时返回 503，让部署流水线在放量前拦住。
 	var routerOptions RouterOptions
 	if len(options) > 0 {
 		routerOptions = options[0]
 	}
+	pendingMigrations := routerOptions.PendingMigrations
+	router.GET("/healthz", func(c *gin.Context) {
+		writeData(c, http.StatusOK, map[string]any{"status": "ok", "audit": auditStatus, "pending_migrations": len(pendingMigrations)})
+	})
+	router.GET("/readyz", func(c *gin.Context) {
+		status := http.StatusOK
+		state := "ready"
+		body := map[string]any{"status": state, "audit": auditStatus, "pending_migrations": pendingMigrations}
+		if len(pendingMigrations) > 0 {
+			status = http.StatusServiceUnavailable
+			body["status"] = "migrations_pending"
+			body["hint"] = "库结构落后于代码，请先执行 project-migrate（后端镜像内的 /usr/local/bin/project-migrate）再放量"
+		} else if auditRequired() && audit == nil {
+			status = http.StatusServiceUnavailable
+			body["status"] = "not_ready"
+		}
+		writeData(c, status, body)
+	})
 	if integration := routerOptions.ContractIntegration; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1")
 		internal.Use(h.authenticateContractIntegration(*integration), h.auditWrites())
