@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,9 @@ const (
 	EventReportStatusUpdated   = "REPORT_STATUS_UPDATED"
 	// EventEquipmentReturned 记录设备归还：写回设备行的归还时间，释放占用。
 	EventEquipmentReturned = "EQUIPMENT_RETURNED"
+	// EventScopeChangeDetected 由「范围变更检测」在确认拆解时发出：拆解结果与合同清单
+	// 的范围不一致，项目进入补充协议处理中等待合同回写。原型拆解流程的「是否范围变更」分支。
+	EventScopeChangeDetected = "SCOPE_CHANGE_DETECTED"
 	// EventAutomationTriggered 是配置驱动的派生事件：事件落库后有启用的
 	//「自动化触发」规则命中时才追加，保证配置表真正参与运行时行为。
 	EventAutomationTriggered = "AUTOMATION_TRIGGERED"
@@ -181,34 +185,45 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		return domain.Project{}, ErrForbidden
 	}
 	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
-	grouped, groupErr := groupContractServices(input.Services)
+	// 分组与初始状态由配置决定（原型 PG-CFG-01）：先解析本次生效方案（覆盖规则优先），
+	// 再按方案的分组维度生成服务项，并按检测类别域补齐体系要求与特殊方法口径。
+	// 「未命中分组规则」不再自动放行——原型拆解流程规定：未命中 → 标记待人工确认并通知业务管理员。
+	plan, planErr := s.resolveSplitPlan(ctx, p.TenantID, project.Customer, project.Contract, len(input.Services), contractServiceCategories(input.Services))
+	if planErr != nil {
+		return domain.Project{}, planErr
+	}
+	categoryDomain, domainErr := s.splitCategoryDomain(ctx, p.TenantID)
+	if domainErr != nil {
+		return domain.Project{}, domainErr
+	}
+	grouped, groupErr := groupContractServicesByPlan(plan, project.Customer, project.Contract, input.Services, categoryDomain)
 	if groupErr != nil {
 		return domain.Project{}, groupErr
 	}
-	// 拆解规则在合同激活主路径同样生效：存在启用规则时，未命中任何规则的服务项
-	// 直接进入待分配，命中规则的保留待确认以便重点复核；无规则时全部待确认。
-	// 特殊方法项即使被自动放行，也必须同步进入技术总监复核窗口。
-	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
-	if err != nil {
-		return domain.Project{}, err
-	}
 	items := make([]domain.ServiceItem, 0, len(grouped))
-	for index, source := range grouped {
-		if strings.TrimSpace(source.SourceID) == "" || strings.TrimSpace(source.Site) == "" || strings.TrimSpace(source.Batch) == "" || strings.TrimSpace(source.Category) == "" {
-			return domain.Project{}, ErrValidation
+	missingCategories := make([]string, 0, 4)
+	for index, group := range grouped {
+		item := group.Item
+		outcome := group.Outcome
+		if outcome.MissingRule && !slices.Contains(missingCategories, item.Category) {
+			missingCategories = append(missingCategories, item.Category)
 		}
-		mode := strings.ToUpper(strings.TrimSpace(source.TestMode))
-		if mode == "" {
-			mode = "STANDARD"
+		// 技术要求摘要：关闭时留空人工填写，否则沿用合同条款抽取的文本。
+		requirement := item.Requirement
+		if !plan.GenerateRequirementSummary {
+			requirement = ""
 		}
-		if mode != "STANDARD" && mode != "PENETRATION" {
-			return domain.Project{}, ErrValidation
+		// 直接进入待分配（跳过人工确认）的特殊方法项必须同时进入技术总监复核窗口；
+		// 停在待确认的项则由「确认拆解」在确认时置为 PENDING，两条路径都不跳过复核。
+		techReview := ""
+		if outcome.Special == "是" && outcome.Status == domain.ServiceItemStatusPendingAssign {
+			techReview = "PENDING"
 		}
-		status, techReview := splitRuleInitialState(splitRules, source, mode == "PENETRATION")
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: strings.TrimSpace(source.SourceID), Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category), Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode, Status: status, TechReviewStatus: techReview, ConflictStatus: "UNCHECKED"})
+		// 必检能力码来自检测类别域：分配工程师时按此校验，留空则只保留渗透测试的固定要求。
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
-	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded})
+	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
 	if err := repo.ActivateContract(ctx, project, items, event); err != nil {
 		if errors.Is(err, ErrDuplicateContract) {
 			// 竞态窗口：find 阶段两请求都未命中，先到者已建好项目，后到者撞唯一键。
@@ -221,7 +236,67 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		}
 		return domain.Project{}, err
 	}
+	// 缺规则的告警是主流程的派生副作用：放在事务提交之后，绝不能影响已经落库的拆解结果。
+	if len(missingCategories) > 0 && plan.MissingRuleAction == domain.SplitMissingHumanConfirm {
+		s.notifyMissingSplitRule(ctx, p, project, missingCategories)
+	}
 	return project, nil
+}
+
+// notifyMissingSplitRule 在检测类别不在检测类别域内、或分组规则无法确定时，
+// 按原型「分组规则缺失时」的默认口径通知业务管理员：标记待人工确认并提醒核对。
+func (s *Service) notifyMissingSplitRule(ctx context.Context, p platform.Principal, project domain.Project, categories []string) {
+	if s.Notifications == nil || s.Personnel == nil || len(categories) == 0 {
+		return
+	}
+	recipients := s.roleRecipients(ctx, p.TenantID, "business_admin")
+	if len(recipients) == 0 {
+		return
+	}
+	notification := platform.NotificationEvent{
+		EventID:   ulid.Make().String(),
+		EventType: "SPLIT_RULE_MISSING",
+		// 必须是平台白名单取值，写错会让整条通知被判 400。
+		Scope:    platform.NotificationScopeCrossSystem,
+		Priority: "HIGH",
+		Title:    fmt.Sprintf("合同 %s 存在未配置的检测类别，已标记待人工确认", project.Contract),
+		Content: fmt.Sprintf("项目 %s（客户 %s）按分组规则无法确定以下检测类别的拆解口径：%s。"+
+			"请在「系统配置 · 拆解规则」的检测类别域中补齐，或人工核对拆解结果后再确认拆解。",
+			project.ID, project.Customer, strings.Join(categories, "、")),
+		ReferenceType:  "project",
+		ReferenceID:    project.ID,
+		Recipients:     recipients,
+		OccurredAt:     time.Now().UTC(),
+		IdempotencyKey: project.ID + "-split-rule-missing",
+	}
+	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("publish split rule missing notification failed", "project_id", project.ID, "error", err)
+	}
+}
+
+// roleRecipients 按应用角色码解析站内信收件人；目录不可用或该角色下无人时返回空。
+func (s *Service) roleRecipients(ctx context.Context, tenantID, roleCode string) []string {
+	if s.Personnel == nil || strings.TrimSpace(roleCode) == "" {
+		return nil
+	}
+	page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{RoleCodes: []string{strings.TrimSpace(roleCode)}, Page: 1, PageSize: maximumPersonnelNameLookups})
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("resolve role recipients failed", "role_code", roleCode, "error", err)
+		}
+		return nil
+	}
+	recipients := make([]string, 0, len(page.Items))
+	seen := map[string]bool{}
+	for _, person := range page.Items {
+		userID := strings.TrimSpace(person.UserID)
+		if userID == "" || seen[userID] {
+			continue
+		}
+		seen[userID] = true
+		recipients = append(recipients, userID)
+	}
+	return recipients
 }
 
 // syncExistingContract 对已经存在的合同版本做幂等收尾：同步盖章状态并返回既有项目。
@@ -240,9 +315,15 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
 	}
-	splitRules, err := s.Repo.ListRules(ctx, p.TenantID, "split-rules")
-	if err != nil {
-		return err
+	// 拆解调整是人填清单：按原型流程，调整后进入补充协议并重新确认，
+	// 因此一律回到「待确认」，不套用默认进入状态；口径（特殊方法/体系要求）仍由检测类别域解析。
+	categoryDomain, domainErr := s.splitCategoryDomain(ctx, p.TenantID)
+	if domainErr != nil {
+		return domainErr
+	}
+	plan, planErr := s.resolveSplitPlan(ctx, p.TenantID, "", "", len(input.Items), nil)
+	if planErr != nil {
+		return planErr
 	}
 	items := make([]domain.ServiceItem, 0, len(input.Items))
 	for _, source := range input.Items {
@@ -253,30 +334,11 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return ErrValidation
 		}
-		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突；
-		// 拆解规则与合同激活路径共用同一语义（含特殊方法项的复核窗口）。
-		status, techReview := splitRuleInitialState(splitRules, source, mode == "PENETRATION")
-		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, TestMode: mode, Special: yesNo(mode == "PENETRATION"), Status: status, TechReviewStatus: techReview, ConflictStatus: "UNCHECKED"})
+		outcome := resolveSplitOutcome(plan, source.Category, mode, "", categoryDomain)
+		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突。
+		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items}))
-}
-
-// splitRuleInitialState 决定「系统生成清单」（合同激活、拆解调整）中一个服务项的初始状态：
-// 存在启用规则且未命中任何规则范围的常规批次自动放行（待分配，跳过人工拆解确认），
-// 命中规则范围的保留待确认以便重点复核；未配置规则时全部待确认。
-//
-// 自动放行只跳过人工拆解确认，不能跳过技术复核：特殊方法（渗透测试）项在自动放行时必须
-// 同时置 tech_review_status=PENDING，否则它既无法被技术总监复核（复核前置为 PENDING/
-// REJECTED），也无法发布实施计划（前置为 APPROVED），项目会永久卡死在这两步之间。
-// 手动创建的项目不套用此语义（见 CreateProjectWithServiceItems）。
-func splitRuleInitialState(splitRules []domain.Rule, source domain.ContractService, special bool) (status, techReview string) {
-	if hasEnabledSplitRule(splitRules) && !matchesSplitRule(splitRules, source.Batch, source.Site, source.Category) {
-		if special {
-			return "待分配", "PENDING"
-		}
-		return "待分配", ""
-	}
-	return "待确认", ""
+	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
 }
 
 // ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。
@@ -412,6 +474,11 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
 	required := append([]string{}, input.RequiredCodes...)
+	if len(required) == 0 {
+		// 调用方未显式给出必检能力码时，回落到服务项自身携带的（来自检测类别域）能力码，
+		// 否则"按检测类别配置必检能力"就只是页面上的说明文字，能力校验形同虚设。
+		required = append(required, existing.RequiredCodes...)
+	}
 	items, err := s.Repo.ListServiceItems(ctx, filter, "")
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
@@ -1763,10 +1830,34 @@ func yesNo(v bool) string {
 	}
 	return "否"
 }
-func groupContractServices(sources []domain.ContractService) ([]domain.ContractService, error) {
+
+// splitGroup 是按生效分组方案合并后的一个服务项：清单行 + 已解析的拆解口径。
+type splitGroup struct {
+	Item    domain.ContractService
+	Outcome SplitOutcome
+}
+
+// contractServiceCategories 取出合同清单里出现过的检测类别（供覆盖规则匹配服务项数/类别）。
+func contractServiceCategories(sources []domain.ContractService) []string {
+	categories := make([]string, 0, len(sources))
+	for _, source := range sources {
+		category := strings.TrimSpace(source.Category)
+		if category != "" && !slices.Contains(categories, category) {
+			categories = append(categories, category)
+		}
+	}
+	return categories
+}
+
+// groupContractServicesByPlan 按生效方案的分组维度把合同清单合并成服务项。
+//
+// 原型的默认规则是「同一批次 + 同一检测类别 = 1 个服务项」；维度由配置决定，因此这里
+// 不能再硬编码「场所 + 批次 + 检测类别」。合并时保留可追溯信息（来源清单行、技术要求、
+// 系统名称等按唯一值拼接），并逐组解析拆解口径（状态 / 方法类型 / 体系要求 / 缺规则）。
+func groupContractServicesByPlan(plan SplitPlan, customer, contract string, sources []domain.ContractService, domainIndex map[string]domain.DetectionCategory) ([]splitGroup, error) {
+	groups := map[string]splitGroup{}
+	keys := make([]string, 0, len(sources))
 	seen := map[string]bool{}
-	groups := map[string]domain.ContractService{}
-	keys := []string{}
 	for _, source := range sources {
 		source.SourceID = strings.TrimSpace(source.SourceID)
 		source.Site = strings.TrimSpace(source.Site)
@@ -1780,22 +1871,25 @@ func groupContractServices(sources []domain.ContractService) ([]domain.ContractS
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return nil, ErrValidation
 		}
-		key := source.Site + "\x00" + source.Batch + "\x00" + source.Category + "\x00" + mode
+		// 合同清单不带「体系要求」，因此方法类型与体系要求都以域/清单解析结果参与分组：
+		// 维度 2 选了体系要求时，同一批次的类别默认体系不同就会分成两条服务项。
+		outcome := resolveSplitOutcome(plan, source.Category, mode, "", domainIndex)
+		key := splitGroupKey(plan, customer, contract, source, outcome.TestMode, outcome.SystemStandard)
 		if current, ok := groups[key]; ok {
-			current.SourceID = joinUnique(current.SourceID, source.SourceID)
-			current.Requirement = joinUnique(current.Requirement, strings.TrimSpace(source.Requirement))
-			current.System = joinUnique(current.System, strings.TrimSpace(source.System))
-			current.SystemLevel = joinUnique(current.SystemLevel, strings.TrimSpace(source.SystemLevel))
-			current.Name = joinUnique(current.Name, strings.TrimSpace(source.Name))
+			current.Item.SourceID = joinUnique(current.Item.SourceID, source.SourceID)
+			current.Item.Requirement = joinUnique(current.Item.Requirement, strings.TrimSpace(source.Requirement))
+			current.Item.System = joinUnique(current.Item.System, strings.TrimSpace(source.System))
+			current.Item.SystemLevel = joinUnique(current.Item.SystemLevel, strings.TrimSpace(source.SystemLevel))
+			current.Item.Name = joinUnique(current.Item.Name, strings.TrimSpace(source.Name))
 			groups[key] = current
-		} else {
-			source.TestMode = mode
-			groups[key] = source
-			keys = append(keys, key)
+			continue
 		}
+		source.TestMode = mode
+		groups[key] = splitGroup{Item: source, Outcome: outcome}
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	out := make([]domain.ContractService, 0, len(keys))
+	out := make([]splitGroup, 0, len(keys))
 	for _, key := range keys {
 		out = append(out, groups[key])
 	}
