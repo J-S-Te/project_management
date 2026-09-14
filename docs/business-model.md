@@ -57,6 +57,12 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | `TEAM_ASSIGNED` | status = 待分配 | 不变（待分配） | 写入 `team_lead_id` |
 | `EXECUTION_TEAM_ASSIGNED` | status = 待分配 **且 `team_lead_id` 非空** | 不变（待分配） | 写入项目经理、工程师、所需能力码、能力校验结论 |
+| `TEAM_ASSIGNMENT_REVOKED` | status = 待分配 **且 `team_lead_id` 非空**；必须填写撤销原因 | 不变（待分配） | 清空团队负责人、执行团队、能力校验及尚未使用的设备选择；事件保留原责任链 |
+| `EXECUTION_ASSIGNMENT_REVOKED` | status = 待分配 **且团队负责人、项目经理均非空**；必须填写撤销原因 | 不变（待分配） | 清空项目经理、工程师、能力校验及尚未使用的设备选择；保留团队负责人 |
+| `IMPLEMENTATION_PLAN_REVOKED` | status = 待实施；必须填写撤销原因 | **待分配** | 清空当前有效计划快照；保留责任分配、能力结论和全部历史事件 |
+| `PREPARATION_REVOKED` | status = 实施准备中；必须填写撤销原因 | **待实施** | 清空当前设备清单并释放设备预约；计划及设备历史留在事件流 |
+| `ROLLBACK_REQUESTED` | 现场实施中可申请回到实施准备；报告编制中/已审核可申请返工 | 不变 | 仅创建不可变申请事件，不删除证据 |
+| `ROLLBACK_APPROVED` | 申请存在且未被审批；技术总监或系统管理员批准 | 现场→**实施准备中**；报告→**实施中** | 现场/报告原始事件保留；报告返工仅允许未签发、未归档阶段 |
 | `IMPLEMENTATION_PLANNED` | status = 待分配；`project_manager_id` 非空；`conflict_status = PASSED`；若是特殊方法则 `tech_review_status = APPROVED`；渗透测试须填专项计划 | **待实施** | 写入计划起止、实施计划、人员清单 |
 | `PREPARATION_STARTED` | status = 待实施 | **实施准备中** | 写入设备清单（含使用时段） |
 | `FIELD_RECORD_SUBMITTED` | status ∈ {待实施, 实施准备中, 实施中} | **实施中** | 现场记录 |
@@ -78,6 +84,8 @@ stateDiagram-v2
 ## 3. 项目状态派生规则
 
 `项目状态 = f(全部服务项状态, 服务项报告状态, supplement_status, 已存储状态)`
+
+项目访问权限只决定某个角色能否查看项目；项目一旦可见，状态、进度和风险均必须从该项目**全部**服务项派生，不能按当前角色可见的服务项子集计算。
 
 **判定优先级（自上而下）**【事实】：
 
@@ -131,6 +139,11 @@ stateDiagram-v2
 | 确认拆解 | `service_item.confirm` | 业务管理员（**项目经理不持有**） |
 | 分配团队负责人 | `project.team.assign` | 业务管理员 |
 | 分配项目经理与工程师 | `project.execution.assign` | 团队负责人 |
+| 撤销团队负责人分配（同时撤销下游执行团队） | `project.team.revoke` | 业务管理员（系统管理员可代办） |
+| 撤销执行团队分配 | `project.execution.revoke` | 团队负责人（系统管理员可代办） |
+| 撤销实施计划、实施准备 | `project.implementation.revoke` | 项目经理（系统管理员可代办） |
+| 申请现场/报告回退 | `project.rollback.request` | 项目经理、团队负责人（系统管理员可代办） |
+| 审批现场/报告回退 | `project.rollback.approve` | 技术总监、系统管理员 |
 | 发布实施计划 / 发起实施准备 | `project.implementation.plan` | 项目经理 |
 | 提交现场记录 | `project.field.execute` | 工程师、渗透测试工程师 |
 | 上报偏离 | `project.deviation.report` | 工程师、渗透测试工程师 |
@@ -388,6 +401,7 @@ GROUP BY p.id, p.status LIMIT 20;
 | ✅ **PM-CONC-01** | 接口不返回版本，客户端无从判断冲突 | 迁移 000016 加 `version`；事件写路径改条件更新 + 版本自增并暴露 `version`；6 个写入口接受 `expected_version`，不符即 **409 `PM_STATE_CONFLICT`**；前端写操作回传版本并在 409 时提示 + 重载 |
 | 🟡 **PM-NOTIFY-01** | 通知链路必然失效（scope/endpoint 双错） | **契约 + 3 个节点已完成**：endpoint 改为 `/api/v1/notifications/events`、scope 改为 `CROSS_SYSTEM`、新增"被指派人"提醒（团队负责人 / 项目经理 / 工程师）并在 `applyEvent` 统一发出口；收件人超长过滤（平台会因单个非法收件人丢整条）。已落地节点（7/8）：指派（团队负责人/项目经理/工程师）、实施计划发布（计划人员清单）、实施准备发起、偏差上报、报告阶段推进，以及 **SLA 超期/临近**（由 `ScanSlaNotifications` 主动提醒）。收件人不足时统一回退到服务项当前被指派人。**待办**：偏差评审完成 → 上报人（需要新增按 deviation_id 查上报人的仓储方法）、拆解确认完成（该时点尚无被指派人）；以及 outbox 持久化（当前投递失败仅 Warn，平台不可用时会丢通知） |
 | ✅ **PM-TASK-01** | 无定时扫描，超期/到期无主动提醒 | 新增 `Service.ScanSlaNotifications(ctx, tenantID, now)`：按租户边界扫描 SLA 超期/临近项并投递提醒（幂等键＝服务项+口径+UTC 日期，同日不重复打扰，超期用 HIGH 优先级）；新增 `cmd/sla-notifier` 周期任务（`SLA_SCAN_TENANTS` 显式限定租户、`SLA_SCAN_INTERVAL` 默认 15m），已接入镜像与 compose 并实测启动 |
+| ✅ **PM-DUP-01** | 同一合同版本重复新建项目报 500「服务暂不可用」 | 唯一键 `uq_pm_project_contract_version` 冲突（MySQL 1062）未在应用层翻译，被 `writeServiceError` 兜底成 500；改为应用层提交前预检 + 仓储层翻译 → **409 `PM_DUPLICATE_PROJECT`**（含已存在项目编号与替代动作：走拆解调整/补充协议）；前端在选择阶段把已有项目的合同标注并置灰 |
 | ✅ **PM-SPLIT-02** | 拆解规则模型与原型不符：自由文本「适用范围」表达不了分组维度/检测类别域/覆盖规则，且「存在规则且未命中 → 自动放行到待分配」与原型拆解流程（未命中 → 待人工确认 + 通知业务管理员）相反 | 按原型 PG-CFG-01 重建：三块配置表 + 按配置分组与定状态 + 检测类别域口径 + 覆盖规则优先级 + 范围变更检测勾对；存量自由文本规则按确认结论删除（迁移 000017/000018） |
 | ✅ **PM-SPLIT-01** | 手动创建项目后项目直接进入「待分配」，从未出现在服务项拆解确认里 | 根因：手动清单同样套用拆解规则的自动放行（存在启用规则且未命中 → 待分配），而拆解确认页只列待确认/待复核项，被放行的项再也进不去确认流程；确认拆解又是特殊方法项置 `tech_review_status=PENDING` 的唯一入口，因此自动放行的渗透测试项既不能复核（前置 PENDING/REJECTED）也不能发布实施计划（前置 APPROVED），项目永久卡死。修复：手动创建一律「待确认」；自动放行只保留给合同激活/拆解调整，且特殊方法项同步进入复核窗口；两处插入路径补写 `tech_review_status`（此前被丢弃） |
 | ❌ **PM-EVT-01（已推翻）** | ~~交付事件无唯一键，重投会二次执行状态机~~ | **经核实不成立**：事件 ID 由本系统本地生成（每次投递都是新 ULID），加唯一键防不住重投；合同重投的真实防线是 `uk_pm_project_contract_version`，命中后返回 `ErrDuplicateContract` 并由同一事务回滚，不落重复事件、不二次执行状态机。**不实施无效果改动** |

@@ -116,14 +116,23 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
 	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
 	// 这些表单，而分配、指派、维护等写操作仍由各自的 assign/manage 权限单独把守。
-	api.GET("/personnel", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.listPersonnel)
+	api.GET("/personnel", requireAny("project.read", "project.team.assign", "project.execution.assign", "project.resource.manage"), h.listPersonnel)
 	// 批量把已保存的 user_id 翻译成姓名：团队负责人 / 项目经理 / 工程师在界面上不得显示 ULID。
 	api.GET("/personnel/names", requireAny("project.read", "project.team.assign", "project.execution.assign"), h.resolvePersonnelNames)
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
+	api.POST("/service-items/:id/team-assignment/revoke", require("project.team.revoke"), h.revokeTeamAssignment)
 	api.POST("/service-items/:id/execution-assignment", require("project.execution.assign"), h.assignExecutionTeam)
+	api.POST("/service-items/:id/execution-assignment/revoke", require("project.execution.revoke"), h.revokeExecutionAssignment)
 	api.POST("/service-items/:id/implementation-plan", require("project.implementation.plan"), h.planImplementation)
+	api.POST("/service-items/:id/implementation-plan/revoke", require("project.implementation.revoke"), h.revokeImplementationPlan)
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
+	api.POST("/service-items/:id/preparation/revoke", require("project.implementation.revoke"), h.revokePreparation)
+	api.POST("/service-items/:id/rollback-requests", require("project.rollback.request"), h.requestRollback)
+	api.POST("/service-items/:id/rollback-requests/:request_id/withdraw", require("project.rollback.request"), h.withdrawRollback)
+	api.POST("/service-items/:id/rollback-requests/:request_id/decision", require("project.rollback.approve"), h.decideRollback)
+	api.POST("/service-items/:id/report-corrections", require("project.report.correction.request"), h.requestReportCorrection)
+	api.POST("/service-items/:id/report-corrections/:request_id/decision", require("project.report.correction.approve"), h.decideReportCorrection)
 	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
 	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
@@ -137,6 +146,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
 	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
+	api.DELETE("/equipment/:resource_id", require("project.device.manage"), h.deleteEquipment)
 	// 站点台账：站点是项目/服务项的公共主数据，读以 project.read 为基线，
 	// 写沿用资源主数据权限 project.resource.manage。
 	api.GET("/sites", require("project.read"), h.listSites)
@@ -760,6 +770,28 @@ func (h *Handler) assignExecutionTeam(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, result)
 }
+func (h *Handler) revokeTeamAssignment(c *gin.Context) {
+	var input domain.AssignmentRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.RevokeTeamAssignment(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "TEAM_ASSIGNMENT_REVOKED"})
+}
+func (h *Handler) revokeExecutionAssignment(c *gin.Context) {
+	var input domain.AssignmentRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.RevokeExecutionAssignment(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "EXECUTION_ASSIGNMENT_REVOKED"})
+}
 func (h *Handler) planImplementation(c *gin.Context) {
 	var input domain.ImplementationPlanInput
 	if !decode(c, &input) {
@@ -781,6 +813,85 @@ func (h *Handler) startPreparation(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusAccepted, map[string]string{"status": "实施准备中"})
+}
+func (h *Handler) revokeImplementationPlan(c *gin.Context) {
+	var input domain.PhaseRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.RevokeImplementationPlan(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "待分配"})
+}
+func (h *Handler) revokePreparation(c *gin.Context) {
+	var input domain.PhaseRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.RevokePreparation(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "待实施"})
+}
+func (h *Handler) requestRollback(c *gin.Context) {
+	var input domain.RollbackRequestInput
+	if !decode(c, &input) {
+		return
+	}
+	id, err := h.service.RequestRollback(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"id": id, "status": "PENDING_APPROVAL"})
+}
+func (h *Handler) decideRollback(c *gin.Context) {
+	var input domain.RollbackDecisionInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.DecideRollback(c.Request.Context(), principal(c), c.Param("id"), c.Param("request_id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(strings.TrimSpace(input.Decision))})
+}
+func (h *Handler) withdrawRollback(c *gin.Context) {
+	var input domain.RollbackWithdrawInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.WithdrawRollback(c.Request.Context(), principal(c), c.Param("id"), c.Param("request_id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "WITHDRAWN"})
+}
+func (h *Handler) requestReportCorrection(c *gin.Context) {
+	var input domain.ReportCorrectionRequestInput
+	if !decode(c, &input) {
+		return
+	}
+	id, err := h.service.RequestReportCorrection(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"id": id, "status": "PENDING_APPROVAL"})
+}
+func (h *Handler) decideReportCorrection(c *gin.Context) {
+	var input domain.ReportCorrectionDecisionInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.DecideReportCorrection(c.Request.Context(), principal(c), c.Param("id"), c.Param("request_id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(strings.TrimSpace(input.Decision))})
 }
 func (h *Handler) submitFieldRecord(c *gin.Context) {
 	var input domain.FieldRecordInput
@@ -897,6 +1008,13 @@ func (h *Handler) upsertEquipment(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+func (h *Handler) deleteEquipment(c *gin.Context) {
+	if err := h.service.DeleteEquipment(c.Request.Context(), principal(c), c.Param("resource_id")); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"resource_id": c.Param("resource_id"), "status": "DELETED"})
 }
 func (h *Handler) listSites(c *gin.Context) {
 	items, err := h.service.ListSites(c.Request.Context(), principal(c), c.Query("status"))

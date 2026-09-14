@@ -178,7 +178,7 @@ func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, pr
 func (s *Service) ListPersonnel(ctx context.Context, p platform.Principal, keyword, userID string, roleCodes, roleOrigins []string, page, pageSize int) (platform.OwnerDirectoryPage, error) {
 	// 人员目录只读，与 /personnel 路由守卫保持一致：project.read 是基线，保留 assign 权限
 	// 是为了兼容只授予分配权限的角色定义。
-	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
+	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") && !p.Has("project.resource.manage") {
 		return platform.OwnerDirectoryPage{}, ErrForbidden
 	}
 	if s.Personnel == nil {

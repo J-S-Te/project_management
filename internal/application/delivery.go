@@ -16,16 +16,27 @@ import (
 )
 
 const (
-	EventContractActivated     = "CONTRACT_ACTIVATED"
-	EventContractStampStatus   = "CONTRACT_STAMP_STATUS_SYNCED"
-	EventDecompositionAdjusted = "DECOMPOSITION_ADJUSTED"
-	EventTeamAssigned          = "TEAM_ASSIGNED"
-	EventExecutionTeamAssigned = "EXECUTION_TEAM_ASSIGNED"
-	EventImplementationPlanned = "IMPLEMENTATION_PLANNED"
-	EventPreparationStarted    = "PREPARATION_STARTED"
-	EventFieldRecordSubmitted  = "FIELD_RECORD_SUBMITTED"
-	EventDeviationReported     = "DEVIATION_REPORTED"
-	EventDeviationReviewed     = "DEVIATION_REVIEWED"
+	EventContractActivated          = "CONTRACT_ACTIVATED"
+	EventContractStampStatus        = "CONTRACT_STAMP_STATUS_SYNCED"
+	EventDecompositionAdjusted      = "DECOMPOSITION_ADJUSTED"
+	EventTeamAssigned               = "TEAM_ASSIGNED"
+	EventTeamAssignmentRevoked      = "TEAM_ASSIGNMENT_REVOKED"
+	EventExecutionTeamAssigned      = "EXECUTION_TEAM_ASSIGNED"
+	EventExecutionAssignmentRevoked = "EXECUTION_ASSIGNMENT_REVOKED"
+	EventImplementationPlanned      = "IMPLEMENTATION_PLANNED"
+	EventImplementationPlanRevoked  = "IMPLEMENTATION_PLAN_REVOKED"
+	EventPreparationStarted         = "PREPARATION_STARTED"
+	EventPreparationRevoked         = "PREPARATION_REVOKED"
+	EventFieldRecordSubmitted       = "FIELD_RECORD_SUBMITTED"
+	EventRollbackRequested          = "ROLLBACK_REQUESTED"
+	EventRollbackApproved           = "ROLLBACK_APPROVED"
+	EventRollbackRejected           = "ROLLBACK_REJECTED"
+	EventRollbackWithdrawn          = "ROLLBACK_WITHDRAWN"
+	EventReportCorrectionRequested  = "REPORT_CORRECTION_REQUESTED"
+	EventReportCorrectionApproved   = "REPORT_CORRECTION_APPROVED"
+	EventReportCorrectionRejected   = "REPORT_CORRECTION_REJECTED"
+	EventDeviationReported          = "DEVIATION_REPORTED"
+	EventDeviationReviewed          = "DEVIATION_REVIEWED"
 	// EventFieldCompleted 是单服务项的现场完成事件：服务项进入报告编制，
 	// 全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切完成。
 	EventFieldCompleted        = "FIELD_COMPLETED"
@@ -53,6 +64,7 @@ type DeliveryRepository interface {
 	ListDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error)
 	FindProjectForDeviation(context.Context, platform.ScopeFilter, string) (string, string, error)
 	UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error)
+	DeleteEquipment(context.Context, string, string) error
 	ListCapabilities(context.Context, string, string) ([]domain.Capability, error)
 	FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error)
 	ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error)
@@ -457,6 +469,33 @@ func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID s
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID}))
 }
+
+// RevokeTeamAssignment 只允许在尚未发布计划的待分配阶段撤销团队负责人。撤销团队负责人
+// 必须同时失效下游执行团队与能力校验，避免新负责人继承旧负责人的指派结果。
+func (s *Service) RevokeTeamAssignment(ctx context.Context, p platform.Principal, itemID string, input domain.AssignmentRevokeInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.team.revoke", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.team.revoke", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return ValidationError("请填写撤销团队负责人分配的原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.team.revoke")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "待分配" || strings.TrimSpace(item.TeamLeadID) == "" {
+		return PreconditionError("仅可撤销待分配服务项的已分配团队负责人")
+	}
+	previous := append([]string{item.TeamLeadID, item.ProjectManagerID}, item.EngineerIDs...)
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssignmentRevoked, map[string]any{"reason": strings.TrimSpace(input.Reason), "expected_version": input.ExpectedVersion, "previous_team_lead_id": item.TeamLeadID, "previous_project_manager_id": item.ProjectManagerID, "previous_engineer_ids": item.EngineerIDs, "revoked_user_ids": previous}))
+}
 func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal, itemID string, input domain.ExecutionAssignmentInput) (domain.ConflictCheckResult, error) {
 	filter, err := authorizeProjectScope(p, "project.execution.assign")
 	if err != nil {
@@ -515,6 +554,32 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	}
 	return result, nil
 }
+
+// RevokeExecutionAssignment 让团队负责人纠正项目经理或工程师分配，但不会撤销团队负责人。
+func (s *Service) RevokeExecutionAssignment(ctx context.Context, p platform.Principal, itemID string, input domain.AssignmentRevokeInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.execution.revoke", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.execution.revoke", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return ValidationError("请填写撤销执行团队分配的原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.execution.revoke")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "待分配" || strings.TrimSpace(item.TeamLeadID) == "" || strings.TrimSpace(item.ProjectManagerID) == "" {
+		return PreconditionError("仅可撤销待分配服务项的已分配执行团队")
+	}
+	previous := append([]string{item.ProjectManagerID}, item.EngineerIDs...)
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionAssignmentRevoked, map[string]any{"reason": strings.TrimSpace(input.Reason), "expected_version": input.ExpectedVersion, "previous_project_manager_id": item.ProjectManagerID, "previous_engineer_ids": item.EngineerIDs, "revoked_user_ids": previous}))
+}
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
 	filter, err := authorizeProjectScope(p, "project.implementation.plan")
 	if err != nil {
@@ -546,9 +611,6 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 	}
 	if !end.After(start) {
 		return ValidationError("计划结束时间必须晚于计划开始时间")
-	}
-	if strings.TrimSpace(input.SitePlan) == "" {
-		return ValidationError("请填写现场计划")
 	}
 	if item.TestMode == "PENETRATION" {
 		if err := validatePenetrationCompliance(input); err != nil {
@@ -841,6 +903,309 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 		return err
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
+}
+
+// RevokeImplementationPlan 仅在尚未开始实施准备时允许撤销计划；责任分配和能力结论仍保留，
+// 以便项目经理修订排期后重新发布。计划快照由撤销事件保留，不以删除审计证据实现回退。
+func (s *Service) RevokeImplementationPlan(ctx context.Context, p platform.Principal, itemID string, input domain.PhaseRevokeInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.implementation.revoke", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.revoke", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return ValidationError("请填写撤销实施计划的原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.implementation.revoke")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "待实施" {
+		return PreconditionError("仅可撤销尚未发起实施准备的实施计划")
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventImplementationPlanRevoked, map[string]any{"reason": strings.TrimSpace(input.Reason), "expected_version": input.ExpectedVersion}))
+}
+
+// RevokePreparation 在尚未提交现场记录时释放设备预约并回到待实施。设备使用历史在事件中保留，
+// 清空的是活动计划行，因此设备可立即被其他项目重新预约。
+func (s *Service) RevokePreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PhaseRevokeInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.implementation.revoke", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.revoke", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return ValidationError("请填写撤销实施准备的原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.implementation.revoke")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "实施准备中" {
+		return PreconditionError("仅可在未提交现场记录前撤销实施准备")
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationRevoked, map[string]any{"reason": strings.TrimSpace(input.Reason), "expected_version": input.ExpectedVersion}))
+}
+
+func rollbackKindAllowed(kind string, item domain.ServiceItem) bool {
+	switch kind {
+	case "FIELD_TO_PREPARATION":
+		return item.Status == "实施中"
+	case "REPORT_TO_FIELD":
+		return item.Status == "现场实施完成" && (item.ReportStatus == "COMPILING" || item.ReportStatus == "REVIEWED")
+	default:
+		return false
+	}
+}
+
+// RequestRollback 把现场/报告回退变成双人复核：申请本身不改变状态，也不会删除现场或报告证据。
+func (s *Service) RequestRollback(ctx context.Context, p platform.Principal, itemID string, input domain.RollbackRequestInput) (string, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.rollback.request", itemID); err != nil {
+		return "", err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.rollback.request", itemID, input.ExpectedVersion); err != nil {
+		return "", err
+	}
+	kind, reason := strings.ToUpper(strings.TrimSpace(input.Kind)), strings.TrimSpace(input.Reason)
+	if reason == "" {
+		return "", ValidationError("请填写回退申请原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.rollback.request")
+	if err != nil {
+		return "", err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return "", err
+	}
+	if !rollbackKindAllowed(kind, item) {
+		return "", PreconditionError("当前服务项状态不允许申请该回退")
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return "", err
+	}
+	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	if hasPendingRollback(events, itemID, kind) {
+		return "", PreconditionError("该服务项已有同类型待审批回退申请")
+	}
+	event := deliveryEvent(p, "", itemID, EventRollbackRequested, map[string]any{"kind": kind, "reason": reason, "expected_version": input.ExpectedVersion, "requester_user_id": p.UserID})
+	if err := s.applyEvent(ctx, event); err != nil {
+		return "", err
+	}
+	return event.ID, nil
+}
+
+func hasPendingRollback(events []domain.DeliveryEvent, itemID, kind string) bool {
+	closed := map[string]bool{}
+	for _, event := range events {
+		if event.Type == EventRollbackApproved || event.Type == EventRollbackRejected || event.Type == EventRollbackWithdrawn {
+			closed[payloadText(event.Payload, "request_id")] = true
+		}
+	}
+	for _, event := range events {
+		if event.Type == EventRollbackRequested && event.ServiceItemID == itemID && strings.EqualFold(payloadText(event.Payload, "kind"), kind) && !closed[event.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.RollbackDecisionInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.rollback.approve", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.rollback.approve", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
+	if decision != "APPROVED" && decision != "REJECTED" {
+		return ErrValidation
+	}
+	if strings.TrimSpace(input.Comment) == "" {
+		return ValidationError("请填写回退审批意见")
+	}
+	filter, err := authorizeProjectScope(p, "project.rollback.approve")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
+	if err != nil {
+		return err
+	}
+	var request domain.DeliveryEvent
+	for _, event := range events {
+		if event.ID == requestID && event.ServiceItemID == itemID && event.Type == EventRollbackRequested {
+			request = event
+			break
+		}
+	}
+	if request.ID == "" {
+		return ErrNotFound
+	}
+	if request.ActorUserID == p.UserID {
+		return ErrForbidden
+	}
+	kind := strings.ToUpper(payloadText(request.Payload, "kind"))
+	if decision == "APPROVED" && !rollbackKindAllowed(kind, item) {
+		return PreconditionError("服务项状态已变化，不能批准该回退")
+	}
+	eventType := EventRollbackApproved
+	if decision == "REJECTED" {
+		eventType = EventRollbackRejected
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, eventType, map[string]any{"request_id": requestID, "kind": kind, "comment": strings.TrimSpace(input.Comment), "expected_version": input.ExpectedVersion, "rollback_requester_id": payloadText(request.Payload, "requester_user_id")}))
+}
+
+// WithdrawRollback 仅允许原申请人在审批前撤回，避免用“驳回”冒充申请人取消。
+func (s *Service) WithdrawRollback(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.RollbackWithdrawInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.rollback.request", itemID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return ValidationError("请填写撤回原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.rollback.request")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
+	if err != nil {
+		return err
+	}
+	var request domain.DeliveryEvent
+	for _, event := range events {
+		if event.ID == requestID && event.ServiceItemID == itemID && event.Type == EventRollbackRequested {
+			request = event
+			break
+		}
+	}
+	if request.ID == "" {
+		return ErrNotFound
+	}
+	if request.ActorUserID != p.UserID {
+		return ErrForbidden
+	}
+	if !hasPendingRollback([]domain.DeliveryEvent{request}, itemID, payloadText(request.Payload, "kind")) {
+		return PreconditionError("该回退申请已处理，不能撤回")
+	}
+	for _, event := range events {
+		if (event.Type == EventRollbackApproved || event.Type == EventRollbackRejected || event.Type == EventRollbackWithdrawn) && payloadText(event.Payload, "request_id") == requestID {
+			return PreconditionError("该回退申请已处理，不能撤回")
+		}
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventRollbackWithdrawn, map[string]any{"request_id": requestID, "kind": payloadText(request.Payload, "kind"), "reason": strings.TrimSpace(input.Reason), "rollback_requester_id": p.UserID}))
+}
+
+// RequestReportCorrection 只允许针对已签发或已归档的当前版本提出更正；申请不改变旧报告有效性。
+func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Principal, itemID string, input domain.ReportCorrectionRequestInput) (string, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.report.correction.request", itemID); err != nil {
+		return "", err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.report.correction.request", itemID, input.ExpectedVersion); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return "", ValidationError("请填写报告更正原因")
+	}
+	filter, err := authorizeProjectScope(p, "project.report.correction.request")
+	if err != nil {
+		return "", err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return "", err
+	}
+	if item.Status != "现场实施完成" || (item.ReportStatus != "ISSUED" && item.ReportStatus != "ARCHIVED") {
+		return "", PreconditionError("仅可对已签发或已归档报告申请更正")
+	}
+	event := deliveryEvent(p, "", itemID, EventReportCorrectionRequested, map[string]any{"reason": strings.TrimSpace(input.Reason), "old_revision": item.ReportRevision, "requester_user_id": p.UserID})
+	if err := s.applyEvent(ctx, event); err != nil {
+		return "", err
+	}
+	return event.ID, nil
+}
+
+func (s *Service) DecideReportCorrection(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.ReportCorrectionDecisionInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.report.correction.approve", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.report.correction.approve", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
+	if decision != "APPROVED" && decision != "REJECTED" {
+		return ErrValidation
+	}
+	if strings.TrimSpace(input.Comment) == "" {
+		return ValidationError("请填写报告更正审批意见")
+	}
+	filter, err := authorizeProjectScope(p, "project.report.correction.approve")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
+	if err != nil {
+		return err
+	}
+	var request domain.DeliveryEvent
+	for _, event := range events {
+		if event.ID == requestID && event.ServiceItemID == itemID && event.Type == EventReportCorrectionRequested {
+			request = event
+			break
+		}
+	}
+	if request.ID == "" {
+		return ErrNotFound
+	}
+	if request.ActorUserID == p.UserID {
+		return ErrForbidden
+	}
+	if decision == "APPROVED" && (item.ReportStatus != "ISSUED" && item.ReportStatus != "ARCHIVED") {
+		return PreconditionError("报告状态已变化，不能批准更正")
+	}
+	typ := EventReportCorrectionApproved
+	if decision == "REJECTED" {
+		typ = EventReportCorrectionRejected
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, typ, map[string]any{"request_id": requestID, "comment": strings.TrimSpace(input.Comment), "old_revision": request.Payload["old_revision"], "report_correction_requester_id": request.ActorUserID, "expected_version": input.ExpectedVersion}))
 }
 
 // ReturnEquipment 把某台设备从服务项的实施准备清单中归还：清单行保留（保留借出历史），
@@ -1151,6 +1516,19 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, e
 	}
 	item.TenantID = p.TenantID
+	// 人员资质必须绑定基础平台当前可见的在职人员。资源名称是平台目录的显示名，
+	// 不能信任浏览器提交的任意文本，以免出现“资质档案姓名”和身份主体不一致。
+	if item.ResourceType == "PERSON" {
+		person, err := s.resolveCapabilityPerson(ctx, item.UserID)
+		if err != nil {
+			return item, err
+		}
+		item.UserID = person.UserID
+		item.ResourceName = person.DisplayName
+		item.IdentityStatus = domain.IdentityStatusActive
+	} else {
+		item.UserID = ""
+	}
 	if strings.TrimSpace(item.ResourceID) == "" {
 		existing, err := repo.ListCapabilities(ctx, p.TenantID, item.ResourceType)
 		if err != nil {
@@ -1172,6 +1550,30 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		item.UsageScope = existingUsageScope(existing, item.ResourceID)
 	}
 	return repo.UpsertCapability(ctx, item, p.UserID)
+}
+
+// resolveCapabilityPerson 以平台 user_id 精确查询人员目录。目录只会返回本应用可见的
+// 有效人员；没有精确命中时拒绝保存，避免前端构造不存在或已失效的人员资质。
+func (s *Service) resolveCapabilityPerson(ctx context.Context, userID string) (platform.OwnerDirectoryUser, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return platform.OwnerDirectoryUser{}, ErrValidation
+	}
+	if s.Personnel == nil {
+		return platform.OwnerDirectoryUser{}, ErrPersonnelUnavailable
+	}
+	page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{UserID: userID, Page: 1, PageSize: 1})
+	if err != nil {
+		return platform.OwnerDirectoryUser{}, fmt.Errorf("%w: %v", ErrPersonnelUnavailable, err)
+	}
+	for _, person := range page.Items {
+		if strings.TrimSpace(person.UserID) == userID && strings.TrimSpace(person.DisplayName) != "" {
+			person.UserID = userID
+			person.DisplayName = strings.TrimSpace(person.DisplayName)
+			return person, nil
+		}
+	}
+	return platform.OwnerDirectoryUser{}, ErrValidation
 }
 
 // ImportCapabilities 批量写入能力记录（人员资质或设备能力）。逐行校验并独立写入，
@@ -1388,6 +1790,33 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	return repo.UpsertCapability(ctx, item, p.UserID)
 }
+
+// DeleteEquipment 删除未被活动实施计划占用的设备主数据。已完成或已归还设备的历史快照
+// 保留在实施计划/交付事件中；仍被未归还设备清单引用时必须先归还或撤销实施准备，避免
+// 目录删除后让在途设备失去可追溯的管理入口。
+func (s *Service) DeleteEquipment(ctx context.Context, p platform.Principal, resourceID string) error {
+	if err := requireApplicationAuthorization(p, "project.device.manage"); err != nil {
+		return err
+	}
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return ErrValidation
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	reservations, err := repo.ListEquipmentReservations(ctx, p.TenantID, "")
+	if err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if reservation.ResourceID == resourceID {
+			return ConflictError("设备仍被服务项「" + firstNonEmpty(reservation.ServiceItemID, reservation.ProjectID) + "」占用，请先归还设备或撤销实施准备后再删除")
+		}
+	}
+	return repo.DeleteEquipment(ctx, p.TenantID, resourceID)
+}
 func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) error {
 	repo, e := s.deliveryRepo()
 	if e != nil {
@@ -1491,6 +1920,20 @@ func assignmentNotificationFor(eventType string) (assignmentNotification, bool) 
 			Title:   "已指派项目经理与实施工程师",
 			Content: "你被指派到该服务项，请在「实施计划」中确认排期并推进交付。",
 		}, true
+	case EventTeamAssignmentRevoked:
+		return assignmentNotification{
+			Title:   "团队负责人分配已撤销",
+			Content: "你不再负责该服务项；撤销原因已记录，请关注后续重新分配。",
+		}, true
+	case EventExecutionAssignmentRevoked:
+		return assignmentNotification{
+			Title:   "执行团队分配已撤销",
+			Content: "你不再负责该服务项；撤销原因已记录，请关注后续重新分配。",
+		}, true
+	case EventRollbackApproved:
+		return assignmentNotification{Title: "回退申请已批准", Content: "你的项目回退申请已批准，服务项已按补偿规则回退。"}, true
+	case EventRollbackRejected:
+		return assignmentNotification{Title: "回退申请已驳回", Content: "你的项目回退申请已驳回，请查看审批意见。"}, true
 	case EventImplementationPlanned:
 		return assignmentNotification{
 			Title:   "实施计划已发布",
@@ -1526,6 +1969,10 @@ func assignmentRecipients(event domain.DeliveryEvent) []string {
 		recipients = append(recipients, manager)
 	}
 	recipients = append(recipients, payloadTextList(event.Payload, "engineer_ids")...)
+	recipients = append(recipients, payloadTextList(event.Payload, "revoked_user_ids")...)
+	if requester := payloadText(event.Payload, "rollback_requester_id"); requester != "" {
+		recipients = append(recipients, requester)
+	}
 	// 实施计划的人员清单就是需要行动的现场实施人员：只取人员行，设备行不作收件人。
 	if resources, ok := event.Payload["personnel"].([]domain.PlanResource); ok {
 		for _, resource := range resources {

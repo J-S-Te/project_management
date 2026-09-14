@@ -28,7 +28,7 @@ func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilt
 	if err := query.Order("id DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
-	inputs, err := r.projectStatusInputs(ctx, filter, projectIDsOf(records))
+	inputs, err := r.projectStatusInputs(ctx, filter.TenantID, projectIDsOf(records))
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter
 		return domain.Project{}, err
 	}
 	project := projectFromRecord(record)
-	inputs, err := r.projectStatusInputs(ctx, filter, []string{record.ID})
+	inputs, err := r.projectStatusInputs(ctx, filter.TenantID, []string{record.ID})
 	if err != nil {
 		return domain.Project{}, err
 	}
@@ -80,14 +80,16 @@ func projectIDsOf(records []projectRecord) []string {
 	return ids
 }
 
-// projectStatusInputs 按项目聚合服务项状态，作为派生项目唯一状态的输入。
-func (r *Repository) projectStatusInputs(ctx context.Context, filter platform.ScopeFilter, projectIDs []string) (map[string][]domain.ProjectStatusItem, error) {
+// projectStatusInputs 按项目聚合全部服务项状态，作为派生项目唯一状态的输入。
+// 项目范围仅控制项目本身是否可见；一旦项目可见，状态、进度与风险必须基于完整
+// 服务项集合派生，不能因当前角色只看到部分服务项而得到不同的项目阶段。
+func (r *Repository) projectStatusInputs(ctx context.Context, tenantID string, projectIDs []string) (map[string][]domain.ProjectStatusItem, error) {
 	result := map[string][]domain.ProjectStatusItem{}
 	if len(projectIDs) == 0 {
 		return result, nil
 	}
 	var rows []projectStatusRow
-	if err := projectStatusInputQuery(r.db.WithContext(ctx), filter, projectIDs).Scan(&rows).Error; err != nil {
+	if err := projectStatusInputQuery(r.db.WithContext(ctx), tenantID, projectIDs).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -103,12 +105,12 @@ type projectStatusRow struct {
 	ReportStatus string
 }
 
-// projectStatusInputQuery 构造服务项状态投影查询，复用服务项数据范围，
-// 保证派生结果与列表查询处于同一可见边界。
-func projectStatusInputQuery(db *gorm.DB, filter platform.ScopeFilter, projectIDs []string) *gorm.DB {
-	return applyServiceItemScope(db.Model(&serviceItemRecord{}), db, filter).
+// projectStatusInputQuery 构造项目状态的完整服务项投影。禁止复用服务项可见范围：
+// 否则同一项目会随登录角色不同而落入不同状态。
+func projectStatusInputQuery(db *gorm.DB, tenantID string, projectIDs []string) *gorm.DB {
+	return db.Model(&serviceItemRecord{}).
 		Select("project_id, status, report_status").
-		Where("project_id IN ?", projectIDs)
+		Where("tenant_id = ? AND project_id IN ?", tenantID, projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
 	err := r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
@@ -488,7 +490,7 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Select("id, status, supplement_status").Find(&projects).Error; err != nil {
 		return result, err
 	}
-	inputs, err := r.projectStatusInputs(ctx, filter, projectIDsOf(projects))
+	inputs, err := r.projectStatusInputs(ctx, filter.TenantID, projectIDsOf(projects))
 	if err != nil {
 		return result, err
 	}
@@ -557,7 +559,7 @@ func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilt
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
-	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, SystemStandard: r.SystemStandard, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, Status: r.Status, Version: r.Version}
+	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, SystemStandard: r.SystemStandard, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, ReportRevision: r.ReportRevision, Status: r.Status, Version: r.Version}
 	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
 	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
 	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)

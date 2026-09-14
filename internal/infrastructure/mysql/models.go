@@ -62,6 +62,7 @@ type serviceItemRecord struct {
 	ReportStatus      string `gorm:"size:32;not null"`
 	ReportUpdatedAt   *time.Time
 	ReportUpdatedBy   string `gorm:"size:64;not null"`
+	ReportRevision    uint64 `gorm:"not null;default:0"`
 	Status            string `gorm:"size:32;not null"`
 	// StatusChangedAt 是服务项进入当前状态的时刻，SLA 的「状态停留时长」以此为准；
 	// 不能用 UpdatedAt——无关字段的更新会刷新它，导致计时被意外重置。

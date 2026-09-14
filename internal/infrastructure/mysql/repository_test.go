@@ -51,15 +51,19 @@ func TestEmptyBusinessScopeFailsClosedInSQL(t *testing.T) {
 	}
 }
 
-// 派生项目状态的输入查询必须复用服务项数据范围，否则不同角色会看到不一致或越权的派生结果。
-func TestProjectStatusInputQueryAppliesServiceItemScope(t *testing.T) {
-	filter := platform.ScopeFilter{TenantID: "tenant-1", IdentityID: "identity-1", AllowSelf: true}
+// 项目状态必须由完整服务项集合派生：项目权限只决定项目是否可见，不能裁剪状态输入。
+func TestProjectStatusInputQueryUsesTenantWideProjectItems(t *testing.T) {
 	var rows []projectStatusRow
-	statement := projectStatusInputQuery(dryRunDB(t), filter, []string{"PJ-1"}).Find(&rows).Statement
+	statement := projectStatusInputQuery(dryRunDB(t), "tenant-1", []string{"PJ-1"}).Find(&rows).Statement
 	sql := statement.SQL.String()
-	for _, expected := range []string{"report_status", "pm_service_item.tenant_id = ?", "pm_service_item.project_id IN", "scope_item.team_lead_id = ?"} {
+	for _, expected := range []string{"report_status", "tenant_id = ?", "project_id IN"} {
 		if !strings.Contains(sql, expected) {
 			t.Fatalf("project status input SQL missing %q: %s", expected, sql)
+		}
+	}
+	for _, forbidden := range []string{"scope_item", "team_lead_id = ?", "project_manager_id = ?", "owner_identity_id = ?"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("project status input must not depend on the viewer's service-item scope, found %q: %s", forbidden, sql)
 		}
 	}
 }

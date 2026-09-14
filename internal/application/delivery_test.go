@@ -360,6 +360,36 @@ func TestEquipmentUsageScopeIsPreservedWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestDeleteEquipmentProtectsActiveReservations(t *testing.T) {
+	manager := principalWith("project.device.manage", platform.DataScope{RoleCode: "device_admin", ScopeType: "APPLICATION"})
+
+	t.Run("deletes an unreserved equipment record", func(t *testing.T) {
+		repo := &capabilityRepository{capabilities: []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备"}}}
+		service := &Service{Repo: repo}
+		if err := service.DeleteEquipment(context.Background(), manager, "EQ-001"); err != nil {
+			t.Fatal(err)
+		}
+		if len(repo.capabilities) != 0 {
+			t.Fatalf("equipment was not removed: %+v", repo.capabilities)
+		}
+	})
+
+	t.Run("rejects deletion while an implementation plan still holds the equipment", func(t *testing.T) {
+		repo := &capabilityRepository{
+			capabilities: []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备"}},
+			reservations: []domain.EquipmentReservation{{ServiceItemID: "SI-001", ResourceID: "EQ-001", WindowStart: "2026-09-01", WindowEnd: "2026-09-30"}},
+		}
+		service := &Service{Repo: repo}
+		err := service.DeleteEquipment(context.Background(), manager, "EQ-001")
+		if !errors.Is(err, ErrResourceConflict) || !strings.Contains(err.Error(), "SI-001") {
+			t.Fatalf("error=%v, want an actionable equipment reservation conflict", err)
+		}
+		if len(repo.capabilities) != 1 {
+			t.Fatalf("reserved equipment must remain: %+v", repo.capabilities)
+		}
+	})
+}
+
 // 资质与能力管理与 CSV 导入同样不能清掉设备的使用范围。
 func TestCapabilityUpsertAndImportPreserveUsageScope(t *testing.T) {
 	repo := &capabilityRepository{capabilities: []domain.Capability{
@@ -381,6 +411,36 @@ func TestCapabilityUpsertAndImportPreserveUsageScope(t *testing.T) {
 	}
 	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
 		t.Fatalf("csv import must keep the stored usage scope, got %q", got)
+	}
+}
+
+// 新增人员资质不能把浏览器填写的名字当作身份数据：必须由基础平台目录按 user_id
+// 精确确认，并以目录的显示名入库。这样人员改名、前端构造姓名或已失效账号都不会污染台账。
+func TestUpsertPersonCapabilityUsesPlatformDirectoryIdentity(t *testing.T) {
+	repository := &capabilityRepository{}
+	directory := &personnelStub{page: platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: "platform-user-1", DisplayName: "平台张三"}}}}
+	service := &Service{Repo: repository, Personnel: directory}
+	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "quality_manager", ScopeType: "APPLICATION"})
+
+	saved, err := service.UpsertCapability(context.Background(), manager, domain.Capability{
+		ResourceType: "PERSON", ResourceID: "P-0001", ResourceName: "客户端伪造姓名", UserID: "platform-user-1", Codes: []string{"QUAL-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.UserID != "platform-user-1" || saved.ResourceName != "平台张三" || saved.IdentityStatus != domain.IdentityStatusActive {
+		t.Fatalf("saved=%+v", saved)
+	}
+	if len(repository.saved) != 1 || repository.saved[0].ResourceName != "平台张三" {
+		t.Fatalf("repository saved=%+v", repository.saved)
+	}
+	if directory.lastQuery.UserID != "platform-user-1" {
+		t.Fatalf("directory query=%+v", directory.lastQuery)
+	}
+
+	directory.page = platform.OwnerDirectoryPage{}
+	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "PERSON", ResourceID: "P-0002", ResourceName: "任意姓名", UserID: "missing-user", Codes: []string{"QUAL-1"}}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing platform person error=%v, want validation", err)
 	}
 }
 
@@ -433,6 +493,9 @@ func (r *duplicateContractRepository) FindProjectForDeviation(context.Context, p
 }
 func (r *duplicateContractRepository) UpsertCapability(context.Context, domain.Capability, string) (domain.Capability, error) {
 	return domain.Capability{}, nil
+}
+func (r *duplicateContractRepository) DeleteEquipment(context.Context, string, string) error {
+	return ErrNotFound
 }
 func (r *duplicateContractRepository) ListCapabilities(context.Context, string, string) ([]domain.Capability, error) {
 	return nil, nil
@@ -504,6 +567,54 @@ func (r *hookRepository) ApplyDeliveryEvent(_ context.Context, event domain.Deli
 func (r *hookRepository) ListSlaOverdue(_ context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
 	r.lastFilter = filter
 	return r.overdue, nil
+}
+
+type assignmentRevokeRepository struct {
+	capabilityRepository
+	item   domain.ServiceItem
+	events []domain.DeliveryEvent
+}
+
+func (r *assignmentRevokeRepository) GetServiceItem(_ context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
+	r.lastFilter = filter
+	if r.item.ID != id {
+		return domain.ServiceItem{}, ErrNotFound
+	}
+	return r.item, nil
+}
+func (r *assignmentRevokeRepository) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
+
+func TestAssignmentRevocationCarriesReasonAndExpectedVersion(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Version: 7, TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
+	principal := platform.Principal{TenantID: "t1", UserID: "operator-1", Permissions: map[string]bool{"project.team.revoke": true, "project.execution.revoke": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}}
+	service := Service{Repo: repository}
+	if err := service.RevokeTeamAssignment(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{Reason: "负责人录入错误", ExpectedVersion: 7}); err != nil {
+		t.Fatalf("revoke team assignment: %v", err)
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%d, want 1", len(repository.events))
+	}
+	event := repository.events[0]
+	if event.Type != EventTeamAssignmentRevoked || event.Payload["reason"] != "负责人录入错误" || event.Payload["expected_version"] != uint64(7) {
+		t.Fatalf("unexpected revoke event: %#v", event)
+	}
+	if ids := payloadTextList(event.Payload, "revoked_user_ids"); len(ids) != 3 || ids[0] != "lead-1" || ids[2] != "engineer-1" {
+		t.Fatalf("revoke recipients=%#v", ids)
+	}
+	// 两次命令模拟为用户刷新后在下一业务版本上继续操作。
+	repository.item.Version = 8
+	if err := service.RevokeExecutionAssignment(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{Reason: "执行资源需重排", ExpectedVersion: 8}); err != nil {
+		t.Fatalf("revoke execution assignment: %v", err)
+	}
+	if got := repository.events[1].Payload["expected_version"]; got != uint64(8) {
+		t.Fatalf("execution expected_version=%#v", got)
+	}
+	if err := service.RevokeTeamAssignment(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{ExpectedVersion: 7}); err == nil {
+		t.Fatal("missing revoke reason must be rejected")
+	}
 }
 
 func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
