@@ -392,6 +392,20 @@ GROUP BY p.id, p.status LIMIT 20;
 | ✅ **PM-SPLIT-01** | 手动创建项目后项目直接进入「待分配」，从未出现在服务项拆解确认里 | 根因：手动清单同样套用拆解规则的自动放行（存在启用规则且未命中 → 待分配），而拆解确认页只列待确认/待复核项，被放行的项再也进不去确认流程；确认拆解又是特殊方法项置 `tech_review_status=PENDING` 的唯一入口，因此自动放行的渗透测试项既不能复核（前置 PENDING/REJECTED）也不能发布实施计划（前置 APPROVED），项目永久卡死。修复：手动创建一律「待确认」；自动放行只保留给合同激活/拆解调整，且特殊方法项同步进入复核窗口；两处插入路径补写 `tech_review_status`（此前被丢弃） |
 | ❌ **PM-EVT-01（已推翻）** | ~~交付事件无唯一键，重投会二次执行状态机~~ | **经核实不成立**：事件 ID 由本系统本地生成（每次投递都是新 ULID），加唯一键防不住重投；合同重投的真实防线是 `uk_pm_project_contract_version`，命中后返回 `ErrDuplicateContract` 并由同一事务回滚，不落重复事件、不二次执行状态机。**不实施无效果改动** |
 
+### 9.1.1 部署安全网：库结构落后于代码
+
+线上曾出现「业务管理员新建项目提示服务暂不可用」：新代码写入 `pm_service_item.system_standard`，
+但目标库没跑该迁移 → `Error 1054 Unknown column` → 接口 500 `PM_INTERNAL_ERROR`，对外只剩一句
+"服务暂不可用"，把"部署漏迁移"伪装成业务故障（已在本机用"新代码 + 去掉该列"精确复现）。
+
+处置：
+
+1. 服务端补跑迁移：`docker compose -f compose.yaml --profile project-release run --rm project-migrate`，
+   再 `docker compose ... up -d project-api`；
+2. 代码侧加安全网（本次已实现）：启动时核对 `pm_schema_migration`，待执行迁移非空则
+   打 ERROR 日志列出清单，并让 `/readyz` 返回 503 `migrations_pending`；`/healthz` 保持 200
+   但带出 `pending_migrations` 数量；部署脚本的就绪校验改为探 `/readyz`。
+
 ### 9.2 判定为设计意图（不修，但需文档化）
 
 | 编号 | 结论 |

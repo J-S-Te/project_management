@@ -483,6 +483,34 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 	}
 }
 
+// 库结构落后于代码时必须判为 not_ready：否则带着缺失的列对外服务，任何写路径都只会
+// 返回 500「服务暂不可用」，把"部署时漏跑迁移"伪装成业务故障。
+func TestReadyzFailsFastWhenMigrationsPending(t *testing.T) {
+	service := &application.Service{Repo: &repo{}}
+	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"}}, AuthorizationRevision: 1}}
+	handler := httpapi.NewRouter(service, id, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
+		PendingMigrations: []string{"000017_split_rule_config_v2.sql"},
+	})
+	response := perform(handler, http.MethodGet, "/readyz", "")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("待执行迁移时应 503，实际 %d %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "migrations_pending") || !strings.Contains(response.Body.String(), "000017_split_rule_config_v2.sql") {
+		t.Fatalf("就绪检查应显式说明待执行迁移：%s", response.Body.String())
+	}
+	// 存活检查保持 200，并把待迁移数量带出来供巡检发现。
+	response = perform(handler, http.MethodGet, "/healthz", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "pending_migrations") {
+		t.Fatalf("健康检查应 200 并带出待迁移数量：%d %s", response.Code, response.Body.String())
+	}
+	// 结构就绪时恢复为 ready。
+	ready := httpapi.NewRouter(service, id, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response = perform(ready, http.MethodGet, "/readyz", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "\"ready\"") {
+		t.Fatalf("结构就绪时应 ready：%d %s", response.Code, response.Body.String())
+	}
+}
+
 func navigationBodyForRole(t *testing.T, role string) string {
 	t.Helper()
 	repository := &repo{}
@@ -843,14 +871,19 @@ func TestHealthReportsWhetherPlatformAuditIsEnabled(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("status=%d", response.Code)
 			}
+			// data 里除 audit 之外还带 pending_migrations（数字），因此按 any 解码后取值。
 			var payload struct {
-				Data map[string]string `json:"data"`
+				Data map[string]any `json:"data"`
 			}
 			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 				t.Fatal(err)
 			}
-			if got := payload.Data["audit"]; got != name {
-				t.Fatalf("audit=%q, want %q", got, name)
+			if got, _ := payload.Data["audit"].(string); got != name {
+				t.Fatalf("audit=%q, want %q", payload.Data["audit"], name)
+			}
+			// 待执行迁移数量必须在存活检查里可见：部署巡检据此发现"库结构落后于代码"。
+			if _, ok := payload.Data["pending_migrations"]; !ok {
+				t.Fatalf("healthz 应带出 pending_migrations：%s", response.Body.String())
 			}
 		})
 	}

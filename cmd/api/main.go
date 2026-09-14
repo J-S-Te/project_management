@@ -12,8 +12,10 @@ import (
 	"github.com/j-s-te/project-management/internal/config"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"github.com/j-s-te/project-management/internal/migration"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/j-s-te/project-management/internal/temporalworker"
+	"github.com/j-s-te/project-management/migrations"
 )
 
 func main() {
@@ -99,8 +101,18 @@ func main() {
 	if notifications != nil {
 		logger.Info("platform notification integration enabled")
 	}
+	// 启动即核对库结构：代码先上线、迁移没跑是真实发生过的故障模式，届时任何写路径都会因
+	// 缺列/缺表报 500，对外只剩"服务暂不可用"。这里显式检测并把待执行迁移挂到就绪检查上。
+	pendingMigrations, pendingErr := migration.Pending(context.Background(), cfg.MySQLDSN, migrations.Files)
+	if pendingErr != nil {
+		logger.Error("check pending migrations failed", "error", pendingErr)
+	} else if len(pendingMigrations) > 0 {
+		logger.Error("database schema is behind the application code; run project-migrate before serving traffic",
+			"pending_migrations", pendingMigrations, "count", len(pendingMigrations))
+	}
 	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Logger: logger}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
+		PendingMigrations: pendingMigrations,
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,
 			BearerVerifier: contractBearer,
