@@ -587,6 +587,51 @@ func (r *assignmentRevokeRepository) ApplyDeliveryEvent(_ context.Context, event
 	return nil
 }
 
+type assignmentValidationRepository struct {
+	assignmentRevokeRepository
+	foundCapabilities []domain.Capability
+}
+
+func (r *assignmentValidationRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string) ([]domain.ServiceItem, error) {
+	return []domain.ServiceItem{r.item}, nil
+}
+
+func (r *assignmentValidationRepository) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {
+	return r.foundCapabilities, nil
+}
+
+// 客户端 required_codes 只是附加要求，不能替换检测类别已经落到服务项的必检码。
+// 否则调用者可少传 CORE 后只提交 EXTRA，绕过服务端定义的资质边界。
+func TestAssignExecutionTeamCannotShrinkPersistedRequiredCodes(t *testing.T) {
+	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
+		item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", RequiredCodes: []string{"core"}},
+	}}
+	repository.foundCapabilities = []domain.Capability{{ResourceID: "ENG-1", Status: "ACTIVE", Codes: []string{"EXTRA"}}}
+	principal := platform.Principal{
+		TenantID: "t1", UserID: "lead-1",
+		Permissions: map[string]bool{"project.execution.assign": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "team_lead", ScopeType: "APPLICATION"}},
+	}
+	service := Service{Repo: repository}
+
+	result, err := service.AssignExecutionTeam(context.Background(), principal, "SI-1", domain.ExecutionAssignmentInput{
+		ProjectManagerID: "PM-1", EngineerIDs: []string{"ENG-1"}, RequiredCodes: []string{"extra"},
+	})
+	if err != nil {
+		t.Fatalf("assign execution team: %v", err)
+	}
+	if result.Passed || !contains(result.Conflicts, "缺少能力：CORE") {
+		t.Fatalf("persisted CORE requirement must not be dropped: %+v", result)
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%d, want 1", len(repository.events))
+	}
+	required := payloadTextList(repository.events[0].Payload, "required_codes")
+	if len(required) != 2 || required[0] != "CORE" || required[1] != "EXTRA" {
+		t.Fatalf("event required_codes=%v, want [CORE EXTRA]", required)
+	}
+}
+
 func TestAssignmentRevocationCarriesReasonAndExpectedVersion(t *testing.T) {
 	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Version: 7, TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
 	principal := platform.Principal{TenantID: "t1", UserID: "operator-1", Permissions: map[string]bool{"project.team.revoke": true, "project.execution.revoke": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}}
@@ -614,6 +659,35 @@ func TestAssignmentRevocationCarriesReasonAndExpectedVersion(t *testing.T) {
 	}
 	if err := service.RevokeTeamAssignment(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{ExpectedVersion: 7}); err == nil {
 		t.Fatal("missing revoke reason must be rejected")
+	}
+}
+
+func TestReturnToDecompositionCarriesAuditSnapshotAndRejectsInvalidState(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Version: 9, TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
+	principal := platform.Principal{TenantID: "t1", UserID: "operator-1", Permissions: map[string]bool{"project.decomposition.manage": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	service := Service{Repo: repository}
+
+	if err := service.ReturnToDecomposition(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{Reason: "拆解范围需要重新确认", ExpectedVersion: 9}); err != nil {
+		t.Fatalf("return to decomposition: %v", err)
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%d, want 1", len(repository.events))
+	}
+	event := repository.events[0]
+	if event.Type != EventDecompositionReturned || event.Payload["reason"] != "拆解范围需要重新确认" || event.Payload["expected_version"] != uint64(9) {
+		t.Fatalf("unexpected return event: %#v", event)
+	}
+	if ids := payloadTextList(event.Payload, "revoked_user_ids"); len(ids) != 3 || ids[0] != "lead-1" || ids[2] != "engineer-1" {
+		t.Fatalf("return recipients=%#v", ids)
+	}
+
+	repository.item.Status = "待实施"
+	if err := service.ReturnToDecomposition(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{Reason: "错误回退", ExpectedVersion: 9}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("non-pending-allocation return error=%v, want precondition", err)
+	}
+	repository.item.Status = "待分配"
+	if err := service.ReturnToDecomposition(context.Background(), principal, "SI-1", domain.AssignmentRevokeInput{ExpectedVersion: 9}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing reason error=%v, want validation", err)
 	}
 }
 

@@ -336,7 +336,7 @@ func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind stri
 }
 
 // ruleKindPermission 返回管理某一类配置所需的权限码。
-// 六类配置共用 domain.Rule 结构、按 kind 分表存储，但职责并不相同：
+// 多类配置共用 domain.Rule 结构、按 kind 分表存储，但职责并不相同：
 // 字段级脱敏是安全策略，与拆解/预警/自动化/SLA/标准等运营参数必须分开授权，
 // 否则"能配 SLA 的人就能改脱敏"。规则按客户端声明的 kind 选择数据表，
 // 因此以 kind 判定权限是可靠的：不声明 permissions 就碰不到脱敏表。
@@ -517,6 +517,13 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 		if strings.TrimSpace(input.Scope) == "" {
 			return input, ErrValidation
 		}
+	case capabilityCodeRuleKind:
+		if err := normalizeCapabilityCodeRule(&input); err != nil {
+			return input, err
+		}
+		if err := s.ensureCapabilityCodeUnique(ctx, p.TenantID, input, 0); err != nil {
+			return input, err
+		}
 	default:
 		return input, ErrValidation
 	}
@@ -531,11 +538,21 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 
 // UpdateRule 整行更新配置。载荷覆盖该 kind 的专属字段与启停开关。
 func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64, input domain.Rule) (domain.Rule, error) {
+	input.Kind = strings.TrimSpace(input.Kind)
+	input.ID = id
 	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
 		return domain.Rule{}, err
 	}
 	if strings.TrimSpace(input.Name) == "" {
 		return domain.Rule{}, ErrValidation
+	}
+	if input.Kind == capabilityCodeRuleKind {
+		if err := normalizeCapabilityCodeRule(&input); err != nil {
+			return domain.Rule{}, err
+		}
+		if err := s.ensureCapabilityCodeIdentityUnchanged(ctx, p.TenantID, input); err != nil {
+			return domain.Rule{}, err
+		}
 	}
 	input.TenantID = p.TenantID
 	input.UpdatedBy = p.UserID
@@ -550,7 +567,7 @@ func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind
 	return s.Repo.SetRuleEnabled(ctx, p.TenantID, strings.TrimSpace(kind), id, enabled, p.UserID)
 }
 
-// DeleteRule 删除一条配置规则。kind 必填：六套配置各自成表，只有 kind 才能确定目标表，
+// DeleteRule 删除一条配置规则。kind 必填：各类配置分别成表，只有 kind 才能确定目标表，
 // 缺省「全部类型」的语义只适用于查询。删除同样按 kind 判权限（字段级权限走
 // project.field_permission.manage），与新建、编辑保持一致，避免「能建不能删」。
 func (s *Service) DeleteRule(ctx context.Context, p platform.Principal, kind string, id int64) (domain.Rule, error) {
@@ -563,6 +580,34 @@ func (s *Service) DeleteRule(ctx context.Context, p platform.Principal, kind str
 	}
 	if id <= 0 {
 		return domain.Rule{}, ValidationError("规则编号不合法")
+	}
+	if kind == capabilityCodeRuleKind {
+		rules, err := s.Repo.ListRules(ctx, p.TenantID, kind)
+		if err != nil {
+			return domain.Rule{}, err
+		}
+		var target *domain.Rule
+		for index := range rules {
+			if rules[index].ID == id {
+				target = &rules[index]
+				break
+			}
+		}
+		if target == nil {
+			return domain.Rule{}, ErrNotFound
+		}
+		references, ok := s.Repo.(CapabilityCodeReferenceRepository)
+		if !ok {
+			// 无法确认引用关系时失败关闭，不能冒险删除可能仍被业务快照使用的编码。
+			return domain.Rule{}, errors.New("capability code reference repository unavailable")
+		}
+		count, err := references.CountCapabilityCodeReferences(ctx, p.TenantID, target.CheckType, target.Scope)
+		if err != nil {
+			return domain.Rule{}, err
+		}
+		if count > 0 {
+			return domain.Rule{}, ConflictError("该编码已被能力档案、项目服务项或检测类别引用，不能删除；如需停止新业务使用，请改为禁用。")
+		}
 	}
 	return s.Repo.DeleteRule(ctx, p.TenantID, kind, id)
 }

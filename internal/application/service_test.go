@@ -326,8 +326,29 @@ type capabilityRepository struct {
 	capabilities []domain.Capability
 	reservations []domain.EquipmentReservation
 	saved        []domain.Capability
+	// rules=nil 时提供旧用例共用的编码目录；显式空 slice 表示未配置，
+	// 供 fail-closed 专项用例使用。
+	rules []domain.Rule
 	// identityStatuses 记录身份复核回写的结果，供人员资质同步用例断言。
 	identityStatuses map[string]string
+}
+
+func (r *capabilityRepository) ListRules(_ context.Context, _ string, kind string) ([]domain.Rule, error) {
+	if kind != capabilityCodeRuleKind {
+		return nil, nil
+	}
+	if r.rules != nil {
+		return r.rules, nil
+	}
+	codes := []string{"C1", "C2", "QUAL-1", "CISP-PTE", "802.11 A/B/G/N/AC", "等级保护初级"}
+	rules := make([]domain.Rule, 0, len(codes)*2)
+	for index, code := range codes {
+		rules = append(rules,
+			domain.Rule{ID: int64(index + 1), Kind: capabilityCodeRuleKind, Scope: code, CheckType: "PERSON", Enabled: true},
+			domain.Rule{ID: int64(index + 101), Kind: capabilityCodeRuleKind, Scope: code, CheckType: "EQUIPMENT", Enabled: true},
+		)
+	}
+	return rules, nil
 }
 
 func (r *capabilityRepository) UpdateCapabilityIdentities(_ context.Context, _ string, statuses map[string]string, _ time.Time) error {

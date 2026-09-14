@@ -36,6 +36,7 @@ stateDiagram-v2
     待确认 --> 待复核: 特殊方法项待技术总监复核
     待确认 --> 待分配: 确认拆解
     待复核 --> 待分配: 确认拆解
+    待分配 --> 待确认: 退回拆解确认（须原因）
     待分配 --> 待分配: 分配团队负责人 / 分配项目经理与工程师
     待分配 --> 待实施: 发布实施计划（须能力校验通过）
     待实施 --> 实施准备中: 发起实施准备（含设备清单）
@@ -57,6 +58,7 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | `TEAM_ASSIGNED` | status = 待分配 | 不变（待分配） | 写入 `team_lead_id` |
 | `EXECUTION_TEAM_ASSIGNED` | status = 待分配 **且 `team_lead_id` 非空** | 不变（待分配） | 写入项目经理、工程师、所需能力码、能力校验结论 |
+| `DECOMPOSITION_RETURNED` | status = 待分配；必须填写退回原因；需 `project.decomposition.manage` | **待确认** | 清空全部责任分配、设备选择、能力校验及特殊方法复核结果；事件保留原责任链 |
 | `TEAM_ASSIGNMENT_REVOKED` | status = 待分配 **且 `team_lead_id` 非空**；必须填写撤销原因 | 不变（待分配） | 清空团队负责人、执行团队、能力校验及尚未使用的设备选择；事件保留原责任链 |
 | `EXECUTION_ASSIGNMENT_REVOKED` | status = 待分配 **且团队负责人、项目经理均非空**；必须填写撤销原因 | 不变（待分配） | 清空项目经理、工程师、能力校验及尚未使用的设备选择；保留团队负责人 |
 | `IMPLEMENTATION_PLAN_REVOKED` | status = 待实施；必须填写撤销原因 | **待分配** | 清空当前有效计划快照；保留责任分配、能力结论和全部历史事件 |

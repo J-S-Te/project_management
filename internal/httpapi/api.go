@@ -122,6 +122,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/confirm", require("service_item.confirm"), h.confirmServiceItems)
 	api.POST("/service-items/:id/team-assignment", require("project.team.assign"), h.assignTeam)
 	api.POST("/service-items/:id/team-assignment/revoke", require("project.team.revoke"), h.revokeTeamAssignment)
+	api.POST("/service-items/:id/decomposition-return", require("project.decomposition.manage"), h.returnToDecomposition)
 	api.POST("/service-items/:id/execution-assignment", require("project.execution.assign"), h.assignExecutionTeam)
 	api.POST("/service-items/:id/execution-assignment/revoke", require("project.execution.revoke"), h.revokeExecutionAssignment)
 	api.POST("/service-items/:id/implementation-plan", require("project.implementation.plan"), h.planImplementation)
@@ -455,7 +456,7 @@ var allNavigationSections = []string{
 	"projects", "decomposition",
 	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "sites", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
-	"split-rules", "warning-rules", "automations", "permissions", "sla",
+	"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
 }
 
 func navigationSections(roles []string) []string {
@@ -475,9 +476,9 @@ func navigationSections(roles []string) []string {
 		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）：只给 sites
 		// 不给 qualifications 会让这份权限无处使用，资质维护只剩质量管理员一条路径。
 		"device_admin": {"dashboard", "projects", "equipment", "sites", "qualifications"},
-		// 六类配置（含 standards/检测标准）都由 project_rule.manage 把守：配置维护者必须
-		// 能看到全部六类，否则「检测标准」这一类规则没有可维护它的角色。
-		"quality_manager": {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "standards", "reports"},
+		// 治理类配置（含检测标准、资质/能力编码）由 project_rule.manage 把守：
+		// 质量管理员必须能看到它们，否则必检能力码没有可维护的入口。
+		"quality_manager": {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "standards", "capability-codes", "reports"},
 		"engineer":        {"projects", "implementation", "exceptions"},
 		// 渗透测试工程师不持有 project.implementation.plan（该权限按职责矩阵只授予项目经理），
 		// 因此不能看到 planning：那里是实施计划与设备清单的录入表单，能填却没有提交按钮。
@@ -780,6 +781,18 @@ func (h *Handler) revokeTeamAssignment(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": "TEAM_ASSIGNMENT_REVOKED"})
+}
+
+func (h *Handler) returnToDecomposition(c *gin.Context) {
+	var input domain.AssignmentRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.ReturnToDecomposition(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": application.EventDecompositionReturned})
 }
 func (h *Handler) revokeExecutionAssignment(c *gin.Context) {
 	var input domain.AssignmentRevokeInput
@@ -1109,7 +1122,7 @@ func (h *Handler) updateConfigRule(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 
-// deleteRule 删除一条配置规则。kind 从查询串取（与启停接口一致）：六套配置各自成表，
+// deleteRule 删除一条配置规则。kind 从查询串取（与启停接口一致）：各类配置分别成表，
 // 只有 kind 能确定目标表，缺少时应用层直接拒绝而不是猜一个默认类型。
 func (h *Handler) deleteRule(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

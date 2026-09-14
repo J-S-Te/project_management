@@ -95,11 +95,12 @@ func (s *Service) SaveDetectionCategory(ctx context.Context, p platform.Principa
 	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
 		return domain.DetectionCategory{}, err
 	}
+	requiredCodes := normalizeCapabilityCodes(domain.SplitCapabilityCodes(input.RequiredCodes))
 	normalized := domain.DetectionCategory{
 		Category:               strings.TrimSpace(input.Category),
 		SystemStandard:         strings.TrimSpace(input.SystemStandard),
 		RequiredQualifications: strings.TrimSpace(input.RequiredQualifications),
-		RequiredCodes:          strings.Join(domain.SplitCapabilityCodes(input.RequiredCodes), ","),
+		RequiredCodes:          strings.Join(requiredCodes, ","),
 		SpecialMethod:          strings.ToUpper(strings.TrimSpace(input.SpecialMethod)),
 		Enabled:                input.Enabled,
 	}
@@ -108,6 +109,13 @@ func (s *Service) SaveDetectionCategory(ctx context.Context, p platform.Principa
 	}
 	if err := domain.ValidateDetectionCategory(normalized); err != nil {
 		return domain.DetectionCategory{}, ValidationError(err.Error())
+	}
+	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
+	if err != nil {
+		return domain.DetectionCategory{}, err
+	}
+	if err := validateRequiredCodesAgainstCatalog(codeRules, requiredCodes); err != nil {
+		return domain.DetectionCategory{}, err
 	}
 	repo, err := s.splitConfigRepo()
 	if err != nil {
@@ -487,14 +495,19 @@ func (s *Service) ImportDetectionCategories(ctx context.Context, p platform.Prin
 	if err != nil {
 		return DetectionCategoryImportResult{}, err
 	}
+	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
+	if err != nil {
+		return DetectionCategoryImportResult{}, err
+	}
 	result := DetectionCategoryImportResult{}
 	for index, row := range rows {
 		line := fmt.Sprintf("数据行 %d", index+1)
+		requiredCodes := normalizeCapabilityCodes(domain.SplitCapabilityCodes(row.RequiredCodes))
 		normalized := domain.DetectionCategory{
 			Category:               strings.TrimSpace(row.Category),
 			SystemStandard:         strings.TrimSpace(row.SystemStandard),
 			RequiredQualifications: strings.TrimSpace(row.RequiredQualifications),
-			RequiredCodes:          strings.Join(domain.SplitCapabilityCodes(row.RequiredCodes), ","),
+			RequiredCodes:          strings.Join(requiredCodes, ","),
 			SpecialMethod:          strings.ToUpper(strings.TrimSpace(row.SpecialMethod)),
 			Enabled:                row.Enabled,
 		}
@@ -502,6 +515,11 @@ func (s *Service) ImportDetectionCategories(ctx context.Context, p platform.Prin
 			normalized.SpecialMethod = domain.SpecialMethodNo
 		}
 		if err := domain.ValidateDetectionCategory(normalized); err != nil {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": "+err.Error())
+			continue
+		}
+		if err := validateRequiredCodesAgainstCatalog(codeRules, requiredCodes); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": "+err.Error())
 			continue

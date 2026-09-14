@@ -224,6 +224,31 @@ func TestAssignmentRevocationRequiresPermissionAndReason(t *testing.T) {
 	}
 }
 
+func TestReturnToDecompositionRequiresPermissionReasonAndPendingAllocation(t *testing.T) {
+	items := []domain.ServiceItem{{ID: "SI-1", Status: "待分配", Version: 3, TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
+	path := "/api/v1/service-items/SI-1/decomposition-return"
+	denied := perform(routerWithItems(t, map[string]bool{}, nil, items), http.MethodPost, path, `{"reason":"重新确认范围"}`)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("missing decomposition permission status=%d body=%s", denied.Code, denied.Body.String())
+	}
+
+	handler := routerWithItems(t, map[string]bool{"project.decomposition.manage": true}, nil, items)
+	missingReason := perform(handler, http.MethodPost, path, `{}`)
+	if missingReason.Code != http.StatusUnprocessableEntity || !strings.Contains(missingReason.Body.String(), "请填写退回拆解确认的原因") {
+		t.Fatalf("missing reason status=%d body=%s", missingReason.Code, missingReason.Body.String())
+	}
+	returned := perform(handler, http.MethodPost, path, `{"reason":"重新确认范围","expected_version":3}`)
+	if returned.Code != http.StatusOK || !strings.Contains(returned.Body.String(), application.EventDecompositionReturned) {
+		t.Fatalf("return status=%d body=%s", returned.Code, returned.Body.String())
+	}
+
+	invalid := []domain.ServiceItem{{ID: "SI-1", Status: "待实施", Version: 3}}
+	blocked := perform(routerWithItems(t, map[string]bool{"project.decomposition.manage": true}, nil, invalid), http.MethodPost, path, `{"reason":"错误回退","expected_version":3}`)
+	if blocked.Code != http.StatusConflict || !strings.Contains(blocked.Body.String(), "仅可将待分配服务项退回拆解确认") {
+		t.Fatalf("invalid state status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+}
+
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -405,7 +430,7 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 	modules := map[string][]string{
 		"split-rules": {"project_rule.manage"}, "warning-rules": {"project_rule.manage"},
 		"automations": {"project_rule.manage"}, "sla": {"project_rule.manage"},
-		"standards": {"project_rule.manage"}, "permissions": {"project.field_permission.manage"},
+		"standards": {"project_rule.manage"}, "capability-codes": {"project_rule.manage"}, "permissions": {"project.field_permission.manage"},
 		"qualifications": {"project.resource.manage"}, "sites": {"project.resource.manage"},
 		"decomposition":  {"service_item.confirm", "project.decomposition.manage"},
 		"planning":       {"project.implementation.plan"},
@@ -567,7 +592,7 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 		"dashboard", "monitoring", "projects", "decomposition",
 		"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
 		"implementation", "exceptions", "standards", "reports",
-		"split-rules", "warning-rules", "automations", "permissions", "sla",
+		"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
 	}
 	for _, role := range []string{"admin", "system_admin"} {
 		body := navigationBodyForRole(t, role)
@@ -579,7 +604,7 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 	}
 	// 业务管理员只看项目/拆解/分配，不应看到系统配置模块。
 	businessAdmin := navigationBodyForRole(t, "business_admin")
-	for _, section := range []string{"split-rules", "permissions", "sla", "equipment"} {
+	for _, section := range []string{"split-rules", "permissions", "sla", "capability-codes", "equipment"} {
 		if strings.Contains(businessAdmin, `"`+section+`"`) {
 			t.Fatalf("business_admin must not see %q: %s", section, businessAdmin)
 		}
