@@ -21,7 +21,11 @@ var (
 	// ErrDuplicateContract 表示同一租户下 (contract_id, contract_version) 已被并发请求创建。
 	// 调用方应按幂等处理：回读已存在的项目并同步盖章状态，而不是把唯一键冲突暴露成 500。
 	ErrDuplicateContract = errors.New("contract version already activated")
-	ErrForbidden         = errors.New("operation is outside the authorized project scope")
+	// ErrDuplicateProject 表示同一租户下 (contract, contract_version) 已经有项目：
+	// 手动新建项目没有合同激活那样的幂等回读，唯一键 uq_pm_project_contract_version 冲突
+	// 会以 MySQL 1062 冒到接口层，若原样兜底就只剩「服务暂不可用」。
+	ErrDuplicateProject = errors.New("project already exists for the contract version")
+	ErrForbidden        = errors.New("operation is outside the authorized project scope")
 	// ErrServiceTimeout 表示同步等待后端工作流在约定时间内没有完成。
 	// 前端应提示用户稍后重试，而不是让网关吞掉请求并返回 504。
 	ErrServiceTimeout = errors.New("service processing timeout")
@@ -347,6 +351,33 @@ func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input
 	return s.CreateProjectWithServiceItems(ctx, p, input, nil)
 }
 
+// DuplicateProjectError 把"同一合同版本已有项目"表达成可执行提示：
+// 带上已存在项目编号，并指引用拆解调整（走补充协议）而不是重复新建。
+func DuplicateProjectError(existingID string) error {
+	if strings.TrimSpace(existingID) == "" {
+		return ReasonError{Kind: ErrDuplicateProject, Reason: "该合同版本已存在项目，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解。"}
+	}
+	return ReasonError{Kind: ErrDuplicateProject, Reason: fmt.Sprintf("该合同版本已存在项目 %s，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解（走补充协议）。", existingID)}
+}
+
+// findExistingProjectByContract 按租户边界查找同合同同版本的项目编号（空表示不存在）。
+// 用租户边界而不是调用者数据范围：唯一键冲突本身是租户级的，范围过滤会让预检漏判、
+// 随后仍然撞库并报 500。
+func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, contract, version string) (string, error) {
+	deliveryRepo, ok := s.Repo.(DeliveryRepository)
+	if !ok || strings.TrimSpace(contract) == "" {
+		return "", nil
+	}
+	existing, err := deliveryRepo.FindProjectByContractVersion(ctx, platform.ScopeFilter{TenantID: tenantID, AllowAll: true}, contract, version)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return existing.ID, nil
+}
+
 func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
 	filter, err := authorizeProjectScope(p, "project.create")
 	if err != nil {
@@ -354,6 +385,13 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	}
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Customer) == "" || strings.TrimSpace(input.Contract) == "" {
 		return input, ErrValidation
+	}
+	// 提前判重：唯一键只会以 MySQL 1062 的形式暴露，落到接口就是 500「服务暂不可用」，
+	// 用户完全不知道是自己重复建了项目。这里先查一次，给出带项目编号的可执行提示。
+	if existingID, findErr := s.findExistingProjectByContract(ctx, p.TenantID, strings.TrimSpace(input.Contract), strings.TrimSpace(input.ContractVersion)); findErr != nil {
+		return input, findErr
+	} else if existingID != "" {
+		return input, DuplicateProjectError(existingID)
 	}
 	now := time.Now().UTC()
 	input.ID = "PJ-" + now.Format("2006") + "-" + strings.ToUpper(ulid.Make().String()[20:])

@@ -68,6 +68,12 @@ func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
+			// 手动创建没有合同激活那样的幂等回读：撞唯一键 uq_pm_project_contract_version
+			// 说明同合同同版本已有项目，翻译成语义哨兵交由应用层给出可执行提示，
+			// 而不是让 MySQL 1062 一路兜底成 500「服务暂不可用」。
+			if isDuplicateKey(err) {
+				return application.ErrDuplicateProject
+			}
 			return err
 		}
 		for _, item := range items {
