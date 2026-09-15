@@ -64,6 +64,38 @@ func TestEmptyBusinessScopeFailsClosedInSQL(t *testing.T) {
 	}
 }
 
+func TestAssignedItemScopeUsesPlatformUserIDAndDoesNotExposeSiblingItems(t *testing.T) {
+	filter := platform.ScopeFilter{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "user-1", AllowSelf: true, AssignedItemsOnly: true}
+	projectSQL := scopedProjectSQL(t, filter)
+	for _, expected := range []string{"EXISTS", "team_lead_id = ?", "project_manager_id = ?", "engineer_ids"} {
+		if !strings.Contains(projectSQL, expected) {
+			t.Fatalf("assigned project SQL missing %q: %s", expected, projectSQL)
+		}
+	}
+	if strings.Contains(projectSQL, "owner_identity_id") {
+		t.Fatalf("operational assignee scope must not inherit project ownership: %s", projectSQL)
+	}
+	var records []serviceItemRecord
+	itemSQL := applyServiceItemScope(dryRunDB(t).Model(&serviceItemRecord{}), dryRunDB(t), filter).Find(&records).Statement.SQL.String()
+	if !strings.Contains(itemSQL, "pm_service_item.team_lead_id = ?") || strings.Contains(itemSQL, "scope_project") {
+		t.Fatalf("assigned service-item SQL must filter the row itself: %s", itemSQL)
+	}
+}
+
+func TestAssignablePersonnelMatchesLinkedUserIDWithoutDateRestriction(t *testing.T) {
+	var records []capabilityRecord
+	statement := activePersonnelCapabilitiesQuery(dryRunDB(t), "tenant-1", "2026-09-15T00:00:00Z", []string{"user-1"}).Find(&records).Statement
+	sql := statement.SQL.String()
+	for _, expected := range []string{"resource_type='PERSON'", "resource_id IN", "user_id IN", "identity_status="} {
+		if !strings.Contains(sql, expected) {
+			t.Fatalf("qualified personnel SQL missing %q: %s", expected, sql)
+		}
+	}
+	if strings.Contains(sql, "valid_from") || strings.Contains(sql, "valid_until") {
+		t.Fatalf("personnel assignment query must not apply validity dates: %s", sql)
+	}
+}
+
 // 项目状态必须由完整服务项集合派生：项目权限只决定项目是否可见，不能裁剪状态输入。
 func TestProjectStatusInputQueryUsesTenantWideProjectItems(t *testing.T) {
 	var rows []projectStatusRow

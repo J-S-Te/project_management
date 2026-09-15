@@ -108,8 +108,8 @@ func planPreconditionOf(item domain.ServiceItem) PlanPrecondition {
 		ConflictStatus: item.ConflictStatus, Special: item.Special, TechReviewStatus: item.TechReviewStatus}
 }
 
-// 实施计划的人员清单：至少一名人员、资源必须命中有效能力档案、
-// 使用时段落在计划内且被资质有效期覆盖。
+// 实施计划的人员清单：至少一名人员、资源必须命中启用的能力档案，
+// 使用时段落在计划内；人员资质日期不限制派工。
 func TestResolvePlanPersonnelValidatesCrewAndSnapshotsQualifications(t *testing.T) {
 	repo := &capabilityRepository{capabilities: []domain.Capability{
 		{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "王明", Codes: []string{"CISP-PTE"}, Status: "ACTIVE", ValidUntil: time.Date(2027, 6, 30, 0, 0, 0, 0, time.UTC)},
@@ -129,8 +129,8 @@ func TestResolvePlanPersonnelValidatesCrewAndSnapshotsQualifications(t *testing.
 	if len(resources) != 2 {
 		t.Fatalf("resources=%+v", resources)
 	}
-	// 人员行留空使用时段表示全程：快照里不带窗口，但保留资质与有效期。
-	if resources[0].ResourceName != "王明" || resources[0].ValidUntil != "2027-06-30" || resources[0].WindowStart != "" {
+	// 人员行留空使用时段表示全程；人员快照不再携带已废弃的有效期限制。
+	if resources[0].ResourceName != "王明" || resources[0].ValidUntil != "" || resources[0].WindowStart != "" {
 		t.Fatalf("person row=%+v", resources[0])
 	}
 	if len(resources[0].Codes) != 1 || resources[0].Codes[0] != "CISP-PTE" {
@@ -166,7 +166,6 @@ func TestResolvePlanPersonnelRejectsInvalidCrew(t *testing.T) {
 		{"无效类型", []domain.PlanResourceInput{{ResourceType: "VEHICLE", ResourceID: "V-1"}}, "资源类型必须是人员或设备"},
 		{"时段缺一端", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-001", WindowStart: "2026-08-10"}}, "需要同时填写开始与结束"},
 		{"时段超出计划", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-001", WindowStart: "2026-08-01", WindowEnd: "2026-08-20"}}, "必须落在计划起止"},
-		{"有效期不覆盖时段", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-003", WindowStart: "2026-08-10", WindowEnd: "2026-08-20"}}, "不覆盖使用时段截止日"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +174,10 @@ func TestResolvePlanPersonnelRejectsInvalidCrew(t *testing.T) {
 				t.Fatalf("error=%v, want contains %q", err, tc.expected)
 			}
 		})
+	}
+	resources, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-003", WindowStart: "2026-08-10", WindowEnd: "2026-08-20"}}, start, end)
+	if err != nil || len(resources) != 1 {
+		t.Fatalf("expired personnel qualification must remain assignable: resources=%+v err=%v", resources, err)
 	}
 }
 
@@ -235,6 +238,7 @@ func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T)
 	repo := &capabilityRepository{capabilities: []domain.Capability{
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "超期设备", Status: "ACTIVE", ValidUntil: time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)},
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-002", ResourceName: "停用设备", Status: "DISABLED"},
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-003", ResourceName: "检定尚未生效设备", Status: "ACTIVE", ValidFrom: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)},
 		{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "王明", Status: "ACTIVE"},
 	}}
 	service := &Service{Repo: repo}
@@ -250,6 +254,7 @@ func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T)
 		{"人员不属于准备阶段", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-001"}}, "资源类型与当前阶段不匹配"},
 		{"停用设备", []domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-002"}}, "不在有效的能力档案中"},
 		{"检定有效期不覆盖", []domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001"}}, "不覆盖使用时段截止日"},
+		{"检定尚未生效", []domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-003"}}, "不覆盖使用时段开始日"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -606,7 +611,10 @@ func TestAssignExecutionTeamCannotShrinkPersistedRequiredCodes(t *testing.T) {
 	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
 		item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", RequiredCodes: []string{"core"}},
 	}}
-	repository.foundCapabilities = []domain.Capability{{ResourceID: "ENG-1", Status: "ACTIVE", Codes: []string{"EXTRA"}}}
+	repository.foundCapabilities = []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-MANAGER", UserID: "PM-1", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+		{ResourceType: "PERSON", ResourceID: "P-ENGINEER", UserID: "ENG-1", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE", Codes: []string{"EXTRA"}},
+	}
 	principal := platform.Principal{
 		TenantID: "t1", UserID: "lead-1",
 		Permissions: map[string]bool{"project.execution.assign": true},
@@ -629,6 +637,41 @@ func TestAssignExecutionTeamCannotShrinkPersistedRequiredCodes(t *testing.T) {
 	required := payloadTextList(repository.events[0].Payload, "required_codes")
 	if len(required) != 2 || required[0] != "CORE" || required[1] != "EXTRA" {
 		t.Fatalf("event required_codes=%v, want [CORE EXTRA]", required)
+	}
+}
+
+func TestAssignmentsRequireQualifiedPeopleAndStorePlatformUserIDs(t *testing.T) {
+	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
+		item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Version: 1},
+	}}
+	repository.foundCapabilities = []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-LEAD", UserID: "user-lead", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE", ValidUntil: time.Now().UTC().AddDate(0, 0, -30)},
+		{ResourceType: "PERSON", ResourceID: "P-MANAGER", UserID: "user-manager", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+		{ResourceType: "PERSON", ResourceID: "P-ENGINEER", UserID: "user-engineer", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+	}
+	principal := platform.Principal{TenantID: "t1", IdentityID: "admin-identity", UserID: "admin-user", Roles: []string{"business_admin"}, Permissions: map[string]bool{"project.team.assign": true, "project.execution.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	service := Service{Repo: repository}
+	if err := service.AssignTeam(context.Background(), principal, "SI-1", domain.TeamAssignmentInput{TeamLeadID: "P-LEAD", ExpectedVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := payloadText(repository.events[0].Payload, "team_lead_id"); got != "user-lead" {
+		t.Fatalf("team lead stored as %q, want platform user id", got)
+	}
+	repository.events = nil
+	result, err := service.AssignExecutionTeam(context.Background(), principal, "SI-1", domain.ExecutionAssignmentInput{ProjectManagerID: "P-MANAGER", EngineerIDs: []string{"P-ENGINEER"}, ExpectedVersion: 1})
+	if err != nil || !result.Passed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if got := payloadText(repository.events[0].Payload, "project_manager_id"); got != "user-manager" {
+		t.Fatalf("project manager stored as %q", got)
+	}
+	engineers := payloadTextList(repository.events[0].Payload, "engineer_ids")
+	if len(engineers) != 1 || engineers[0] != "user-engineer" {
+		t.Fatalf("engineers=%v", engineers)
+	}
+	repository.foundCapabilities = nil
+	if err := service.AssignTeam(context.Background(), principal, "SI-1", domain.TeamAssignmentInput{TeamLeadID: "unknown"}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("unqualified team lead err=%v", err)
 	}
 }
 

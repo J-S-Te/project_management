@@ -290,17 +290,17 @@ func TestInvariantI8EquipmentSingleOccupancy(t *testing.T) {
 	}
 }
 
-// ---- I9：分配时刻资质必须有效（过期资质不参与校验）----
+// ---- I9：人员资质不按日期失效，但仍必须启用、身份有效且已关联平台用户 ----
 
-func TestInvariantI9ExpiredCapabilityRejected(t *testing.T) {
+func TestInvariantI9PersonnelDatesDoNotBlockAssignment(t *testing.T) {
 	env := newInvEnv(t)
 	env.exec(
 		env.seedProject("PJ-INV-EXP", "待分配", 1),
 		env.seedItem("SI-INV-EXP", "PJ-INV-EXP", "待分配", "NONE", ""),
-		// 资质有效期已于昨天结束
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-INV-EXP', '`+invTenant+`', 'PERSON', 'E-INV-EXP', '过期工程师', JSON_ARRAY('TPL-INV'),
-		         DATE_SUB(NOW(3), INTERVAL 60 DAY), DATE_SUB(NOW(3), INTERVAL 1 DAY), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
+		// 保留一条历史上已经过期的日期，验证人员派工不再受该日期限制。
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, updated_at, updated_by)
+		 VALUES ('CAP-INV-EXP', '`+invTenant+`', 'PERSON', 'E-INV-EXP', '历史过期工程师', 'E-INV-EXP', JSON_ARRAY('TPL-INV'),
+		         DATE_SUB(NOW(3), INTERVAL 60 DAY), DATE_SUB(NOW(3), INTERVAL 1 DAY), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), 'seed')`,
 	)
 	if status, body := env.call("business_admin", http.MethodPost, "/api/v1/service-items/SI-INV-EXP/team-assignment",
 		`{"team_lead_id":"LEAD-INV"}`); status != http.StatusOK {
@@ -320,9 +320,9 @@ func TestInvariantI9ExpiredCapabilityRejected(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		t.Fatalf("解析失败: %v (%s)", err, body)
 	}
-	t.Logf("  过期资质参与校验 -> passed=%v conflicts=%v", result.Data.Passed, result.Data.Conflicts)
-	if result.Data.Passed {
-		t.Fatalf("I9 被违反：已过期资质仍被视为有效")
+	t.Logf("  人员历史有效期不限制派工 -> passed=%v conflicts=%v", result.Data.Passed, result.Data.Conflicts)
+	if !result.Data.Passed {
+		t.Fatalf("I9 被违反：启用且身份有效的人员被历史有效期拦截: %v", result.Data.Conflicts)
 	}
 }
 

@@ -5,10 +5,26 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 )
+
+func TestNormalizeCapabilityClearsOnlyPersonnelValidityDates(t *testing.T) {
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	person := domain.Capability{ResourceType: "person", ValidFrom: from, ValidUntil: until}
+	normalizeCapability(&person)
+	if !person.ValidFrom.IsZero() || !person.ValidUntil.IsZero() {
+		t.Fatalf("personnel dates were retained: %+v", person)
+	}
+	equipment := domain.Capability{ResourceType: "equipment", ValidFrom: from, ValidUntil: until}
+	normalizeCapability(&equipment)
+	if !equipment.ValidFrom.Equal(from) || !equipment.ValidUntil.Equal(until) {
+		t.Fatalf("equipment calibration dates were removed: %+v", equipment)
+	}
+}
 
 type capabilityCodeRuleRepository struct {
 	scopeRepository

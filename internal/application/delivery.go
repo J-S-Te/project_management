@@ -504,9 +504,23 @@ func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID s
 	if err := s.verifyExpectedVersion(ctx, p, "project.team.assign", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
-	if strings.TrimSpace(input.TeamLeadID) == "" {
+	input.TeamLeadID = strings.TrimSpace(input.TeamLeadID)
+	if input.TeamLeadID == "" {
 		return ErrValidation
 	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return err
+	}
+	people, err := repo.FindCapabilities(ctx, p.TenantID, time.Now().UTC().Format(time.RFC3339), []string{input.TeamLeadID})
+	if err != nil {
+		return err
+	}
+	canonical, ok := qualifiedUserID(input.TeamLeadID, people)
+	if !ok {
+		return PreconditionError("所选团队负责人不在有效人员资质库中，请先维护人员资质")
+	}
+	input.TeamLeadID = canonical
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID}))
 }
 
@@ -585,6 +599,8 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if input.ExpectedVersion != 0 && existing.Version != input.ExpectedVersion {
 		return domain.ConflictCheckResult{}, ErrConflict
 	}
+	input.ProjectManagerID = strings.TrimSpace(input.ProjectManagerID)
+	input.EngineerIDs = normalizePersonnelIDs(input.EngineerIDs)
 	if input.ProjectManagerID == "" || len(input.EngineerIDs) == 0 {
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
@@ -621,6 +637,24 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
+	managerCaps, err := repo.FindCapabilities(ctx, p.TenantID, time.Now().UTC().Format(time.RFC3339), []string{input.ProjectManagerID})
+	if err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	managerID, ok := qualifiedUserID(input.ProjectManagerID, managerCaps)
+	if !ok {
+		return domain.ConflictCheckResult{}, PreconditionError("所选项目经理不在有效人员资质库中，请先维护人员资质")
+	}
+	input.ProjectManagerID = managerID
+	canonicalEngineers := make([]string, 0, len(input.EngineerIDs))
+	for _, engineerID := range input.EngineerIDs {
+		canonical, exists := qualifiedUserID(engineerID, caps)
+		if !exists {
+			return domain.ConflictCheckResult{}, PreconditionError("所选工程师不在有效人员资质库中，请先维护人员资质")
+		}
+		canonicalEngineers = append(canonicalEngineers, canonical)
+	}
+	input.EngineerIDs = canonicalEngineers
 	result := checkCapabilities(required, ids, caps)
 	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
 	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload)); err != nil {
@@ -720,7 +754,7 @@ var planResourceTypes = map[string]string{"PERSON": "人员", "EQUIPMENT": "设�
 
 // resolvePlanPersonnel 把实施计划提交的人员行解析成带快照的清单行。
 // 规则：至少一名人员；每一行都必须命中本租户有效的能力档案且类型为人员；
-// 同一资源不得重复；使用时段必须落在计划起止内，且资质有效期要覆盖使用时段。
+// 同一资源不得重复；使用时段必须落在计划起止内。人员资质不受日期有效期限制。
 func (s *Service) resolvePlanPersonnel(ctx context.Context, repo DeliveryRepository, tenantID string, inputs []domain.PlanResourceInput, planStart, planEnd time.Time) ([]domain.PlanResource, error) {
 	if len(inputs) == 0 {
 		return nil, ValidationError("请至少添加一名实施人员")
@@ -732,6 +766,9 @@ func (s *Service) resolvePlanPersonnel(ctx context.Context, repo DeliveryReposit
 	byResourceID := make(map[string]domain.Capability, len(known))
 	for _, capability := range known {
 		byResourceID[capability.ResourceID] = capability
+		if capability.ResourceType == "PERSON" && strings.TrimSpace(capability.UserID) != "" {
+			byResourceID[strings.TrimSpace(capability.UserID)] = capability
+		}
 	}
 	resources := make([]domain.PlanResource, 0, len(inputs))
 	seen := make(map[string]struct{}, len(inputs))
@@ -750,7 +787,7 @@ func (s *Service) resolvePlanPersonnel(ctx context.Context, repo DeliveryReposit
 }
 
 // buildPlanResource 把一行清单输入解析成带快照的资源行：校验类型、命中有效能力档案、
-// 去重、使用时段落在计划内，并要求资质/检定有效期覆盖使用时段。
+// 去重、使用时段落在计划内；只有设备要求检定有效期覆盖使用时段。
 func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, input domain.PlanResourceInput, wantType string, planStart, planEnd time.Time, seen map[string]struct{}) (domain.PlanResource, error) {
 	resourceType := strings.ToUpper(strings.TrimSpace(input.ResourceType))
 	label, ok := planResourceTypes[resourceType]
@@ -778,13 +815,19 @@ func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, i
 		return domain.PlanResource{}, err
 	}
 	validUntil := ""
-	if !capability.ValidUntil.IsZero() {
-		// 使用时段以日期表达：有效期覆盖到当天即算覆盖，不因时分量产生边界误判。
-		if dayOf(capability.ValidUntil).Before(dayOf(end)) {
-			return domain.PlanResource{}, fmt.Errorf("%s「%s」的有效期至 %s，不覆盖使用时段截止日 %s",
-				label, capability.ResourceName, capability.ValidUntil.Format("2006-01-02"), end.Format("2006-01-02"))
+	if resourceType == "EQUIPMENT" {
+		// 设备检定时段以日期表达：覆盖到当天即算覆盖，不因时分量产生边界误判。
+		if !capability.ValidFrom.IsZero() && dayOf(capability.ValidFrom).After(dayOf(start)) {
+			return domain.PlanResource{}, fmt.Errorf("%s「%s」的检定有效期从 %s 开始，不覆盖使用时段开始日 %s",
+				label, capability.ResourceName, capability.ValidFrom.Format("2006-01-02"), start.Format("2006-01-02"))
 		}
-		validUntil = capability.ValidUntil.Format("2006-01-02")
+		if !capability.ValidUntil.IsZero() {
+			if dayOf(capability.ValidUntil).Before(dayOf(end)) {
+				return domain.PlanResource{}, fmt.Errorf("%s「%s」的检定有效期至 %s，不覆盖使用时段截止日 %s",
+					label, capability.ResourceName, capability.ValidUntil.Format("2006-01-02"), end.Format("2006-01-02"))
+			}
+			validUntil = capability.ValidUntil.Format("2006-01-02")
+		}
 	}
 	row := domain.PlanResource{
 		ResourceType: resourceType, ResourceID: capability.ResourceID, ResourceName: capability.ResourceName,
@@ -797,14 +840,14 @@ func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, i
 	return row, nil
 }
 
-// dayOf 把时间截断到 UTC 日期：计划窗口与资质有效期都以"天"为业务粒度，
+// dayOf 把时间截断到 UTC 日期：计划窗口与设备检定有效期都以"天"为业务粒度，
 // 直接比较时间戳会把同一天判成越界或超期。
 func dayOf(value time.Time) time.Time {
 	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // planResourceWindow 解析行级使用时段：两端要么都留空（表示全程），要么都填写且不早于计划开始、
-// 不晚于计划结束；返回值同时作为有效期校验的截止时间。
+// 不晚于计划结束；返回值同时作为设备检定有效期校验的边界。
 func planResourceWindow(input domain.PlanResourceInput, planStart, planEnd time.Time) (time.Time, time.Time, error) {
 	rawStart, rawEnd := strings.TrimSpace(input.WindowStart), strings.TrimSpace(input.WindowEnd)
 	if rawStart == "" && rawEnd == "" {
@@ -1466,7 +1509,7 @@ func (s *Service) resolvePreparationEquipment(ctx context.Context, repo Delivery
 // 区间按左闭右开比较：结束日当天不算占用下一天。
 // equipmentUsageConflicts 返回与目标时段重叠的其他设备占用。
 //
-// 时段口径：两端都含当日，与资质有效期保持同一种日期语义。
+// 时段口径：两端都含当日，与设备检定有效期保持同一种日期语义。
 // 因此 [1 日..5 日] 与 [5 日..10 日] 在 5 日当天重叠，算冲突（此前用半开区间会漏判）。
 // 占用记录的使用时段解析失败时按「占用」处理：无法证明设备空闲时不得放行，
 // 同时把数据异常显式报出来，避免整段占用检查静默失效。
@@ -1818,6 +1861,61 @@ func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, ty
 		return nil, e
 	}
 	return repo.ListCapabilities(ctx, p.TenantID, typ)
+}
+
+// ListQualifiedPersonnel is the only assignment picker source. It deliberately
+// reads the project qualification ledger instead of enumerating the platform
+// role directory: a platform account is not assignable until an active,
+// identity-verified PERSON record exists. Personnel validity dates are not an
+// assignment constraint; only equipment calibration uses a date window.
+func (s *Service) ListQualifiedPersonnel(ctx context.Context, p platform.Principal, keyword string, page, pageSize int) (domain.QualifiedPersonnelPage, error) {
+	result := domain.QualifiedPersonnelPage{Items: []domain.QualifiedPersonnel{}}
+	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
+		return result, ErrForbidden
+	}
+	repo, err := s.deliveryRepo()
+	if err != nil {
+		return result, err
+	}
+	items, err := repo.ListCapabilities(ctx, p.TenantID, "PERSON")
+	if err != nil {
+		return result, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 50 {
+		pageSize = 50
+	}
+	wanted := strings.ToLower(strings.TrimSpace(keyword))
+	eligible := make([]domain.QualifiedPersonnel, 0, len(items))
+	for _, item := range items {
+		if item.Status != "ACTIVE" || item.IdentityStatus != domain.IdentityStatusActive || strings.TrimSpace(item.UserID) == "" {
+			continue
+		}
+		searchable := strings.ToLower(item.ResourceID + " " + item.ResourceName + " " + strings.Join(item.Codes, " "))
+		if wanted != "" && !strings.Contains(searchable, wanted) {
+			continue
+		}
+		eligible = append(eligible, domain.QualifiedPersonnel{UserID: strings.TrimSpace(item.UserID), ResourceID: item.ResourceID, DisplayName: item.ResourceName, Codes: append([]string{}, item.Codes...), IdentityStatus: item.IdentityStatus})
+	}
+	sort.SliceStable(eligible, func(i, j int) bool {
+		if eligible[i].DisplayName == eligible[j].DisplayName {
+			return eligible[i].ResourceID < eligible[j].ResourceID
+		}
+		return eligible[i].DisplayName < eligible[j].DisplayName
+	})
+	result.Page, result.PageSize, result.Total = page, pageSize, int64(len(eligible))
+	start := (page - 1) * pageSize
+	if start >= len(eligible) {
+		return result, nil
+	}
+	end := start + pageSize
+	if end > len(eligible) {
+		end = len(eligible)
+	}
+	result.Items = eligible[start:end]
+	return result, nil
 }
 
 // PersonnelIdentitySyncResult 汇总一次人员资质身份复核的结果。
@@ -2642,9 +2740,13 @@ func checkCapabilities(required, resources []string, items []domain.Capability) 
 	covered := map[string]bool{}
 	active := map[string]bool{}
 	for _, c := range items {
-		active[c.ResourceID] = c.Status == "ACTIVE"
+		isActive := c.Status == "ACTIVE"
+		active[c.ResourceID] = isActive
+		if userID := strings.TrimSpace(c.UserID); userID != "" {
+			active[userID] = isActive
+		}
 		for _, code := range c.Codes {
-			if active[c.ResourceID] {
+			if isActive {
 				covered[code] = true
 			}
 		}
@@ -2662,4 +2764,21 @@ func checkCapabilities(required, resources []string, items []domain.Capability) 
 		}
 	}
 	return domain.ConflictCheckResult{Passed: len(conflicts) == 0, Conflicts: conflicts}
+}
+
+// qualifiedUserID accepts either the qualification resource number or its
+// linked platform user id, but always returns the platform user id for storage
+// in workflow responsibility fields and subsequent current-user scoping.
+func qualifiedUserID(candidate string, items []domain.Capability) (string, bool) {
+	candidate = strings.TrimSpace(candidate)
+	for _, item := range items {
+		if item.ResourceType != "PERSON" || item.Status != "ACTIVE" || item.IdentityStatus != domain.IdentityStatusActive {
+			continue
+		}
+		userID := strings.TrimSpace(item.UserID)
+		if userID != "" && (candidate == userID || candidate == strings.TrimSpace(item.ResourceID)) {
+			return userID, true
+		}
+	}
+	return "", false
 }

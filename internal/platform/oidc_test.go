@@ -84,9 +84,9 @@ func TestAuthorizationCatalogAcceptsPlatformScopeContract(t *testing.T) {
 	}
 }
 
-func TestApplicationAndEnvironmentScopesAllowAll(t *testing.T) {
-	for _, scope := range []DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}, {RoleCode: "project_manager", ScopeType: "ENVIRONMENT", ScopeID: "env-1", EnvironmentCode: "dev"}, {RoleCode: "project_manager", ScopeType: "TENANT"}} {
-		principal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", DataScopes: []DataScope{scope}}
+func TestAdministrativeApplicationAndEnvironmentScopesAllowAll(t *testing.T) {
+	for _, scope := range []DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}, {RoleCode: "business_admin", ScopeType: "ENVIRONMENT", ScopeID: "env-1", EnvironmentCode: "dev"}, {RoleCode: "business_admin", ScopeType: "TENANT"}} {
+		principal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "user-1", Roles: []string{"business_admin"}, DataScopes: []DataScope{scope}}
 		filter, err := principal.ProjectScopeFilter()
 		if err != nil || !filter.AllowAll {
 			t.Fatalf("scope=%+v filter=%+v error=%v", scope, filter, err)
@@ -95,14 +95,24 @@ func TestApplicationAndEnvironmentScopesAllowAll(t *testing.T) {
 }
 
 func TestFineGrainedScopesBuildFilter(t *testing.T) {
-	principal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", DataScopes: []DataScope{
-		{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"},
-		{RoleCode: "project_manager", ScopeType: "ORG", ScopeID: "org-1"},
-		{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"},
+	principal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "user-1", Roles: []string{"business_admin"}, DataScopes: []DataScope{
+		{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"},
+		{RoleCode: "business_admin", ScopeType: "ORG", ScopeID: "org-1"},
+		{RoleCode: "business_admin", ScopeType: "PROJECT", ScopeID: "PJ-1"},
 	}}
 	filter, err := principal.ProjectScopeFilter()
 	if err != nil || filter.AllowAll || !filter.AllowSelf || len(filter.OrganizationIDs) != 1 || len(filter.ProjectIDs) != 1 {
 		t.Fatalf("filter=%+v error=%v", filter, err)
+	}
+}
+
+func TestOperationalApplicationScopeIsReducedToAssignedItems(t *testing.T) {
+	for _, role := range []string{"team_lead", "project_manager", "engineer", "penetration_engineer"} {
+		principal := Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "user-1", Roles: []string{role}, DataScopes: []DataScope{{RoleCode: role, ScopeType: "APPLICATION"}}}
+		filter, err := principal.ProjectScopeFilter()
+		if err != nil || filter.AllowAll || !filter.AllowSelf || !filter.AssignedItemsOnly || filter.UserID != "user-1" {
+			t.Fatalf("role=%s filter=%+v error=%v", role, filter, err)
+		}
 	}
 }
 

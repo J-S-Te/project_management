@@ -94,7 +94,8 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | GET/POST | `/api/v1/projects` | 查询/创建项目 |
 | GET | `/api/v1/projects/{id}` | 项目详情 |
 | GET | `/api/v1/service-items` | 查询服务项 |
-| GET | `/api/v1/personnel` | 查询基础平台负责人目录（团队负责人/项目经理/工程师选择）；`role_code` 可重复或用逗号分隔，按应用角色只返回岗位模板继承或直接授权过的人员 |
+| GET | `/api/v1/personnel` | 查询基础平台人员目录，仅用于创建/复核项目人员资质档案 |
+| GET | `/api/v1/qualified-personnel` | 查询项目系统人员资质库中的启用人员；人员不受日期有效期限制，但必须身份有效且已关联平台用户；支持按姓名、资质编号或资质编码搜索，是任务分配与人员查找的唯一候选源 |
 | POST | `/api/v1/service-items/confirm` | 确认拆解结果 |
 | GET/POST | `/api/v1/rules` | 查询/创建规则 |
 | PATCH | `/api/v1/rules/{id}` | 启停规则 |
@@ -104,7 +105,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/{id}/team-assignment` | 业务管理员分配团队负责人 |
 | POST | `/api/v1/service-items/{id}/decomposition-return` | 业务管理员将待分配服务项退回拆解确认；必须填写原因，并清空原责任分配与校验结果 |
 | POST | `/api/v1/service-items/{id}/execution-assignment` | 团队负责人指派项目经理与工程师并校验能力；设备不在该阶段选取 |
-| POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布实施计划；必须携带实施人员清单（`personnel`，至少一名人员，资质有效期需覆盖使用时段），渗透测试项还必须包含专项计划 |
+| POST | `/api/v1/service-items/{id}/implementation-plan` | 项目经理发布实施计划；必须携带实施人员清单（`personnel`，至少一名启用且身份有效的人员，人员资质不受日期限制），渗透测试项还必须包含专项计划 |
 | POST | `/api/v1/service-items/{id}/preparation` | 登记行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |
 | GET | `/api/v1/service-items/{id}/equipment-reservations` | 查询计划窗口内被其他服务项占用的设备，供实施准备的选择器置灰已占用设备 |
 | POST | `/api/v1/service-items/{id}/equipment-return` | 归还设备：写回归还时间，释放占用并让设备回到「在公司」 |
@@ -113,7 +114,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/{id}/deviations` | 停止任务并上报偏离 |
 | POST | `/api/v1/deviations/{id}/review` | 团队负责人或技术总监决定放行、终止或重测 |
 | POST | `/api/v1/projects/{id}/field-complete` | 项目经理汇总确认现场实施完成 |
-| GET/PUT | `/api/v1/capabilities` | 查询或维护人员资质、设备能力与有效期 |
+| GET/PUT | `/api/v1/capabilities` | 查询或维护人员资质、设备能力；有效期仅用于设备检定 |
 | GET | `/api/v1/delivery-events` | 查询完整交付过程留痕 |
 
 ### 外部系统边界

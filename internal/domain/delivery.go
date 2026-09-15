@@ -93,6 +93,24 @@ type Capability struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
+// QualifiedPersonnel is the assignment-facing projection of a PERSON capability.
+// UserID remains the durable workflow assignee identifier; ResourceID is the
+// human-readable qualification-ledger number used for audit and display.
+type QualifiedPersonnel struct {
+	UserID         string   `json:"user_id"`
+	ResourceID     string   `json:"resource_id"`
+	DisplayName    string   `json:"display_name"`
+	Codes          []string `json:"codes"`
+	IdentityStatus string   `json:"identity_status"`
+}
+
+type QualifiedPersonnelPage struct {
+	Items    []QualifiedPersonnel `json:"items"`
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"page_size"`
+	Total    int64                `json:"total"`
+}
+
 // 设备使用范围：可借出 / 仅在公司使用。
 const (
 	EquipmentUsageAny         = "ANY"

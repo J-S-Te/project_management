@@ -66,16 +66,24 @@ func (p Principal) HasOrganizationalScope() bool {
 type ScopeFilter struct {
 	TenantID        string
 	IdentityID      string
+	UserID          string
 	OrganizationIDs []string
 	ProjectIDs      []string
 	AllowAll        bool
 	AllowSelf       bool
+	// AssignedItemsOnly is an application-level business rule for operational
+	// assignees. It prevents a broad platform application scope from turning a
+	// team lead, project manager or engineer into a tenant-wide project reader.
+	AssignedItemsOnly bool
 }
 
 func (p Principal) ProjectScopeFilter() (ScopeFilter, error) {
-	filter := ScopeFilter{TenantID: strings.TrimSpace(p.TenantID), IdentityID: strings.TrimSpace(p.IdentityID)}
+	filter := ScopeFilter{TenantID: strings.TrimSpace(p.TenantID), IdentityID: strings.TrimSpace(p.IdentityID), UserID: strings.TrimSpace(p.UserID)}
 	if filter.IdentityID == "" {
-		filter.IdentityID = strings.TrimSpace(p.UserID)
+		filter.IdentityID = filter.UserID
+	}
+	if filter.UserID == "" {
+		filter.UserID = filter.IdentityID
 	}
 	orgs := map[string]struct{}{}
 	projects := map[string]struct{}{}
@@ -97,10 +105,40 @@ func (p Principal) ProjectScopeFilter() (ScopeFilter, error) {
 	for value := range projects {
 		filter.ProjectIDs = append(filter.ProjectIDs, value)
 	}
+	// 负责人类角色的数据边界来自实际指派关系，而不是平台授予的应用入口范围。
+	// 管理/治理角色仍按平台数据范围工作；混合角色只要含治理角色就保留其更高范围。
+	if p.assignmentScopedOnly() {
+		filter.AllowAll = false
+		filter.AllowSelf = true
+		filter.OrganizationIDs = nil
+		filter.ProjectIDs = nil
+		filter.AssignedItemsOnly = true
+	}
 	sort.Strings(filter.OrganizationIDs)
 	sort.Strings(filter.ProjectIDs)
 	if filter.TenantID == "" || (!filter.AllowAll && !filter.AllowSelf && len(filter.OrganizationIDs) == 0 && len(filter.ProjectIDs) == 0) {
 		return ScopeFilter{}, ErrDataScopeDenied
 	}
 	return filter, nil
+}
+
+func (p Principal) assignmentScopedOnly() bool {
+	roles := make(map[string]struct{}, len(p.Roles)+len(p.DataScopes))
+	for _, role := range p.Roles {
+		roles[strings.ToLower(strings.TrimSpace(role))] = struct{}{}
+	}
+	for _, scope := range p.DataScopes {
+		roles[strings.ToLower(strings.TrimSpace(scope.RoleCode))] = struct{}{}
+	}
+	for _, role := range []string{"admin", "system_admin", "business_admin", "technical_director", "quality_manager", "device_admin"} {
+		if _, ok := roles[role]; ok {
+			return false
+		}
+	}
+	for _, role := range []string{"team_lead", "project_manager", "engineer", "penetration_engineer"} {
+		if _, ok := roles[role]; ok {
+			return true
+		}
+	}
+	return false
 }
