@@ -104,6 +104,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
+	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
 	api.POST("/projects", require("project.create"), h.createProject)
 	api.POST("/contracts/activate", require("project.contract.import"), h.activateContract)
 	api.GET("/projects/:id", require("project.read"), h.getProject)
@@ -536,6 +537,22 @@ func (h *Handler) getProject(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+func (h *Handler) listApprovedContracts(c *gin.Context) {
+	limit, err := optionalPositiveInt(c.Query("limit"))
+	if err != nil || limit > 200 {
+		writeServiceError(c, application.ValidationError("合同查询数量必须在 1 到 200 之间"))
+		return
+	}
+	if limit == 0 {
+		limit = 200
+	}
+	items, err := h.service.ListApprovedContracts(c.Request.Context(), principal(c), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
 }
 func (h *Handler) createProject(c *gin.Context) {
 	var request struct {
@@ -1380,6 +1397,8 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusServiceUnavailable, "PM_SERVICE_TIMEOUT", "服务处理超时，请稍后重试")
 	case errors.Is(err, application.ErrPersonnelUnavailable):
 		writeError(c, http.StatusServiceUnavailable, "PM_PERSONNEL_UNAVAILABLE", "基础平台人员目录尚未配置或暂不可用")
+	case errors.Is(err, application.ErrContractUnavailable):
+		writeError(c, http.StatusServiceUnavailable, "PM_CONTRACT_UNAVAILABLE", "已审批合同服务暂不可用，请稍后重试")
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}

@@ -22,6 +22,7 @@ type ApprovedContract struct {
 }
 
 type ApprovedContractVerifier interface {
+	List(context.Context, int) ([]ApprovedContract, error)
 	Get(context.Context, string) (ApprovedContract, error)
 }
 
@@ -39,6 +40,52 @@ func NewApprovedContractVerifier(platformBaseURL, endpoint, clientID, clientSecr
 		scope = "contract.approved.internal.read"
 	}
 	return &approvedContractClient{service: newServiceClient(platformBaseURL, clientID, clientSecret), baseURL: endpoint, scope: scope}
+}
+
+func (c *approvedContractClient) List(ctx context.Context, limit int) ([]ApprovedContract, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	token, err := c.service.token(ctx, c.scope)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	query.Set("limit", fmt.Sprintf("%d", limit))
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	response, err := c.service.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return nil, fmt.Errorf("contract approval service returned %d", response.StatusCode)
+	}
+	var envelope struct {
+		Code string             `json:"code"`
+		Data []ApprovedContract `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Code != "OK" {
+		return nil, fmt.Errorf("contract approval service returned invalid data")
+	}
+	if envelope.Data == nil {
+		return []ApprovedContract{}, nil
+	}
+	return envelope.Data, nil
 }
 
 func (c *approvedContractClient) Get(ctx context.Context, contractID string) (ApprovedContract, error) {
