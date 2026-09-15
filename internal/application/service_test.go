@@ -17,7 +17,15 @@ type approvedContractVerifierStub struct{}
 func (approvedContractVerifierStub) List(_ context.Context, _ int) ([]platform.ApprovedContract, error) {
 	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
 }
-func (approvedContractVerifierStub) CountPendingProjects(context.Context) (int, error) { return 2, nil }
+func (approvedContractVerifierStub) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+	return []platform.ApprovedContract{
+		{ID: "C-1", Number: "HT-1", Version: 1},
+		{ID: "C-2", Number: "HT-2", Version: 1},
+		{ID: "C-3", Number: "HT-3", Version: 1},
+		{ID: "C-4", Number: "HT-4", Version: 1},
+		{ID: "C-5", Number: "HT-5", Version: 1},
+	}, "", nil
+}
 
 func (approvedContractVerifierStub) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
@@ -28,16 +36,21 @@ type failingApprovedContractVerifier struct{}
 func (failingApprovedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return nil, errors.New("contract service unavailable")
 }
-func (failingApprovedContractVerifier) CountPendingProjects(context.Context) (int, error) {
-	return 0, errors.New("contract service unavailable")
+func (failingApprovedContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", errors.New("contract service unavailable")
 }
 func (failingApprovedContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{}, errors.New("contract service unavailable")
 }
 
 type scopeRepository struct {
-	lastFilter platform.ScopeFilter
-	created    domain.Project
+	lastFilter                 platform.ScopeFilter
+	created                    domain.Project
+	existingContractReferences int
+}
+
+func (r *scopeRepository) CountExistingContractReferences(context.Context, string, []platform.ApprovedContract) (int, error) {
+	return r.existingContractReferences, nil
 }
 
 type serviceProjectRepository struct {
@@ -147,7 +160,7 @@ func TestBusinessAdminListsApprovedContractsThroughBackendIntegration(t *testing
 }
 
 func TestBusinessAdminDashboardCountsApprovedContractsWithoutProjects(t *testing.T) {
-	repository := &scopeRepository{}
+	repository := &scopeRepository{existingContractReferences: 3}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
 	principal := platform.Principal{
 		TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1",

@@ -23,7 +23,7 @@ type ApprovedContract struct {
 
 type ApprovedContractVerifier interface {
 	List(context.Context, int) ([]ApprovedContract, error)
-	CountPendingProjects(context.Context) (int, error)
+	ListReferences(context.Context, string, int) ([]ApprovedContract, string, error)
 	Get(context.Context, string) (ApprovedContract, error)
 }
 
@@ -89,39 +89,56 @@ func (c *approvedContractClient) List(ctx context.Context, limit int) ([]Approve
 	return envelope.Data, nil
 }
 
-func (c *approvedContractClient) CountPendingProjects(ctx context.Context) (int, error) {
+func (c *approvedContractClient) ListReferences(ctx context.Context, afterID string, limit int) ([]ApprovedContract, string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
 	token, err := c.service.token(ctx, c.scope)
 	if err != nil {
-		return 0, err
+		return nil, "", err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.baseURL, "/approved-contracts")+"/pending-projects/count", nil)
+	endpoint, err := url.Parse(strings.TrimSuffix(c.baseURL, "/approved-contracts") + "/approved-contract-references")
 	if err != nil {
-		return 0, err
+		return nil, "", err
+	}
+	query := endpoint.Query()
+	query.Set("limit", fmt.Sprintf("%d", limit))
+	if afterID = strings.TrimSpace(afterID); afterID != "" {
+		query.Set("after_id", afterID)
+	}
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, "", err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/json")
 	response, err := c.service.client.Do(request)
 	if err != nil {
-		return 0, err
+		return nil, "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-		return 0, fmt.Errorf("contract approval service returned %d", response.StatusCode)
+		return nil, "", fmt.Errorf("contract approval service returned %d", response.StatusCode)
 	}
 	var envelope struct {
 		Code string `json:"code"`
 		Data struct {
-			Count int `json:"count"`
+			Contracts   []ApprovedContract `json:"contracts"`
+			NextAfterID string             `json:"next_after_id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&envelope); err != nil {
-		return 0, err
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+		return nil, "", err
 	}
-	if envelope.Code != "OK" || envelope.Data.Count < 0 {
-		return 0, fmt.Errorf("contract approval service returned invalid count")
+	if envelope.Code != "OK" {
+		return nil, "", fmt.Errorf("contract approval service returned invalid references")
 	}
-	return envelope.Data.Count, nil
+	if envelope.Data.Contracts == nil {
+		envelope.Data.Contracts = []ApprovedContract{}
+	}
+	return envelope.Data.Contracts, strings.TrimSpace(envelope.Data.NextAfterID), nil
 }
 
 func (c *approvedContractClient) Get(ctx context.Context, contractID string) (ApprovedContract, error) {
