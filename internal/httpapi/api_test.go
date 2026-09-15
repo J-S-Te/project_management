@@ -30,6 +30,12 @@ type integrationVerifier struct {
 	identity platform.ServiceTokenIdentity
 }
 
+type approvedContractVerifier struct{}
+
+func (approvedContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
+}
+
 func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) (platform.ServiceTokenIdentity, error) {
 	v.token = token
 	if v.identity.TenantID == "" {
@@ -134,6 +140,11 @@ func (r *repo) CreateProject(_ context.Context, p domain.Project) error {
 	r.projects = append(r.projects, p)
 	return nil
 }
+func (r *repo) CreateProjectWithServiceItems(_ context.Context, p domain.Project, items []domain.ServiceItem) error {
+	r.projects = append(r.projects, p)
+	r.items = append(r.items, items...)
+	return nil
+}
 func (r *repo) ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error) {
 	return r.items, nil
 }
@@ -197,7 +208,7 @@ func router(t *testing.T, permissions map[string]bool, reporter platform.AuditRe
 func routerWithItems(t *testing.T, permissions map[string]bool, reporter platform.AuditReporter, items []domain.ServiceItem) http.Handler {
 	t.Helper()
 	repository := &repo{items: items}
-	service := &application.Service{Repo: repository}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}}
 	id := identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", DisplayName: "测试用户", Roles: []string{"admin"}, Permissions: permissions, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
 	return httpapi.NewRouter(service, id, reporter, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
@@ -259,7 +270,7 @@ func perform(handler http.Handler, method, path, body string) *httptest.Response
 
 func TestProjectCreationAndRead(t *testing.T) {
 	handler := router(t, map[string]bool{"project.create": true, "project.read": true}, nil)
-	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"示例客户","contract":"HT-1","contract_id":"approved-1"}`)
+	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"示例客户","contract":"HT-1","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -901,7 +912,7 @@ func TestMeReturnsStableIdentityAndDataScopes(t *testing.T) {
 }
 func TestWriteIsReportedToAudit(t *testing.T) {
 	reporter := &audit{}
-	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1","contract_id":"approved-1"}`)
+	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d", response.Code)
 	}

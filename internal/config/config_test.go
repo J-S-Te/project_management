@@ -178,3 +178,19 @@ func TestLoadRequiresVerifiedDashboardMachineCaller(t *testing.T) {
 		t.Fatalf("dashboard machine config=%+v", config)
 	}
 }
+
+func TestLoadRequiresCompleteFileGatewayConfiguration(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("FILE_GATEWAY_ENABLED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FILE_GATEWAY_") { t.Fatalf("error=%v", err) }
+	setValidEnvironment(t)
+	t.Setenv("FILE_GATEWAY_ENABLED", "true")
+	t.Setenv("FILE_GATEWAY_BASE_URL", "http://file-gateway:8086")
+	t.Setenv("FILE_GATEWAY_APPLICATION_ID", "app-1")
+	t.Setenv("FILE_GATEWAY_CLIENT_ID", "client")
+	t.Setenv("FILE_GATEWAY_CLIENT_SECRET", "secret")
+	t.Setenv("FILE_GATEWAY_SCOPE", "platform:file:upload platform:file:bind")
+	config, err := Load()
+	if err != nil { t.Fatal(err) }
+	if !config.FileGatewayEnabled { t.Fatal("file gateway should be enabled") }
+}

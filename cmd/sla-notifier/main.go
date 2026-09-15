@@ -43,6 +43,8 @@ func main() {
 		logger.Warn("platform notification integration disabled; sla notifications will not be delivered")
 	}
 	service := &application.Service{Repo: store.NewRepository(db), Notifications: notifications, Logger: logger}
+	workerID, _ := os.Hostname()
+	workerID = "project-sla-notifier-" + workerID
 	if len(cfg.SlaScanTenants) == 0 {
 		logger.Warn("SLA_SCAN_TENANTS is empty; nothing to scan")
 	} else {
@@ -50,6 +52,11 @@ func main() {
 	}
 
 	scan := func() {
+		if sent, dispatchErr := service.DispatchNotificationOutbox(ctx, workerID, 50, time.Now().UTC()); dispatchErr != nil {
+			logger.Error("notification outbox dispatch failed", "error", dispatchErr)
+		} else if sent > 0 {
+			logger.Info("notification outbox dispatched", "sent", sent)
+		}
 		for _, tenantID := range cfg.SlaScanTenants {
 			published, err := service.ScanSlaNotifications(ctx, tenantID, time.Now().UTC())
 			if err != nil {

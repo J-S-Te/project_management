@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,8 @@ type Service struct {
 	// Notifications 是基础平台统一站内信 outbox；未开通该集成时为 nil，
 	// 自动化规则仍会写入派生事件，只是不额外投递站内信。
 	Notifications platform.NotificationPublisher
+	Contracts     platform.ApprovedContractVerifier
+	EvidenceFiles platform.EvidenceFileGateway
 	// Logger 可选。派生事件（自动化/预警）是主事件提交后的 best-effort 副作用：
 	// 写入失败不会回滚主流程，但必须留下可观测痕迹，否则"配置触发了但没落库"无人知晓。
 	Logger *slog.Logger
@@ -379,6 +382,9 @@ func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, c
 }
 
 func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
+	if !mayCreateProject(p) {
+		return input, ErrForbidden
+	}
 	filter, err := authorizeProjectScope(p, "project.create")
 	if err != nil {
 		return input, err
@@ -386,6 +392,26 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Customer) == "" || strings.TrimSpace(input.Contract) == "" {
 		return input, ErrValidation
 	}
+	if strings.TrimSpace(input.ContractID) == "" {
+		return input, ValidationError("请选择已通过审批的合同")
+	}
+	if len(requested) == 0 {
+		return input, ValidationError("项目至少需要一个服务项")
+	}
+	if s.Contracts == nil {
+		return input, PreconditionError("合同审批校验服务未配置，暂不能创建项目")
+	}
+	approved, approvalErr := s.Contracts.Get(ctx, input.ContractID)
+	if approvalErr != nil {
+		return input, PreconditionError("无法确认合同审批状态，请稍后重试")
+	}
+	if !approved.ApprovalPassed {
+		return input, PreconditionError("所选合同尚未通过审批")
+	}
+	input.Contract = strings.TrimSpace(approved.Number)
+	input.Customer = strings.TrimSpace(approved.CustomerName)
+	input.CustomerID = strings.TrimSpace(approved.CustomerID)
+	input.ContractVersion = strconv.FormatUint(approved.Version, 10)
 	// 提前判重：唯一键只会以 MySQL 1062 的形式暴露，落到接口就是 500「服务暂不可用」，
 	// 用户完全不知道是自己重复建了项目。这里先查一次，给出带项目编号的可执行提示。
 	if existingID, findErr := s.findExistingProjectByContract(ctx, p.TenantID, strings.TrimSpace(input.Contract), strings.TrimSpace(input.ContractVersion)); findErr != nil {
@@ -427,12 +453,6 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		input.Manager = "—"
 	}
 	input.CreatedAt, input.UpdatedAt = now, now
-	if len(requested) == 0 {
-		if err := s.Repo.CreateProject(ctx, input); err != nil {
-			return input, err
-		}
-		return input, nil
-	}
 	// 手动创建的项目一律从「待确认」开始，不套用拆解规则的自动放行：拆解规则服务于
 	// 「合同激活 / 拆解调整」这类由系统生成的清单（常规批次可跳过人工确认），而手动清单
 	// 是业务管理员逐条录入的，必须走「服务项拆解确认」——它同时也是特殊方法项进入技术总监
@@ -444,10 +464,14 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		if strings.TrimSpace(source.Site) == "" || mode != "STANDARD" && mode != "PENETRATION" {
 			return input, ErrValidation
 		}
+		source.Site, source.SiteCode, err = s.resolveActiveSite(ctx, p.TenantID, source.Site, source.SiteCode)
+		if err != nil {
+			return input, err
+		}
 		items = append(items, domain.ServiceItem{
 			TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(input.ID, "PJ-"), index+1),
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
-			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), Category: strings.TrimSpace(source.Category),
+			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), SiteCode: strings.TrimSpace(source.SiteCode), Category: strings.TrimSpace(source.Category),
 			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
 			Status: "待确认", ConflictStatus: "UNCHECKED",
 		})
@@ -460,6 +484,41 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		return input, nil
 	}
 	return input, errors.New("project repository does not support atomic service-item creation")
+}
+
+// resolveActiveSite turns the display name into a stable site-code relationship. Legacy callers
+// may omit the code only while no site ledger is available; once a code is supplied it must name
+// an active row in the same tenant and the persisted display name is taken from that row.
+func (s *Service) resolveActiveSite(ctx context.Context, tenantID, name, code string) (string, string, error) {
+	name, code = strings.TrimSpace(name), strings.TrimSpace(code)
+	if code == "" {
+		return name, "", nil
+	}
+	repo, err := s.siteRepo()
+	if err != nil {
+		return "", "", ValidationError("站点台账不可用")
+	}
+	site, err := repo.FindSiteByCode(ctx, tenantID, code)
+	if err != nil || site.Status != "ACTIVE" {
+		return "", "", ValidationError("所选站点不存在或已停用")
+	}
+	return site.Name, site.SiteCode, nil
+}
+
+// mayCreateProject 将项目创建限定到超级管理员（admin）和业务管理员。权限码仍是
+// 第一层防线；角色判断拒绝被误授 project.create 的其他岗位，防止目录漂移把高影响
+// 的项目创建动作扩散给非业务角色。
+func mayCreateProject(p platform.Principal) bool {
+	if !p.Has("project.create") {
+		return false
+	}
+	for _, role := range p.Roles {
+		switch strings.TrimSpace(role) {
+		case "admin", "business_admin":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal, ids []string) ([]domain.ServiceItem, error) {
@@ -621,6 +680,15 @@ func authorizeProjectScope(p platform.Principal, permission string) (platform.Sc
 		return platform.ScopeFilter{}, ErrForbidden
 	}
 	return filter, nil
+}
+
+func authorizeAnyProjectScope(p platform.Principal, permissions ...string) (platform.ScopeFilter, error) {
+	for _, permission := range permissions {
+		if p.Has(permission) {
+			return authorizeProjectScope(p, permission)
+		}
+	}
+	return platform.ScopeFilter{}, ErrForbidden
 }
 
 func requireApplicationAuthorization(p platform.Principal, permission string) error {

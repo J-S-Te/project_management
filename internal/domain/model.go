@@ -14,6 +14,7 @@ type Project struct {
 	Customer          string    `json:"customer"`
 	CustomerID        string    `json:"customer_id,omitempty"`
 	Contract          string    `json:"contract"`
+	ContractID        string    `json:"contract_id"`
 	ContractVersion   string    `json:"contract_version,omitempty"`
 	SupplementStatus  string    `json:"supplement_status,omitempty"`
 	Services          int       `json:"services"`
@@ -43,6 +44,7 @@ type ServiceItem struct {
 	SourceServiceID    string              `json:"source_service_id,omitempty"`
 	Batch              string              `json:"batch"`
 	Site               string              `json:"site"`
+	SiteCode           string              `json:"site_code,omitempty"`
 	Category           string              `json:"category"`
 	Requirement        string              `json:"requirement"`
 	System             string              `json:"system"`
@@ -66,12 +68,44 @@ type ServiceItem struct {
 	ReportUpdatedAt    string              `json:"report_updated_at,omitempty"`
 	ReportUpdatedBy    string              `json:"report_updated_by,omitempty"`
 	ReportRevision     uint64              `json:"report_revision"`
+	ReportPreparedBy   string              `json:"report_prepared_by,omitempty"`
+	ReportReviewedBy   string              `json:"report_reviewed_by,omitempty"`
+	ReportIssuedBy     string              `json:"report_issued_by,omitempty"`
 	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
 
 	// Version 是服务项状态版本：每次状态变更自增。读取方据此识别自己拿到的是不是最新一版，
 	// 写入方可带上期望版本做条件更新（不匹配即 409 冲突），避免"后者静默覆盖前者"。
 	Version uint64 `json:"version"`
+}
+
+// ReportRevision is an immutable report-version ledger projection. The row is retained after a
+// correction; validity_status=VOID prevents new downloads while the old audit/download history stays intact.
+type ReportRevision struct {
+	ID                  uint64 `json:"id"`
+	ServiceItemID       string `json:"service_item_id"`
+	Revision            uint64 `json:"revision"`
+	Status              string `json:"status"`
+	ValidityStatus      string `json:"validity_status"`
+	CorrectionRequestID string `json:"correction_request_id,omitempty"`
+	CorrectionReason    string `json:"correction_reason,omitempty"`
+	FileID              string `json:"file_id,omitempty"`
+	FileName            string `json:"file_name,omitempty"`
+	FileMIME            string `json:"file_mime,omitempty"`
+	FileSize            uint64 `json:"file_size,omitempty"`
+	FileSHA256          string `json:"file_sha256,omitempty"`
+	PreparedBy          string `json:"prepared_by,omitempty"`
+	PreparedAt          string `json:"prepared_at,omitempty"`
+	ReviewedBy          string `json:"reviewed_by,omitempty"`
+	ReviewedAt          string `json:"reviewed_at,omitempty"`
+	IssuedBy            string `json:"issued_by,omitempty"`
+	IssuedAt            string `json:"issued_at,omitempty"`
+	ArchivedBy          string `json:"archived_by,omitempty"`
+	ArchivedAt          string `json:"archived_at,omitempty"`
+	InvalidatedBy       string `json:"invalidated_by,omitempty"`
+	InvalidatedAt       string `json:"invalidated_at,omitempty"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 type Rule struct {

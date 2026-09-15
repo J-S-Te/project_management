@@ -1,6 +1,10 @@
 package mysql
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type projectRecord struct {
 	ID         string `gorm:"primaryKey;size:32"`
@@ -12,6 +16,7 @@ type projectRecord struct {
 	// 让按客户聚合与对账不必依赖客户名称的字符串匹配。
 	CustomerID        string `gorm:"size:64;not null"`
 	Contract          string `gorm:"size:64;not null"`
+	ContractID        string `gorm:"size:64;not null;default:''"`
 	ContractVersion   string `gorm:"size:64;not null"`
 	SupplementStatus  string `gorm:"size:32;not null"`
 	Services          int
@@ -40,6 +45,7 @@ type serviceItemRecord struct {
 	SourceServiceID   string `gorm:"type:text;not null"`
 	Batch             string `gorm:"size:64"`
 	Site              string `gorm:"size:255"`
+	SiteCode          string `gorm:"size:64;not null;default:'';index:idx_pm_service_site_code,priority:2"`
 	Category          string `gorm:"size:255"`
 	Requirement       string `gorm:"type:text"`
 	System            string `gorm:"size:128"`
@@ -63,18 +69,89 @@ type serviceItemRecord struct {
 	ReportUpdatedAt   *time.Time
 	ReportUpdatedBy   string `gorm:"size:64;not null"`
 	ReportRevision    uint64 `gorm:"not null;default:0"`
+	ReportPreparedBy  string `gorm:"size:64;not null;default:''"`
+	ReportReviewedBy  string `gorm:"size:64;not null;default:''"`
+	ReportIssuedBy    string `gorm:"size:64;not null;default:''"`
 	Status            string `gorm:"size:32;not null"`
 	// StatusChangedAt 是服务项进入当前状态的时刻，SLA 的「状态停留时长」以此为准；
 	// 不能用 UpdatedAt——无关字段的更新会刷新它，导致计时被意外重置。
 	StatusChangedAt *time.Time
 	// Version 是乐观并发版本号：每次状态变更自增，供客户端做条件更新（冲突即 409）。
-	Version   uint64 `gorm:"not null;default:1"`
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	UpdatedBy string `gorm:"size:64"`
+	Version    uint64 `gorm:"not null;default:1"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	UpdatedBy  string         `gorm:"size:64"`
+	ArchivedAt gorm.DeletedAt `gorm:"column:archived_at"`
 }
 
 func (serviceItemRecord) TableName() string { return "pm_service_item" }
+
+type reportRevisionRecord struct {
+	ID                  uint64 `gorm:"primaryKey;autoIncrement"`
+	TenantID            string `gorm:"size:64;not null"`
+	ServiceItemID       string `gorm:"size:32;not null"`
+	Revision            uint64 `gorm:"not null"`
+	Status              string `gorm:"size:32;not null"`
+	ValidityStatus      string `gorm:"size:16;not null"`
+	CorrectionRequestID string `gorm:"size:32;not null"`
+	CorrectionReason    string `gorm:"size:1000;not null"`
+	FileID              string `gorm:"size:64;not null"`
+	FileName            string `gorm:"size:255;not null"`
+	FileMIME            string `gorm:"size:128;not null"`
+	FileSize            uint64 `gorm:"not null"`
+	FileSHA256          string `gorm:"size:64;not null"`
+	PreparedBy          string `gorm:"size:64;not null"`
+	PreparedAt          *time.Time
+	ReviewedBy          string `gorm:"size:64;not null"`
+	ReviewedAt          *time.Time
+	IssuedBy            string `gorm:"size:64;not null"`
+	IssuedAt            *time.Time
+	ArchivedBy          string `gorm:"size:64;not null"`
+	ArchivedAt          *time.Time
+	InvalidatedBy       string `gorm:"size:64;not null"`
+	InvalidatedAt       *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+func (reportRevisionRecord) TableName() string { return "pm_report_revision" }
+
+type evidenceFileRecord struct {
+	ID            uint64 `gorm:"primaryKey;autoIncrement"`
+	TenantID      string `gorm:"size:64;not null"`
+	ServiceItemID string `gorm:"size:32;not null"`
+	EvidenceKind  string `gorm:"size:32;not null"`
+	FileID        string `gorm:"size:64;not null"`
+	FileName      string `gorm:"size:255;not null"`
+	FileMIME      string `gorm:"size:128;not null"`
+	FileSize      uint64 `gorm:"not null"`
+	FileSHA256    string `gorm:"size:64;not null"`
+	CreatedBy     string `gorm:"size:64;not null"`
+	CreatedAt     time.Time
+}
+
+func (evidenceFileRecord) TableName() string { return "pm_evidence_file" }
+
+type notificationOutboxRecord struct {
+	ID               uint64 `gorm:"primaryKey;autoIncrement"`
+	EventID          string `gorm:"size:32;not null"`
+	TenantID         string `gorm:"size:64;not null"`
+	IdempotencyKey   string `gorm:"size:128;not null"`
+	EventType        string `gorm:"size:64;not null"`
+	AggregateType    string `gorm:"size:32;not null"`
+	AggregateID      string `gorm:"size:64;not null"`
+	Payload          []byte `gorm:"type:json;not null"`
+	Status           string `gorm:"size:16;not null"`
+	RetryCount       uint
+	NextRetryAt      *time.Time
+	LockedBy         string `gorm:"size:128;not null"`
+	LockedUntil      *time.Time
+	LastErrorSummary string `gorm:"size:1000;not null"`
+	CreatedAt        time.Time
+	SentAt           *time.Time
+}
+
+func (notificationOutboxRecord) TableName() string { return "pm_notification_outbox" }
 
 // implPlanRecord 保存实施计划与渗透测试专项合规要素（授权书、白名单范围、测试时间窗、
 // 应急联系人、回滚方案等），与服务项 1:1 关联，由 EventImplementationPlanned 幂等写入。

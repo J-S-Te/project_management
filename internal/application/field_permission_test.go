@@ -92,9 +92,9 @@ func TestServiceItemAssignmentFieldsAreMaskable(t *testing.T) {
 // 报告归档权与报告编制权必须分开：现场执行角色不应顺带获得"把项目推向已完成"的能力。
 func TestReportArchiveRequiresItsOwnPermission(t *testing.T) {
 	cases := map[string]string{
-		"COMPILING": "project.report.manage",
-		"REVIEWED":  "project.report.manage",
-		"ISSUED":    "project.report.manage",
+		"COMPILING": "project.report.prepare",
+		"REVIEWED":  "project.report.review",
+		"ISSUED":    "project.report.issue",
 		"ARCHIVED":  "project.report.archive",
 		"archived":  "project.report.archive",
 	}

@@ -56,28 +56,39 @@ type Config struct {
 	NotificationEnabled bool
 	// SLA 扫描：SLA 超期/临近的主动提醒需要周期任务；租户列表显式给出，
 	// 避免一条命令扫全库（系统侧任务不代替用户授权，必须限定范围）。
-	SlaScanTenants                   []string
-	SlaScanInterval                  time.Duration
-	PlatformNotificationURL          string
-	PlatformNotificationClientID     string
-	PlatformNotificationSecret       string
-	PlatformNotificationScope        string
-	PlatformCatalogSync              bool
-	PlatformCatalogClientID          string
-	PlatformCatalogClientSecret      string
-	ContractIntegrationEnabled       bool
-	ContractIntegrationRequireBearer bool
-	ContractIntegrationClientID      string
-	ContractIntegrationAudience      string
-	DashboardMachineEnabled          bool
-	DashboardMachineRequireBearer    bool
-	DashboardMachineClientID         string
-	DashboardMachineAudience         string
-	DashboardMachineIssuer           string
-	DashboardMachinePublicKeyPath    string
-	DashboardMachineCallerApp        string
-	DashboardMachineCallerEnv        string
-	DashboardMachineScope            string
+	SlaScanTenants                         []string
+	SlaScanInterval                        time.Duration
+	PlatformNotificationURL                string
+	PlatformNotificationClientID           string
+	PlatformNotificationSecret             string
+	PlatformNotificationScope              string
+	PlatformCatalogSync                    bool
+	PlatformCatalogClientID                string
+	PlatformCatalogClientSecret            string
+	ContractIntegrationEnabled             bool
+	ContractIntegrationRequireBearer       bool
+	ContractIntegrationClientID            string
+	ContractIntegrationAudience            string
+	ContractApprovalValidationEnabled      bool
+	ContractApprovalValidationURL          string
+	ContractApprovalValidationClientID     string
+	ContractApprovalValidationClientSecret string
+	ContractApprovalValidationScope        string
+	FileGatewayEnabled                     bool
+	FileGatewayBaseURL                     string
+	FileGatewayApplicationID               string
+	FileGatewayClientID                    string
+	FileGatewayClientSecret                string
+	FileGatewayScope                       string
+	DashboardMachineEnabled                bool
+	DashboardMachineRequireBearer          bool
+	DashboardMachineClientID               string
+	DashboardMachineAudience               string
+	DashboardMachineIssuer                 string
+	DashboardMachinePublicKeyPath          string
+	DashboardMachineCallerApp              string
+	DashboardMachineCallerEnv              string
+	DashboardMachineScope                  string
 }
 
 func Load() (Config, error) {
@@ -94,24 +105,33 @@ func Load() (Config, error) {
 		PlatformApplicationCode: strings.TrimSpace(os.Getenv("PLATFORM_APPLICATION_CODE")), PlatformEnvironmentCode: strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")),
 		PlatformApplicationID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID"), PlatformAuditClientID: os.Getenv("PLATFORM_AUDIT_CLIENT_ID"),
 		PlatformAuditClientSecret: os.Getenv("PLATFORM_AUDIT_CLIENT_SECRET"), PlatformCatalogClientID: os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID"),
-		PlatformCatalogClientSecret:    os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
-		PlatformOwnerDirectoryURL:      strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_URL")),
-		PlatformOwnerDirectoryClientID: strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_ID")),
-		PlatformOwnerDirectorySecret:   os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"),
-		PlatformOwnerDirectoryScope:    strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_SCOPE")),
-		PlatformNotificationURL:        strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_URL")),
-		PlatformNotificationClientID:   strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_CLIENT_ID")),
-		PlatformNotificationSecret:     os.Getenv("PLATFORM_NOTIFICATION_CLIENT_SECRET"),
-		PlatformNotificationScope:      strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
-		ContractIntegrationClientID:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
-		ContractIntegrationAudience:    strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
-		DashboardMachineClientID:       strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
-		DashboardMachineAudience:       strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
-		DashboardMachineIssuer:         strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_ISSUER")),
-		DashboardMachinePublicKeyPath:  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH")),
-		DashboardMachineCallerApp:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
-		DashboardMachineCallerEnv:      strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
-		DashboardMachineScope:          strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
+		PlatformCatalogClientSecret:            os.Getenv("PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET"),
+		PlatformOwnerDirectoryURL:              strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_URL")),
+		PlatformOwnerDirectoryClientID:         strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_ID")),
+		PlatformOwnerDirectorySecret:           os.Getenv("PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET"),
+		PlatformOwnerDirectoryScope:            strings.TrimSpace(os.Getenv("PLATFORM_OWNER_DIRECTORY_SCOPE")),
+		PlatformNotificationURL:                strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_URL")),
+		PlatformNotificationClientID:           strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_CLIENT_ID")),
+		PlatformNotificationSecret:             os.Getenv("PLATFORM_NOTIFICATION_CLIENT_SECRET"),
+		PlatformNotificationScope:              strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
+		ContractIntegrationClientID:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
+		ContractIntegrationAudience:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		ContractApprovalValidationURL:          strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_URL")),
+		ContractApprovalValidationClientID:     strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_ID")),
+		ContractApprovalValidationClientSecret: os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_SECRET"),
+		ContractApprovalValidationScope:        strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_SCOPE")),
+		FileGatewayBaseURL:                     strings.TrimSpace(os.Getenv("FILE_GATEWAY_BASE_URL")),
+		FileGatewayApplicationID:               strings.TrimSpace(os.Getenv("FILE_GATEWAY_APPLICATION_ID")),
+		FileGatewayClientID:                    strings.TrimSpace(os.Getenv("FILE_GATEWAY_CLIENT_ID")),
+		FileGatewayClientSecret:                os.Getenv("FILE_GATEWAY_CLIENT_SECRET"),
+		FileGatewayScope:                       strings.TrimSpace(os.Getenv("FILE_GATEWAY_SCOPE")),
+		DashboardMachineClientID:               strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CLIENT_ID")),
+		DashboardMachineAudience:               strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_AUDIENCE")),
+		DashboardMachineIssuer:                 strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_ISSUER")),
+		DashboardMachinePublicKeyPath:          strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_PUBLIC_KEY_PATH")),
+		DashboardMachineCallerApp:              strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
+		DashboardMachineCallerEnv:              strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
+		DashboardMachineScope:                  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -159,6 +179,12 @@ func Load() (Config, error) {
 	}
 	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
+	}
+	if c.ContractApprovalValidationEnabled, err = strconv.ParseBool(env("CONTRACT_APPROVAL_VALIDATION_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("CONTRACT_APPROVAL_VALIDATION_ENABLED: %w", err)
+	}
+	if c.FileGatewayEnabled, err = strconv.ParseBool(env("FILE_GATEWAY_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("FILE_GATEWAY_ENABLED: %w", err)
 	}
 	// 默认 false 保持"集成未启用"环境的兼容（H4 部署回归修复）：validate 会拒绝
 	// ENABLED=true 且 REQUIRE_BEARER=false 的组合，因此启用集成必须显式开启来源校验。
@@ -284,6 +310,37 @@ func (c Config) validate() error {
 	// H4 修复：内部投递来源校验不可关闭。
 	if c.ContractIntegrationEnabled && !c.ContractIntegrationRequireBearer {
 		return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER must be true when CONTRACT_INTEGRATION_ENABLED=true (internal delivery source verification is mandatory)")
+	}
+	if c.ContractApprovalValidationEnabled {
+		for name, value := range map[string]string{
+			"CONTRACT_APPROVAL_VALIDATION_URL":           c.ContractApprovalValidationURL,
+			"CONTRACT_APPROVAL_VALIDATION_CLIENT_ID":     c.ContractApprovalValidationClientID,
+			"CONTRACT_APPROVAL_VALIDATION_CLIENT_SECRET": c.ContractApprovalValidationClientSecret,
+			"CONTRACT_APPROVAL_VALIDATION_SCOPE":         c.ContractApprovalValidationScope,
+		} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when CONTRACT_APPROVAL_VALIDATION_ENABLED=true", name)
+			}
+		}
+		if !validHTTPURL(c.ContractApprovalValidationURL) {
+			return fmt.Errorf("CONTRACT_APPROVAL_VALIDATION_URL must be a valid HTTP(S) URL")
+		}
+		if c.ContractApprovalValidationScope != "contract.approved.internal.read" {
+			return fmt.Errorf("CONTRACT_APPROVAL_VALIDATION_SCOPE must be contract.approved.internal.read")
+		}
+	}
+	if c.FileGatewayEnabled {
+		for name, value := range map[string]string{"FILE_GATEWAY_BASE_URL": c.FileGatewayBaseURL, "FILE_GATEWAY_APPLICATION_ID": c.FileGatewayApplicationID, "FILE_GATEWAY_CLIENT_ID": c.FileGatewayClientID, "FILE_GATEWAY_CLIENT_SECRET": c.FileGatewayClientSecret, "FILE_GATEWAY_SCOPE": c.FileGatewayScope} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("%s is required when FILE_GATEWAY_ENABLED=true", name)
+			}
+		}
+		if !validHTTPURL(c.FileGatewayBaseURL) {
+			return fmt.Errorf("FILE_GATEWAY_BASE_URL must be a valid HTTP(S) URL")
+		}
+		if c.FileGatewayScope != "platform:file:upload platform:file:bind" {
+			return fmt.Errorf("FILE_GATEWAY_SCOPE must be platform:file:upload platform:file:bind")
+		}
 	}
 	if c.DashboardMachineRequireBearer {
 		if !c.DashboardMachineEnabled {

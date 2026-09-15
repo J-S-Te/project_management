@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sort"
 	"strconv"
@@ -71,6 +72,21 @@ type DeliveryRepository interface {
 	ListEquipmentReservations(context.Context, string, string) ([]domain.EquipmentReservation, error)
 	// UpdateCapabilityIdentities 回写人员档案的身份复核结果。
 	UpdateCapabilityIdentities(context.Context, string, map[string]string, time.Time) error
+}
+
+type NotificationOutboxRepository interface {
+	ClaimNotificationOutbox(context.Context, string, int, time.Time) ([]domain.NotificationOutboxItem, error)
+	MarkNotificationOutboxSent(context.Context, uint64, string, time.Time) error
+	MarkNotificationOutboxRetry(context.Context, uint64, string, time.Time, bool) error
+}
+
+type NotificationOutboxEnqueuer interface {
+	EnqueueNotification(context.Context, string, domain.NotificationMessage) (bool, error)
+}
+
+type ReportRevisionRepository interface {
+	ListReportRevisions(context.Context, string, string) ([]domain.ReportRevision, error)
+	RegisterReportArtifact(context.Context, string, string, uint64, domain.ReportArtifactInput, string, time.Time) error
 }
 
 func (s *Service) deliveryRepo() (DeliveryRepository, error) {
@@ -179,6 +195,13 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if strings.TrimSpace(input.ContractID) == "" || strings.TrimSpace(input.ContractVersion) == "" || strings.TrimSpace(input.Customer) == "" || len(input.Services) == 0 || input.EffectiveAt.IsZero() {
 		return domain.Project{}, ErrValidation
 	}
+	for i := range input.Services {
+		var siteErr error
+		input.Services[i].Site, input.Services[i].SiteCode, siteErr = s.resolveActiveSite(ctx, p.TenantID, input.Services[i].Site, input.Services[i].SiteCode)
+		if siteErr != nil {
+			return domain.Project{}, siteErr
+		}
+	}
 	repo, err := s.deliveryRepo()
 	if err != nil {
 		return domain.Project{}, err
@@ -197,7 +220,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if !filter.AllowAll && !filter.AllowSelf && ownerOrgID == "" {
 		return domain.Project{}, ErrForbidden
 	}
-	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
+	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: strings.TrimSpace(input.ContractID), ContractID: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
 	// 分组与初始状态由配置决定（原型 PG-CFG-01）：先解析本次生效方案（覆盖规则优先），
 	// 再按方案的分组维度生成服务项，并按检测类别域补齐体系要求与特殊方法口径。
 	// 「未命中分组规则」不再自动放行——原型拆解流程规定：未命中 → 标记待人工确认并通知业务管理员。
@@ -233,7 +256,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 			techReview = "PENDING"
 		}
 		// 必检能力码来自检测类别域：分配工程师时按此校验，留空则只保留渗透测试的固定要求。
-		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
@@ -347,9 +370,14 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		if mode != "STANDARD" && mode != "PENETRATION" {
 			return ErrValidation
 		}
+		var siteErr error
+		source.Site, source.SiteCode, siteErr = s.resolveActiveSite(ctx, p.TenantID, source.Site, source.SiteCode)
+		if siteErr != nil {
+			return siteErr
+		}
 		outcome := resolveSplitOutcome(plan, source.Category, mode, "", categoryDomain)
 		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突。
-		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, SiteCode: source.SiteCode, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
 }
@@ -363,13 +391,14 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 // 幂等键按「服务项 + 口径 + UTC 日期」生成：同一天重复扫描不会重复打扰，
 // 跨天仍会重新提醒（超期是持续状态，每天都值得提醒一次）。
 func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now time.Time) (int, error) {
-	if s.Notifications == nil || strings.TrimSpace(tenantID) == "" {
+	outbox, hasOutbox := s.Repo.(NotificationOutboxEnqueuer)
+	if (s.Notifications == nil && !hasOutbox) || strings.TrimSpace(tenantID) == "" {
 		return 0, nil
 	}
 	filter := platform.ScopeFilter{TenantID: strings.TrimSpace(tenantID), AllowAll: true}
-	repo, err := s.deliveryRepo()
-	if err != nil {
-		return 0, err
+	repo, ok := s.Repo.(DeliveryRepository)
+	if !ok {
+		return 0, errors.New("delivery repository unavailable")
 	}
 	candidates, err := repo.ListSlaOverdue(ctx, filter)
 	if err != nil {
@@ -403,6 +432,16 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 			Recipients:     recipients,
 			OccurredAt:     now.UTC(),
 			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
+		}
+		if hasOutbox {
+			queued, queueErr := outbox.EnqueueNotification(ctx, filter.TenantID, domain.NotificationMessage{EventID: notification.EventID, EventType: notification.EventType, Scope: notification.Scope, Priority: notification.Priority, Title: notification.Title, Content: notification.Content, ReferenceType: notification.ReferenceType, ReferenceID: notification.ReferenceID, Recipients: notification.Recipients, OccurredAt: notification.OccurredAt, IdempotencyKey: notification.IdempotencyKey})
+			if queueErr != nil {
+				return published, queueErr
+			}
+			if queued {
+				published++
+			}
+			continue
 		}
 		if err := s.Notifications.Publish(ctx, notification); err != nil {
 			if s.Logger != nil {
@@ -902,13 +941,78 @@ func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, 
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase}))
 }
 
+func (s *Service) ListReportRevisions(ctx context.Context, p platform.Principal, itemID string) ([]domain.ReportRevision, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.read", itemID); err != nil {
+		return nil, err
+	}
+	repo, ok := s.Repo.(ReportRevisionRepository)
+	if !ok {
+		return nil, errors.New("report revision repository unavailable")
+	}
+	return repo.ListReportRevisions(ctx, p.TenantID, itemID)
+}
+
+func (s *Service) RegisterReportArtifact(ctx context.Context, p platform.Principal, itemID string, revision uint64, input domain.ReportArtifactInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.report.prepare", itemID); err != nil {
+		return err
+	}
+	if err := normalizeFileEvidence(&input, "报告"); err != nil {
+		return err
+	}
+	repo, ok := s.Repo.(ReportRevisionRepository)
+	if !ok {
+		return errors.New("report revision repository unavailable")
+	}
+	return repo.RegisterReportArtifact(ctx, p.TenantID, itemID, revision, input, p.UserID, time.Now().UTC())
+}
+
+func (s *Service) UploadEvidence(ctx context.Context, p platform.Principal, itemID, kind, requestID, fileName, mimeType string, content io.Reader) (domain.ReportArtifactInput, error) {
+	kind = strings.ToUpper(strings.TrimSpace(kind))
+	permission := "project.field.execute"
+	if kind == "DEVIATION" {
+		permission = "project.deviation.report"
+	}
+	if kind == "REPORT" {
+		permission = "project.report.prepare"
+	}
+	if kind != "FIELD" && kind != "DEVIATION" && kind != "REPORT" {
+		return domain.ReportArtifactInput{}, ValidationError("证据类型不正确")
+	}
+	mimeType = strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	if mimeType != "application/pdf" && mimeType != "image/png" && mimeType != "image/jpeg" {
+		return domain.ReportArtifactInput{}, ValidationError("证据文件仅支持 PDF、PNG 或 JPEG")
+	}
+	if err := s.authorizeServiceItem(ctx, p, permission, itemID); err != nil {
+		return domain.ReportArtifactInput{}, err
+	}
+	if s.EvidenceFiles == nil {
+		return domain.ReportArtifactInput{}, errors.New("统一文件网关未配置")
+	}
+	artifact, err := s.EvidenceFiles.UploadEvidence(ctx, requestID, itemID, kind, fileName, mimeType, content)
+	if err != nil {
+		return domain.ReportArtifactInput{}, err
+	}
+	if err = normalizeFileEvidence(&artifact, "证据"); err != nil {
+		return domain.ReportArtifactInput{}, err
+	}
+	return artifact, nil
+}
+
 // reportPhasePermission 返回推进到目标报告阶段所需的权限码。
 // 归档（ARCHIVED）会把项目推向"已完成"，属于独立治理动作；编制/审核/签发属于报告编制。
 func reportPhasePermission(phase string) string {
-	if strings.EqualFold(strings.TrimSpace(phase), "ARCHIVED") {
+	switch strings.ToUpper(strings.TrimSpace(phase)) {
+	case "COMPILING":
+		return "project.report.prepare"
+	case "REVIEWED":
+		return "project.report.review"
+	case "ISSUED":
+		return "project.report.issue"
+	case "ARCHIVED":
 		return "project.report.archive"
+	default:
+		return "project.report.prepare"
 	}
-	return "project.report.manage"
 }
 
 func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, itemID string, input domain.PreparationInput) error {
@@ -1243,14 +1347,14 @@ func (s *Service) DecideReportCorrection(ctx context.Context, p platform.Princip
 	if decision == "REJECTED" {
 		typ = EventReportCorrectionRejected
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, typ, map[string]any{"request_id": requestID, "comment": strings.TrimSpace(input.Comment), "old_revision": request.Payload["old_revision"], "report_correction_requester_id": request.ActorUserID, "expected_version": input.ExpectedVersion}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, typ, map[string]any{"request_id": requestID, "comment": strings.TrimSpace(input.Comment), "reason": payloadText(request.Payload, "reason"), "old_revision": request.Payload["old_revision"], "report_correction_requester_id": request.ActorUserID, "expected_version": input.ExpectedVersion}))
 }
 
 // ReturnEquipment 把某台设备从服务项的实施准备清单中归还：清单行保留（保留借出历史），
 // 但标记归还时间后不再占用设备，也不再算「不在公司」。设备维护人员与项目经理都可发起归还，
 // 因为设备可能由现场提前寄回。
 func (s *Service) ReturnEquipment(ctx context.Context, p platform.Principal, itemID, resourceID string) error {
-	filter, err := authorizeProjectScope(p, "project.implementation.plan")
+	filter, err := authorizeAnyProjectScope(p, "project.implementation.plan", "project.device.manage")
 	if err != nil {
 		return err
 	}
@@ -1266,7 +1370,7 @@ func (s *Service) ReturnEquipment(ctx context.Context, p platform.Principal, ite
 // ListEquipmentReservations 返回与该项目计划窗口重叠的其他服务项设备占用，
 // 供「实施准备」的选择器把已占用设备置灰并解释占用方。计划尚未发布时返回全部未过滤占用。
 func (s *Service) ListEquipmentReservations(ctx context.Context, p platform.Principal, itemID string) ([]domain.EquipmentReservation, error) {
-	filter, err := authorizeProjectScope(p, "project.implementation.plan")
+	filter, err := authorizeAnyProjectScope(p, "project.implementation.plan", "project.read")
 	if err != nil {
 		return nil, err
 	}
@@ -1412,7 +1516,15 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
 		return ErrValidation
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldRecordSubmitted, map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_urls": input.EvidenceURLs}))
+	if len(input.EvidenceURLs) > 0 {
+		return ValidationError("现场证据必须通过统一文件网关上传")
+	}
+	for i := range input.EvidenceFiles {
+		if err := normalizeFileEvidence(&input.EvidenceFiles[i], "现场证据"); err != nil {
+			return err
+		}
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldRecordSubmitted, map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_files": input.EvidenceFiles}))
 }
 
 func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, itemID string, input domain.DeviationInput) (string, error) {
@@ -1422,8 +1534,29 @@ func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, ite
 	if strings.TrimSpace(input.Description) == "" {
 		return "", ErrValidation
 	}
+	if strings.TrimSpace(input.EvidenceURL) != "" {
+		return "", ValidationError("偏离证据必须通过统一文件网关上传")
+	}
+	for i := range input.EvidenceFiles {
+		if err := normalizeFileEvidence(&input.EvidenceFiles[i], "偏离证据"); err != nil {
+			return "", err
+		}
+	}
 	id := "DV-" + ulid.Make().String()
-	return id, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventDeviationReported, map[string]any{"deviation_id": id, "description": input.Description, "severity": input.Severity, "evidence_url": input.EvidenceURL, "decision": "PENDING"}))
+	return id, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventDeviationReported, map[string]any{"deviation_id": id, "description": input.Description, "severity": input.Severity, "evidence_files": input.EvidenceFiles, "decision": "PENDING"}))
+}
+
+func normalizeFileEvidence(input *domain.ReportArtifactInput, label string) error {
+	input.FileID, input.FileName, input.MIME, input.SHA256 = strings.TrimSpace(input.FileID), strings.TrimSpace(input.FileName), strings.TrimSpace(input.MIME), strings.ToLower(strings.TrimSpace(input.SHA256))
+	if input.FileID == "" || input.FileName == "" || input.MIME == "" || input.Size == 0 || len(input.SHA256) != 64 {
+		return ValidationError(label + "文件凭据不完整")
+	}
+	for _, ch := range input.SHA256 {
+		if !strings.ContainsRune("0123456789abcdef", ch) {
+			return ValidationError(label + "文件 SHA-256 格式不正确")
+		}
+	}
+	return nil
 }
 
 func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, deviationID string, input domain.DeviationReviewInput) error {
@@ -1892,12 +2025,86 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	if e != nil {
 		return e
 	}
+	s.attachNotification(ctx, &event)
 	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
 		return err
 	}
-	s.notifyAssigned(ctx, event)
+	// Lightweight/in-memory repositories used by embedders may not provide the durable outbox.
+	// Preserve their existing synchronous behavior; the production MySQL repository always uses
+	// the transactionally persisted path and is dispatched by sla-notifier.
+	if _, durable := s.Repo.(NotificationOutboxRepository); !durable {
+		s.notifyAssigned(ctx, event)
+	}
 	s.fireAutomations(ctx, event)
 	return nil
+}
+
+func (s *Service) attachNotification(ctx context.Context, event *domain.DeliveryEvent) {
+	if event == nil || strings.TrimSpace(event.ServiceItemID) == "" {
+		return
+	}
+	spec, ok := assignmentNotificationFor(event.Type)
+	if !ok {
+		return
+	}
+	recipients := assignmentRecipients(*event)
+	if len(recipients) == 0 {
+		recipients = s.itemAssignees(ctx, event.TenantID, event.ServiceItemID)
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	event.Notification = &domain.NotificationMessage{
+		EventID: ulid.Make().String(), EventType: event.Type,
+		Scope: platform.NotificationScopeCrossSystem, Priority: "NORMAL",
+		Title: spec.Title, Content: spec.Content, ReferenceType: "service_item",
+		ReferenceID: event.ServiceItemID, Recipients: uniqueStrings(recipients),
+		OccurredAt: event.CreatedAt, IdempotencyKey: event.ID + "-assigned",
+	}
+}
+
+// DispatchNotificationOutbox leases durable notifications and publishes them with bounded retry.
+// The producer transaction is already committed; delivery is at-least-once and the platform
+// idempotency key makes retries safe.
+func (s *Service) DispatchNotificationOutbox(ctx context.Context, workerID string, limit int, now time.Time) (int, error) {
+	repo, ok := s.Repo.(NotificationOutboxRepository)
+	if !ok {
+		return 0, errors.New("notification outbox repository unavailable")
+	}
+	if s.Notifications == nil {
+		return 0, nil
+	}
+	items, err := repo.ClaimNotificationOutbox(ctx, workerID, limit, now)
+	if err != nil {
+		return 0, err
+	}
+	sent := 0
+	for _, item := range items {
+		message := item.Message
+		err := s.Notifications.Publish(ctx, platform.NotificationEvent{
+			EventID: message.EventID, EventType: message.EventType, Scope: message.Scope,
+			Priority: message.Priority, Title: message.Title, Content: message.Content,
+			ReferenceType: message.ReferenceType, ReferenceID: message.ReferenceID,
+			Recipients: message.Recipients, OccurredAt: message.OccurredAt,
+			IdempotencyKey: message.IdempotencyKey,
+		})
+		if err == nil {
+			if markErr := repo.MarkNotificationOutboxSent(ctx, item.ID, workerID, now); markErr != nil {
+				return sent, markErr
+			}
+			sent++
+			continue
+		}
+		dead := item.RetryCount+1 >= 12
+		backoff := time.Duration(1<<min(int(item.RetryCount), 8)) * time.Minute
+		if markErr := repo.MarkNotificationOutboxRetry(ctx, item.ID, workerID, now.Add(backoff), dead); markErr != nil {
+			return sent, markErr
+		}
+		if s.Logger != nil {
+			s.Logger.Warn("notification outbox delivery failed", "outbox_id", item.ID, "error", err, "dead_letter", dead)
+		}
+	}
+	return sent, nil
 }
 
 // itemAssignees 读取服务项当前的被指派人（团队负责人、项目经理、实施工程师）。

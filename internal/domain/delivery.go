@@ -19,6 +19,7 @@ type ContractService struct {
 	SourceID    string `json:"source_id"`
 	Name        string `json:"name"`
 	Site        string `json:"site"`
+	SiteCode    string `json:"site_code,omitempty"`
 	Batch       string `json:"batch"`
 	Category    string `json:"category"`
 	System      string `json:"system"`
@@ -36,6 +37,29 @@ type DeliveryEvent struct {
 	ActorUserID   string         `json:"actor_user_id"`
 	Payload       map[string]any `json:"payload"`
 	CreatedAt     time.Time      `json:"created_at"`
+	// Notification is an internal transaction companion. It is persisted to the project outbox
+	// together with the delivery event and is deliberately excluded from the audit event JSON.
+	Notification *NotificationMessage `json:"-"`
+}
+
+type NotificationMessage struct {
+	EventID        string    `json:"event_id"`
+	EventType      string    `json:"event_type"`
+	Scope          string    `json:"notification_scope"`
+	Priority       string    `json:"priority"`
+	Title          string    `json:"title"`
+	Content        string    `json:"content"`
+	ReferenceType  string    `json:"reference_type"`
+	ReferenceID    string    `json:"reference_id"`
+	Recipients     []string  `json:"recipient_user_ids"`
+	OccurredAt     time.Time `json:"occurred_at"`
+	IdempotencyKey string    `json:"idempotency_key"`
+}
+
+type NotificationOutboxItem struct {
+	ID         uint64              `json:"id"`
+	Message    NotificationMessage `json:"message"`
+	RetryCount uint                `json:"retry_count"`
 }
 
 type Capability struct {
@@ -228,6 +252,14 @@ type ReportStatusInput struct {
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
+type ReportArtifactInput struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MIME     string `json:"mime"`
+	Size     uint64 `json:"size"`
+	SHA256   string `json:"sha256"`
+}
+
 // PreparationInput 是实施准备提交的内容。设备申领不再是自由文本：设备清单
 // （Equipment）本身就说明申领了哪些设备、在什么时段使用，因此不再单列申领单号。
 type PreparationInput struct {
@@ -240,17 +272,22 @@ type PreparationInput struct {
 }
 
 type FieldRecordInput struct {
-	RawData      string   `json:"raw_data"`
-	Environment  string   `json:"environment"`
-	EvidenceURLs []string `json:"evidence_urls"`
+	RawData     string `json:"raw_data"`
+	Environment string `json:"environment"`
+	// EvidenceFiles are immutable file-gateway receipts. EvidenceURLs remains accepted only for
+	// backward-compatible request decoding and is rejected by the application service: a URL is
+	// not durable evidence and cannot prove hash, size or gateway ownership.
+	EvidenceFiles []ReportArtifactInput `json:"evidence_files"`
+	EvidenceURLs  []string              `json:"evidence_urls"`
 	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
 type DeviationInput struct {
-	Description string `json:"description"`
-	Severity    string `json:"severity"`
-	EvidenceURL string `json:"evidence_url"`
+	Description   string                `json:"description"`
+	Severity      string                `json:"severity"`
+	EvidenceFiles []ReportArtifactInput `json:"evidence_files"`
+	EvidenceURL   string                `json:"evidence_url"`
 }
 
 type DeviationReviewInput struct {

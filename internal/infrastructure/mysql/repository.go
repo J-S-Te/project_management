@@ -114,7 +114,7 @@ func projectStatusInputQuery(db *gorm.DB, tenantID string, projectIDs []string) 
 		Where("tenant_id = ? AND project_id IN ?", tenantID, projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	err := r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	err := r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractID: item.ContractID, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 	if err != nil && isDuplicateKey(err) {
 		// 无服务项的手动创建同样受唯一键约束，理由见 CreateProjectWithServiceItems。
 		return application.ErrDuplicateProject
@@ -575,7 +575,7 @@ func unique(values []string) map[string]bool {
 	return result
 }
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: r.Version}
+	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractID: r.ContractID, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: r.Version}
 }
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
@@ -594,7 +594,7 @@ func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string
 		args = append(args, filter.ProjectIDs)
 	}
 	if filter.AllowSelf {
-		conditions = append(conditions, "("+alias+".owner_identity_id = ? OR "+alias+".manager_identity_id = ? OR EXISTS (SELECT 1 FROM pm_service_item scope_item WHERE scope_item.tenant_id = "+alias+".tenant_id AND scope_item.project_id = "+alias+".id AND (scope_item.team_lead_id = ? OR scope_item.project_manager_id = ? OR JSON_CONTAINS(scope_item.engineer_ids, JSON_QUOTE(?)))))")
+		conditions = append(conditions, "("+alias+".owner_identity_id = ? OR "+alias+".manager_identity_id = ? OR EXISTS (SELECT 1 FROM pm_service_item scope_item WHERE scope_item.tenant_id = "+alias+".tenant_id AND scope_item.project_id = "+alias+".id AND scope_item.archived_at IS NULL AND (scope_item.team_lead_id = ? OR scope_item.project_manager_id = ? OR JSON_CONTAINS(scope_item.engineer_ids, JSON_QUOTE(?)))))")
 		args = append(args, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID)
 	}
 	if len(conditions) == 0 {
@@ -608,7 +608,7 @@ func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilt
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
-	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, SystemStandard: r.SystemStandard, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, ReportRevision: r.ReportRevision, Status: r.Status, Version: r.Version}
+	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, SiteCode: r.SiteCode, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, SystemStandard: r.SystemStandard, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, ReportRevision: r.ReportRevision, ReportPreparedBy: r.ReportPreparedBy, ReportReviewedBy: r.ReportReviewedBy, ReportIssuedBy: r.ReportIssuedBy, Status: r.Status, Version: r.Version}
 	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
 	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
 	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)
