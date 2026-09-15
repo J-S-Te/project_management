@@ -1119,10 +1119,11 @@ func TestQualifiedPersonnelEndpointUsesProjectCapabilityLedger(t *testing.T) {
 		ResourceType: "PERSON", ResourceID: "P-0001", ResourceName: "张三", UserID: "user-qualified",
 		Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive,
 	}}}
-	service := &application.Service{Repo: repository}
+	directory := &recordingOwnerDirectoryStub{items: []platform.OwnerDirectoryUser{{UserID: "user-qualified", DisplayName: "张三"}}}
+	service := &application.Service{Repo: repository, Personnel: directory}
 	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "admin-1", Roles: []string{"business_admin"}, Permissions: map[string]bool{"project.team.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
 	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	response := perform(handler, http.MethodGet, "/api/v1/qualified-personnel?keyword=CISP&page=1&page_size=50", "")
+	response := perform(handler, http.MethodGet, "/api/v1/qualified-personnel?role_code=team_lead&keyword=CISP&page=1&page_size=50", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -1132,13 +1133,23 @@ func TestQualifiedPersonnelEndpointUsesProjectCapabilityLedger(t *testing.T) {
 			t.Fatalf("body missing %s: %s", expected, body)
 		}
 	}
+	if got := strings.Join(directory.last.RoleCodes, ","); got != "team_lead" {
+		t.Fatalf("role codes=%q, want team_lead", got)
+	}
+	response = perform(handler, http.MethodGet, "/api/v1/qualified-personnel?page=1&page_size=50", "")
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing role status=%d body=%s, want 422", response.Code, response.Body.String())
+	}
 }
 
-type recordingOwnerDirectoryStub struct{ last platform.OwnerDirectoryQuery }
+type recordingOwnerDirectoryStub struct {
+	last  platform.OwnerDirectoryQuery
+	items []platform.OwnerDirectoryUser
+}
 
 func (stub *recordingOwnerDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
 	stub.last = query
-	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{}, Page: 1, PageSize: 50}, nil
+	return platform.OwnerDirectoryPage{Items: stub.items, Page: 1, PageSize: 50, Total: int64(len(stub.items))}, nil
 }
 
 type ownerDirectoryStub struct{ names map[string]string }

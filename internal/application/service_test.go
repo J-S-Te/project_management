@@ -460,11 +460,14 @@ func TestQualifiedPersonnelIgnoresDatesButRequiresActiveVerifiedRecords(t *testi
 		{ResourceType: "PERSON", ResourceID: "P-0001", ResourceName: "张三", UserID: "user-1", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive, ValidFrom: now.AddDate(0, -1, 0), ValidUntil: now.AddDate(0, 1, 0)},
 		{ResourceType: "PERSON", ResourceID: "P-0002", ResourceName: "已离职", UserID: "user-2", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusMissing},
 		{ResourceType: "PERSON", ResourceID: "P-0003", ResourceName: "已过期", UserID: "user-3", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive, ValidUntil: now.AddDate(0, 0, -1)},
+		{ResourceType: "PERSON", ResourceID: "P-0004", ResourceName: "无负责人角色", UserID: "user-4", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive},
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-1", ResourceName: "设备", Status: "ACTIVE"},
 	}}
-	service := &Service{Repo: repository}
+	service := &Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleTeamLead: {"user-1", "user-2", "user-3"},
+	}}}
 	principal := principalWith("project.team.assign", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
-	page, err := service.ListQualifiedPersonnel(context.Background(), principal, "CISP", 1, 50)
+	page, err := service.ListQualifiedPersonnel(context.Background(), principal, assignmentRoleTeamLead, "CISP", 1, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,8 +478,11 @@ func TestQualifiedPersonnelIgnoresDatesButRequiresActiveVerifiedRecords(t *testi
 	for _, item := range page.Items {
 		users[item.UserID] = true
 	}
-	if !users["user-1"] || !users["user-3"] {
-		t.Fatalf("qualified users=%v, want current and historically expired personnel", users)
+	if !users["user-1"] || !users["user-3"] || users["user-4"] {
+		t.Fatalf("qualified users=%v, want role-qualified current and historically expired personnel", users)
+	}
+	if _, err := service.ListQualifiedPersonnel(context.Background(), principal, "", "", 1, 50); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing role error=%v, want validation error", err)
 	}
 }
 

@@ -696,11 +696,8 @@ func (h *Handler) listPersonnel(c *gin.Context) {
 	writeData(c, http.StatusOK, result)
 }
 
-// listQualifiedPersonnel is assignment-only directory data sourced from the
-// project system's PERSON qualification ledger. The platform personnel route
-// remains separate and is used only while creating/refreshing qualification
-// records, avoiding the circular rule “only an application role can be picked
-// before that responsibility has been assigned”.
+// listQualifiedPersonnel returns the intersection of the project PERSON
+// qualification ledger and the requested effective platform project role.
 func (h *Handler) listQualifiedPersonnel(c *gin.Context) {
 	page, err := optionalPositiveInt(c.Query("page"))
 	if err != nil {
@@ -712,7 +709,7 @@ func (h *Handler) listQualifiedPersonnel(c *gin.Context) {
 		writeServiceError(c, application.ErrValidation)
 		return
 	}
-	result, err := h.service.ListQualifiedPersonnel(c.Request.Context(), principal(c), c.Query("keyword"), page, pageSize)
+	result, err := h.service.ListQualifiedPersonnel(c.Request.Context(), principal(c), c.Query("role_code"), c.Query("keyword"), page, pageSize)
 	if err != nil {
 		writeServiceError(c, err)
 		return
