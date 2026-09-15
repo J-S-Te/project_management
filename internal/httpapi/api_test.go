@@ -459,13 +459,12 @@ func TestDeleteRuleRejectsUnknownAndUnauthorized(t *testing.T) {
 // ②孤儿权限：某个角色持有权限，但它把守的模块一个都看不到；
 // ③能看不能做：角色能看到某写模块，却不持有该模块写操作的任何权限（能填不能提交）。
 func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
-	// 模块 → 写操作权限：一个权限可以对应多个模块（project.resource.manage 同时把守
-	// 资质与能力、站点档案），但每个模块都必须至少有一个持有者能看到。
+	// 模块 → 写操作权限：一个权限可以对应多个模块，但每个模块都必须至少有一个持有者能看到。
 	modules := map[string][]string{
 		"split-rules": {"project_rule.manage"}, "warning-rules": {"project_rule.manage"},
 		"automations": {"project_rule.manage"}, "sla": {"project_rule.manage"},
 		"standards": {"project_rule.manage"}, "capability-codes": {"project_rule.manage"}, "permissions": {"project.field_permission.manage"},
-		"qualifications": {"project.resource.manage"}, "sites": {"project.resource.manage"},
+		"qualifications": {"project.resource.manage"},
 		"decomposition":  {"service_item.confirm", "project.decomposition.manage"},
 		"planning":       {"project.implementation.plan"},
 		"preparation":    {"project.implementation.plan"},
@@ -480,7 +479,7 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 	}
 	// 只读入口不算缺口：能看到这些模块但不持有写权限是允许的（看板、列表、评估视图）。
 	readOnlyAllowed := map[string]bool{
-		"qualifications": true, "sites": true, "equipment": true, "implementation": true,
+		"qualifications": true, "equipment": true, "implementation": true,
 		"standards": true, "reports": true, "decomposition": true, "exceptions": true,
 		"inbox": true, "allocation": true, "assignments": true, "planning": true, "preparation": true,
 		"methods": true,
@@ -635,6 +634,9 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 				t.Fatalf("role %s navigation missing %q: %s", role, section, body)
 			}
 		}
+		if strings.Contains(body, `"sites"`) {
+			t.Fatalf("role %s must not see retired sites workspace: %s", role, body)
+		}
 	}
 	// 业务管理员只看项目/拆解/分配，不应看到系统配置模块。
 	businessAdmin := navigationBodyForRole(t, "business_admin")
@@ -647,6 +649,12 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 	deviceAdmin := navigationBodyForRole(t, "device_admin")
 	if !strings.Contains(deviceAdmin, `"equipment"`) || !strings.Contains(deviceAdmin, `"projects"`) {
 		t.Fatalf("device_admin navigation = %s", deviceAdmin)
+	}
+	for _, role := range []string{"project_manager", "device_admin"} {
+		body := navigationBodyForRole(t, role)
+		if strings.Contains(body, `"sites"`) {
+			t.Fatalf("role %s must not see retired sites workspace: %s", role, body)
+		}
 	}
 }
 

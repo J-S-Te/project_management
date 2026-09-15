@@ -219,6 +219,9 @@ func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	if created.Services != 1 || len(repository.items) != 1 || repository.items[0].ProjectID != created.ID || repository.items[0].Status != "待确认" {
 		t.Fatalf("created=%+v items=%+v", created, repository.items)
 	}
+	if repository.items[0].Site != "杭州机房" || repository.items[0].SiteCode != "" {
+		t.Fatalf("free-text implementation site was not preserved: %+v", repository.items[0])
+	}
 }
 
 func TestOrganizationCreateRequiresAndStoresAuthorizedOwnerOrg(t *testing.T) {
