@@ -21,6 +21,11 @@ func TestApprovedContractClientListsWithMachineToken(t *testing.T) {
 				t.Fatalf("authorization=%q query=%q", request.Header.Get("Authorization"), request.URL.RawQuery)
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"OK","data":[{"id":"C-1","contract_number":"HT-1","title":"技术服务","customer_id":"8","customer_name":"客户","version":2,"status":"approved","approval_passed":true}]}`))}, nil
+		case "/internal/v1/project/pending-projects/count":
+			if request.Header.Get("Authorization") != "Bearer machine-token" {
+				t.Fatalf("authorization=%q", request.Header.Get("Authorization"))
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"OK","data":{"count":7}}`))}, nil
 		default:
 			t.Fatalf("unexpected path %q", request.URL.Path)
 			return nil, nil
@@ -38,5 +43,9 @@ func TestApprovedContractClientListsWithMachineToken(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != "C-1" || items[0].CustomerID != "8" || !items[0].ApprovalPassed {
 		t.Fatalf("items=%+v", items)
+	}
+	count, err := client.CountPendingProjects(context.Background())
+	if err != nil || count != 7 {
+		t.Fatalf("CountPendingProjects() = %d, %v; want 7", count, err)
 	}
 }

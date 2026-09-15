@@ -23,6 +23,7 @@ type ApprovedContract struct {
 
 type ApprovedContractVerifier interface {
 	List(context.Context, int) ([]ApprovedContract, error)
+	CountPendingProjects(context.Context) (int, error)
 	Get(context.Context, string) (ApprovedContract, error)
 }
 
@@ -86,6 +87,41 @@ func (c *approvedContractClient) List(ctx context.Context, limit int) ([]Approve
 		return []ApprovedContract{}, nil
 	}
 	return envelope.Data, nil
+}
+
+func (c *approvedContractClient) CountPendingProjects(ctx context.Context) (int, error) {
+	token, err := c.service.token(ctx, c.scope)
+	if err != nil {
+		return 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.baseURL, "/approved-contracts")+"/pending-projects/count", nil)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	response, err := c.service.client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return 0, fmt.Errorf("contract approval service returned %d", response.StatusCode)
+	}
+	var envelope struct {
+		Code string `json:"code"`
+		Data struct {
+			Count int `json:"count"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&envelope); err != nil {
+		return 0, err
+	}
+	if envelope.Code != "OK" || envelope.Data.Count < 0 {
+		return 0, fmt.Errorf("contract approval service returned invalid count")
+	}
+	return envelope.Data.Count, nil
 }
 
 func (c *approvedContractClient) Get(ctx context.Context, contractID string) (ApprovedContract, error) {

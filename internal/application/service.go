@@ -183,7 +183,28 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 		s.Logger.Warn("unknown service item statuses detected",
 			"tenant_id", p.TenantID, "project_count", result.UnknownStatusItems)
 	}
+	if mayCreateProject(p) {
+		s.populatePendingProjectCreation(ctx, p.TenantID, &result)
+	}
 	return result, nil
+}
+
+// populatePendingProjectCreation enriches the dashboard without making the
+// project list depend on Contract Management availability. The boolean field
+// lets the UI distinguish a true zero from a temporarily unavailable metric.
+func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID string, result *domain.Dashboard) {
+	if s.Contracts == nil {
+		return
+	}
+	pending, err := s.Contracts.CountPendingProjects(ctx)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("pending project contract count unavailable", "tenant_id", tenantID, "error", err)
+		}
+		return
+	}
+	result.PendingProjectCreation = pending
+	result.PendingProjectCreationAvailable = true
 }
 func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, projectID string) ([]domain.ServiceItem, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
