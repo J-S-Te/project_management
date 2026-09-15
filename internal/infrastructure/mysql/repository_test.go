@@ -9,6 +9,19 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestCanStartPreparationAllowsReentryAfterFieldRollback(t *testing.T) {
+	for _, status := range []string{"待实施", "实施准备中"} {
+		if !canStartPreparation(status) {
+			t.Fatalf("status %q should allow preparation", status)
+		}
+	}
+	for _, status := range []string{"待分配", "实施中", "现场实施完成"} {
+		if canStartPreparation(status) {
+			t.Fatalf("status %q must not allow preparation", status)
+		}
+	}
+}
+
 func dryRunDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(mysql.New(mysql.Config{DSN: "project:secret@tcp(127.0.0.1:3306)/project_management", SkipInitializeWithVersion: true}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
