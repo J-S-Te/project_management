@@ -17,6 +17,7 @@ type approvedContractVerifierStub struct{}
 func (approvedContractVerifierStub) List(_ context.Context, _ int) ([]platform.ApprovedContract, error) {
 	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
 }
+func (approvedContractVerifierStub) CountPendingProjects(context.Context) (int, error) { return 2, nil }
 
 func (approvedContractVerifierStub) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
@@ -26,6 +27,9 @@ type failingApprovedContractVerifier struct{}
 
 func (failingApprovedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return nil, errors.New("contract service unavailable")
+}
+func (failingApprovedContractVerifier) CountPendingProjects(context.Context) (int, error) {
+	return 0, errors.New("contract service unavailable")
 }
 func (failingApprovedContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{}, errors.New("contract service unavailable")
@@ -139,6 +143,43 @@ func TestBusinessAdminListsApprovedContractsThroughBackendIntegration(t *testing
 	}
 	if len(items) != 1 || items[0].ID != "C-1" || !items[0].ApprovalPassed {
 		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestBusinessAdminDashboardCountsApprovedContractsWithoutProjects(t *testing.T) {
+	repository := &scopeRepository{}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1",
+		Roles:       []string{"business_admin"},
+		Permissions: map[string]bool{"project.read": true, "project.create": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}},
+	}
+
+	dashboard, err := service.Dashboard(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dashboard.PendingProjectCreationAvailable || dashboard.PendingProjectCreation != 2 {
+		t.Fatalf("dashboard=%+v, want 2 pending project creations", dashboard)
+	}
+}
+
+func TestBusinessAdminDashboardKeepsProjectDataAvailableWhenContractCountFails(t *testing.T) {
+	service := &Service{Repo: &scopeRepository{}, Contracts: failingApprovedContractVerifier{}}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1",
+		Roles:       []string{"business_admin"},
+		Permissions: map[string]bool{"project.read": true, "project.create": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}},
+	}
+
+	dashboard, err := service.Dashboard(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("Dashboard() dependency failure must be non-blocking: %v", err)
+	}
+	if dashboard.PendingProjectCreationAvailable || dashboard.PendingProjectCreation != 0 {
+		t.Fatalf("dashboard=%+v, want unavailable pending metric", dashboard)
 	}
 }
 

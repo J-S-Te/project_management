@@ -36,6 +36,8 @@ func (approvedContractVerifier) List(_ context.Context, _ int) ([]platform.Appro
 	return []platform.ApprovedContract{{ID: "approved-1", Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
 }
 
+func (approvedContractVerifier) CountPendingProjects(context.Context) (int, error) { return 1, nil }
+
 func (approvedContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
 }

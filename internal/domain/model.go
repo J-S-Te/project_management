@@ -145,6 +145,11 @@ type Dashboard struct {
 	ProjectCount     int    `json:"project_count"`
 	InFlightProjects int    `json:"in_flight_projects"`
 	RiskProjects     int    `json:"risk_projects"`
+	// PendingProjectCreation is tenant-wide and shown only to roles allowed to
+	// create projects. Available=false means the contract dependency could not
+	// be queried; zero remains a real, distinguishable business result.
+	PendingProjectCreation          int  `json:"pending_project_creation"`
+	PendingProjectCreationAvailable bool `json:"pending_project_creation_available"`
 	// UnknownStatusItems 是无法识别的服务项状态数量（数据异常）。
 	// 这类状态会被保守地按最滞后处理，因此必须显式暴露，避免项目状态静默变化而无人发现。
 	UnknownStatusItems int            `json:"unknown_status_items"`
