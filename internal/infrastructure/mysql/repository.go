@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -565,6 +566,30 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 	}
 	result.ServiceItems = int(count)
 	return result, nil
+}
+
+// CountExistingContractReferences matches the stable contract ID written by
+// current integrations and the (number, version) key retained by legacy/manual
+// projects. This makes the KPI agree with the new-project selector while old
+// rows are being backfilled with contract_id.
+func (r *Repository) CountExistingContractReferences(ctx context.Context, tenantID string, references []platform.ApprovedContract) (int, error) {
+	if len(references) == 0 {
+		return 0, nil
+	}
+	ids := make([]string, 0, len(references))
+	legacyKeys := make([]string, 0, len(references))
+	for _, reference := range references {
+		if id := strings.TrimSpace(reference.ID); id != "" {
+			ids = append(ids, id)
+		}
+		legacyKeys = append(legacyKeys, strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10))
+	}
+	var count int64
+	err := r.db.WithContext(ctx).Model(&projectRecord{}).
+		Where("tenant_id = ?", tenantID).
+		Where("contract_id IN ? OR CONCAT(contract, ?) IN ?", ids, "\x1f", legacyKeys).
+		Distinct("id").Count(&count).Error
+	return int(count), err
 }
 
 func unique(values []string) map[string]bool {

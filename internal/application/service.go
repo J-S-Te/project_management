@@ -98,6 +98,10 @@ type ProjectServiceCreator interface {
 	CreateProjectWithServiceItems(context.Context, domain.Project, []domain.ServiceItem) error
 }
 
+type ExistingContractReferenceCounter interface {
+	CountExistingContractReferences(context.Context, string, []platform.ApprovedContract) (int, error)
+}
+
 type Service struct {
 	Repo Repository
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
@@ -193,18 +197,42 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 // project list depend on Contract Management availability. The boolean field
 // lets the UI distinguish a true zero from a temporarily unavailable metric.
 func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID string, result *domain.Dashboard) {
-	if s.Contracts == nil {
+	counter, ok := s.Repo.(ExistingContractReferenceCounter)
+	if s.Contracts == nil || !ok {
 		return
 	}
-	pending, err := s.Contracts.CountPendingProjects(ctx)
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Warn("pending project contract count unavailable", "tenant_id", tenantID, "error", err)
+	const pageSize = 500
+	afterID := ""
+	pending := 0
+	for {
+		references, nextAfterID, err := s.Contracts.ListReferences(ctx, afterID, pageSize)
+		if err != nil {
+			s.logPendingProjectCountError(tenantID, err)
+			return
 		}
-		return
+		existing, err := counter.CountExistingContractReferences(ctx, tenantID, references)
+		if err != nil {
+			s.logPendingProjectCountError(tenantID, err)
+			return
+		}
+		pending += max(0, len(references)-existing)
+		if nextAfterID == "" {
+			break
+		}
+		if nextAfterID == afterID {
+			s.logPendingProjectCountError(tenantID, errors.New("contract reference cursor did not advance"))
+			return
+		}
+		afterID = nextAfterID
 	}
 	result.PendingProjectCreation = pending
 	result.PendingProjectCreationAvailable = true
+}
+
+func (s *Service) logPendingProjectCountError(tenantID string, err error) {
+	if s.Logger != nil {
+		s.Logger.Warn("pending project contract count unavailable", "tenant_id", tenantID, "error", err)
+	}
 }
 func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, projectID string) ([]domain.ServiceItem, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
