@@ -396,7 +396,10 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 	case application.EventPreparationStarted:
-		if item.Status != "待实施" {
+		// 首次准备从“待实施”进入；现场回退会回到“实施准备中”，允许负责人重新核验
+		// 设备与行程后再次提交准备。新的 PREPARATION_STARTED 事件是重新进入现场节点
+		// 的明确边界，避免刚回退的项目继续残留在现场实施列表。
+		if !canStartPreparation(item.Status) {
 			return application.ErrValidation
 		}
 		if err := updateImplPlanEquipment(tx, item, event); err != nil {
@@ -523,6 +526,10 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		return application.ErrConflict
 	}
 	return nil
+}
+
+func canStartPreparation(status string) bool {
+	return status == "待实施" || status == "实施准备中"
 }
 
 // isAuditOnlyEvent 列出不改变服务项状态、仅用于留痕的事件类型。
