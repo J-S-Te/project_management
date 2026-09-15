@@ -94,22 +94,27 @@ func capabilitiesFromImportCSV(records [][]string) (rows []domain.Capability, er
 	for i := start; i < len(records); i++ {
 		line := fmt.Sprintf("csv 第 %d 行", i+1)
 		record := records[i]
+		resourceType := strings.ToUpper(field(record, "resource_type", 0))
 		status := strings.ToUpper(field(record, "status", 4))
 		if status == "" {
 			status = "ACTIVE"
 		}
-		validFrom, err := parseFlexibleTime(field(record, "valid_from", 5))
-		if err != nil {
-			errs = append(errs, line+": "+err.Error())
-			continue
-		}
-		validUntil, err := parseFlexibleTime(field(record, "valid_until", 6))
-		if err != nil {
-			errs = append(errs, line+": "+err.Error())
-			continue
+		validFrom, validUntil := time.Time{}, time.Time{}
+		if resourceType == "EQUIPMENT" {
+			var err error
+			validFrom, err = parseFlexibleTime(field(record, "valid_from", 5))
+			if err != nil {
+				errs = append(errs, line+": "+err.Error())
+				continue
+			}
+			validUntil, err = parseFlexibleTime(field(record, "valid_until", 6))
+			if err != nil {
+				errs = append(errs, line+": "+err.Error())
+				continue
+			}
 		}
 		rows = append(rows, domain.Capability{
-			ResourceType: strings.ToUpper(field(record, "resource_type", 0)),
+			ResourceType: resourceType,
 			ResourceID:   field(record, "resource_id", 1),
 			ResourceName: field(record, "resource_name", 2),
 			Codes:        splitCapabilityCodes(field(record, "codes", 3)),
@@ -167,14 +172,19 @@ func (h *Handler) exportCapabilities(c *gin.Context) {
 	writer := csv.NewWriter(buffer)
 	_ = writer.Write(capabilityImportColumns)
 	for _, item := range items {
+		validFrom, validUntil := "", ""
+		if item.ResourceType == "EQUIPMENT" {
+			validFrom = formatCapabilityTime(item.ValidFrom)
+			validUntil = formatCapabilityTime(item.ValidUntil)
+		}
 		_ = writer.Write([]string{
 			item.ResourceType,
 			item.ResourceID,
 			item.ResourceName,
 			strings.Join(item.Codes, ";"),
 			item.Status,
-			formatCapabilityTime(item.ValidFrom),
-			formatCapabilityTime(item.ValidUntil),
+			validFrom,
+			validUntil,
 		})
 	}
 	writer.Flush()

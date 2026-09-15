@@ -580,6 +580,9 @@ func projectFromRecord(r projectRecord) domain.Project {
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {
 	query = query.Where(alias+".tenant_id = ?", filter.TenantID)
+	if filter.AssignedItemsOnly {
+		return query.Where("EXISTS (SELECT 1 FROM pm_service_item scope_item WHERE scope_item.tenant_id = "+alias+".tenant_id AND scope_item.project_id = "+alias+".id AND scope_item.archived_at IS NULL AND (scope_item.team_lead_id = ? OR scope_item.project_manager_id = ? OR JSON_CONTAINS(scope_item.engineer_ids, JSON_QUOTE(?))))", filter.UserID, filter.UserID, filter.UserID)
+	}
 	if filter.AllowAll {
 		return query
 	}
@@ -595,7 +598,7 @@ func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string
 	}
 	if filter.AllowSelf {
 		conditions = append(conditions, "("+alias+".owner_identity_id = ? OR "+alias+".manager_identity_id = ? OR EXISTS (SELECT 1 FROM pm_service_item scope_item WHERE scope_item.tenant_id = "+alias+".tenant_id AND scope_item.project_id = "+alias+".id AND scope_item.archived_at IS NULL AND (scope_item.team_lead_id = ? OR scope_item.project_manager_id = ? OR JSON_CONTAINS(scope_item.engineer_ids, JSON_QUOTE(?)))))")
-		args = append(args, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID, filter.IdentityID)
+		args = append(args, filter.IdentityID, filter.IdentityID, filter.UserID, filter.UserID, filter.UserID)
 	}
 	if len(conditions) == 0 {
 		return query.Where("1 = 0")
@@ -604,6 +607,9 @@ func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string
 }
 
 func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilter) *gorm.DB {
+	if filter.AssignedItemsOnly {
+		return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.archived_at IS NULL AND (pm_service_item.team_lead_id = ? OR pm_service_item.project_manager_id = ? OR JSON_CONTAINS(pm_service_item.engineer_ids, JSON_QUOTE(?)))", filter.TenantID, filter.UserID, filter.UserID, filter.UserID)
+	}
 	projects := applyProjectScope(subqueryDB.Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }

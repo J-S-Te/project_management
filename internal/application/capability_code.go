@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -43,6 +44,12 @@ func normalizeCapability(item *domain.Capability) {
 	item.ResourceName = strings.TrimSpace(item.ResourceName)
 	item.UserID = strings.TrimSpace(item.UserID)
 	item.Codes = normalizeCapabilityCodes(item.Codes)
+	// 人员资质不按日期失效；只有停用资质或失效的平台身份不可参与派工。
+	// 清空调用方提交的历史日期，避免界面或 CSV 再次写回已废弃的限制。
+	if item.ResourceType == "PERSON" {
+		item.ValidFrom = time.Time{}
+		item.ValidUntil = time.Time{}
+	}
 }
 
 func normalizeCapabilityCodeRule(item *domain.Rule) error {

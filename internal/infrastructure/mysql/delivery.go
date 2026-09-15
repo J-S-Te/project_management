@@ -694,6 +694,10 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.DeliveryEvent, error) {
 	projects := applyProjectScope(r.db.WithContext(ctx).Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
 	query := r.db.WithContext(ctx).Where("tenant_id = ? AND project_id IN (?)", filter.TenantID, projects)
+	if filter.AssignedItemsOnly {
+		items := applyServiceItemScope(r.db.WithContext(ctx).Table("pm_service_item").Select("pm_service_item.id"), r.db.WithContext(ctx), filter)
+		query = query.Where("service_item_id IN (?)", items)
+	}
 	if projectID != "" {
 		query = query.Where("project_id=?", projectID)
 	}
@@ -712,10 +716,15 @@ func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.Sco
 
 func (r *Repository) FindProjectForDeviation(ctx context.Context, filter platform.ScopeFilter, deviationID string) (string, string, error) {
 	projects := applyProjectScope(r.db.WithContext(ctx).Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
-	var record deliveryEventRecord
-	err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Where("tenant_id = ? AND project_id IN (?) AND event_type = ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.deviation_id')) = ?", filter.TenantID, projects, application.EventDeviationReported, deviationID).
-		Take(&record).Error
+		Model(&deliveryEventRecord{})
+	if filter.AssignedItemsOnly {
+		items := applyServiceItemScope(r.db.WithContext(ctx).Table("pm_service_item").Select("pm_service_item.id"), r.db.WithContext(ctx), filter)
+		query = query.Where("service_item_id IN (?)", items)
+	}
+	var record deliveryEventRecord
+	err := query.Take(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", "", application.ErrNotFound
 	}
@@ -770,13 +779,16 @@ func (r *Repository) FindCapabilities(ctx context.Context, tenant, at string, id
 		return []domain.Capability{}, nil
 	}
 	var records []capabilityRecord
-	// 有效期按「日期」口径判定：业务填写的是日期（有效期至 X 日），应含当日。
-	// 若直接比较 valid_until >= now，到期日当天 00:00 之后就会被判为过期，
-	// 等于把"有效期至今天"变成"昨天就失效"，与录入人的理解差一天。
-	err := r.db.WithContext(ctx).Where(
-		"tenant_id=? AND resource_id IN ? AND status='ACTIVE' AND (valid_from IS NULL OR DATE(valid_from)<=DATE(?)) AND (valid_until IS NULL OR DATE(valid_until)>=DATE(?))",
-		tenant, ids, at, at).Find(&records).Error
+	err := activePersonnelCapabilitiesQuery(r.db.WithContext(ctx), tenant, at, ids).Find(&records).Error
 	return capabilitiesFromRecords(records), err
+}
+
+func activePersonnelCapabilitiesQuery(db *gorm.DB, tenant, _ string, ids []string) *gorm.DB {
+	// 人员只校验资质启停状态和基础平台身份状态，不按资质日期限制派工。
+	// 日期有效期仅属于设备检定规则。
+	return db.Model(&capabilityRecord{}).Where(
+		"tenant_id=? AND resource_type='PERSON' AND (resource_id IN ? OR user_id IN ?) AND status='ACTIVE' AND identity_status=?",
+		tenant, ids, ids, domain.IdentityStatusActive)
 }
 func capabilitiesFromRecords(records []capabilityRecord) []domain.Capability {
 	out := make([]domain.Capability, 0, len(records))

@@ -1114,6 +1114,26 @@ func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
 	}
 }
 
+func TestQualifiedPersonnelEndpointUsesProjectCapabilityLedger(t *testing.T) {
+	repository := &repo{capabilities: []domain.Capability{{
+		ResourceType: "PERSON", ResourceID: "P-0001", ResourceName: "张三", UserID: "user-qualified",
+		Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive,
+	}}}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "admin-1", Roles: []string{"business_admin"}, Permissions: map[string]bool{"project.team.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/qualified-personnel?keyword=CISP&page=1&page_size=50", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"user_id":"user-qualified"`, `"resource_id":"P-0001"`, `"display_name":"张三"`, `"CISP"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("body missing %s: %s", expected, body)
+		}
+	}
+}
+
 type recordingOwnerDirectoryStub struct{ last platform.OwnerDirectoryQuery }
 
 func (stub *recordingOwnerDirectoryStub) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
@@ -1157,7 +1177,7 @@ func TestImplementationPlanCarriesResolvedPersonnel(t *testing.T) {
 	if !ok || len(personnel) != 1 {
 		t.Fatalf("payload personnel=%#v", repository.events[0].Payload["personnel"])
 	}
-	if personnel[0].ResourceName != "王明" || personnel[0].ValidUntil != "2027-06-30" {
+	if personnel[0].ResourceName != "王明" {
 		t.Fatalf("personnel=%+v", personnel)
 	}
 

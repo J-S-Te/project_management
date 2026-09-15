@@ -87,7 +87,9 @@ stateDiagram-v2
 
 `项目状态 = f(全部服务项状态, 服务项报告状态, supplement_status, 已存储状态)`
 
-项目访问权限只决定某个角色能否查看项目；项目一旦可见，状态、进度和风险均必须从该项目**全部**服务项派生，不能按当前角色可见的服务项子集计算。
+项目访问权限先决定主体能否查看项目；项目一旦可见，状态、进度和风险仍从该项目**全部**服务项派生，不能按当前角色可见的服务项子集计算。团队负责人、项目经理、实施工程师和渗透测试工程师属于执行责任角色，即使平台下发 `APPLICATION / ENVIRONMENT / TENANT` 范围，也只能读取 `team_lead_id / project_manager_id / engineer_ids` 中包含自己的服务项及其事件；业务管理员、系统管理员和治理角色继续按平台范围查看。
+
+任务分配候选人的唯一业务来源是 `pm_capability` 中当前启用、有效期覆盖当天、`identity_status=ACTIVE` 且已关联平台 `user_id` 的 `PERSON` 档案。基础平台人员目录仅用于创建资质档案和身份复核，不能绕过人员资质库直接进入负责人或工程师下拉；指派落库统一保存平台 `user_id`，资质编号仅用于展示和审计。
 
 **判定优先级（自上而下）**【事实】：
 
@@ -240,7 +242,7 @@ stateDiagram-v2
 | **I6** | 执行分配的前提是"已有团队负责人" | 责任链断裂 | 由前置规则保证 |
 | **I7** | 特殊方法必须复核通过才能开工 | 未授权的攻击性测试被执行 | 由前置规则保证 |
 | **I8** | 同一设备同一时段只归属一个服务项 | 设备被重复派出 | 由占用校验保证（边界语义待确认，见 §6） |
-| **I9** | 服务项的资质/能力在**分配时刻**必须有效 | 派遣已过期资质人员 | 由分配时点校验保证 |
+| **I9** | 人员分配时必须具备启用资质、有效平台身份和用户关联；人员不受日期有效期限制 | 派遣已停用、离职或未关联身份的人员 | 由分配时点校验保证；日期限制仅用于设备检定 |
 | **I10** | 项目状态与进度不接受客户端写入 | 客户端可伪造完成状态 | 由服务端强制覆盖保证 |
 | **I11** | 一切数据访问限定在租户内 | 跨租户数据泄漏 | 由查询带 `tenant_id` 保证 |
 | **I12** | 项目 `services` 计数 = 该项目服务项实际条数 | 列表展示与实际不符 | 在拆解/激活时更新，**是否全覆盖待确认** |
@@ -260,7 +262,7 @@ stateDiagram-v2
 | I6 | `TestInvariantI6ExecutionAssignRequiresTeamLead` | 无团队负责人时执行分配被拒（422） | PASS |
 | I7 | `TestInvariantI7SpecialMethodRequiresReview` | 特殊方法未复核即发布计划被拒（409） | PASS |
 | I8 | `TestInvariantI8EquipmentSingleOccupancy` | 重叠时段占用同一设备被拒（409 `PM_RESOURCE_CONFLICT`，并点名占用方） | PASS |
-| I9 | `TestInvariantI9ExpiredCapabilityRejected` | 过期资质不参与校验（`passed=false`） | PASS |
+| I9 | `TestInvariantI9PersonnelDatesDoNotBlockAssignment` | 人员资质日期已过仍可参与校验，启停和身份状态继续生效 | PASS |
 | I10 | `TestInvariantI10DerivedStateNotClientWritable` | 客户端传入的 status/progress/supplement_status 被服务端覆盖 | PASS |
 | I11 | `TestInvariantI11TenantIsolation` | 跨租户读取详情/列表均不可见 | PASS |
 | I12 | `TestInvariantI12ServiceCountMatchesItems` | 拆解调整后 `services` 与实际条数一致 | PASS |
@@ -395,7 +397,7 @@ GROUP BY p.id, p.status LIMIT 20;
 | ✅ **PM-SLA-03** | 同一服务项占两条 SLA 记录，计数虚高 | 列表保留两行（口径不同），**计数按服务项去重**（`slaOverdueItemCount`） |
 | ✅ **PM-STATUS-02** | 部分终止项目计入"已完成"且不计风险 | 按 Q6 扩展风险口径为「或存在已终止服务项」；改为服务端统一派生并随项目 DTO 返回 `risk`，前端不再复刻 |
 | ✅ **PM-PROG-01** | 全部终止时进度 = 100% | 按 Q7 改为 0；"存在终止项"由风险口径承载 |
-| ✅ **PM-DATE-01** | 资质到期当天即不可分配 | 按 Q8 改为按日期口径判定且含当日（`DATE(valid_until)>=DATE(now)`） |
+| ✅ **PM-DATE-01** | 历史上人员资质到期日边界错误 | 2026-09-15 规则已调整为人员不受日期限制；日期口径只用于设备检定，并按开始日/截止日覆盖使用窗口 |
 | ✅ **PM-EQ-01** | 设备时段边界语义 + 解析失败静默跳过 | 按 Q9 改为闭区间（相邻时段算冲突）；占用数据异常按占用处理并显式报出 |
 | ✅ **PM-STATUS-01** | 未知/空状态导致项目状态倒退 | 等级表改为**单一来源**（`serviceItemStatusStages` 派生 rank），杜绝"新增状态忘登记等级"；未知状态仍保守按最滞后处理，但通过看板 `unknown_status_items` 显式暴露 + 服务端告警，不再静默改变项目状态 |
 | ✅ **PM-SLA-04** | `PlannedEnd` 解析失败静默忽略 | `computeSlaItems` 返回被跳过数量，`ListSlaOverdue` 在 >0 时打警告，不再让服务项静默消失在 SLA 口径之外 |

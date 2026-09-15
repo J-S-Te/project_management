@@ -24,8 +24,8 @@ func TestCapabilitiesFromImportCSVByColumnName(t *testing.T) {
 	if strings.Join(first.Codes, "|") != "低压电工证|登高证|特种" {
 		t.Fatalf("codes=%v", first.Codes)
 	}
-	if first.ValidFrom.Format("2006-01-02") != "2026-01-01" || first.ValidUntil.Format("2006-01-02") != "2026-12-31" {
-		t.Fatalf("dates=%v~%v", first.ValidFrom, first.ValidUntil)
+	if !first.ValidFrom.IsZero() || !first.ValidUntil.IsZero() {
+		t.Fatalf("personnel validity dates must be ignored: %v~%v", first.ValidFrom, first.ValidUntil)
 	}
 	if second := rows[1]; second.ResourceType != "EQUIPMENT" || second.Status != "ACTIVE" || !second.ValidFrom.IsZero() || !second.ValidUntil.IsZero() {
 		t.Fatalf("second=%+v", second)
@@ -52,12 +52,15 @@ func TestCapabilitiesFromImportCSVReportsMalformedLines(t *testing.T) {
 	rows, errs := capabilitiesFromImportCSV([][]string{
 		{"resource_type", "resource_id", "resource_name", "codes", "valid_from", "valid_until"},
 		{"PERSON", "P-001", "张三", "低压电工证", "不是日期", ""},
-		{"PERSON", "P-001", "张三", "低压电工证", "2026-01-01", "乱写的日期"},
+		{"EQUIPMENT", "E-001", "设备", "巡检", "2026-01-01", "乱写的日期"},
 	})
-	if len(rows) != 0 || len(errs) != 2 {
+	if len(rows) != 1 || len(errs) != 1 {
 		t.Fatalf("rows=%d errs=%v", len(rows), errs)
 	}
-	if !strings.HasPrefix(errs[0], "csv 第 2 行") || !strings.HasPrefix(errs[1], "csv 第 3 行") {
+	if rows[0].ResourceType != "PERSON" || !rows[0].ValidFrom.IsZero() || !rows[0].ValidUntil.IsZero() {
+		t.Fatalf("personnel row=%+v", rows[0])
+	}
+	if !strings.HasPrefix(errs[0], "csv 第 3 行") {
 		t.Fatalf("errs=%v", errs)
 	}
 }

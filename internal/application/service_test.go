@@ -85,10 +85,10 @@ func principalWith(permission string, scopes ...platform.DataScope) platform.Pri
 	return platform.Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", Roles: roles, Permissions: map[string]bool{permission: true}, DataScopes: scopes}
 }
 
-func TestApplicationScopeAllowsAllProjectQueries(t *testing.T) {
+func TestAdministrativeApplicationScopeAllowsAllProjectQueries(t *testing.T) {
 	repository := &scopeRepository{}
 	service := &Service{Repo: repository}
-	principal := principalWith("project.read", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
+	principal := principalWith("project.read", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
 	if _, err := service.ListProjects(context.Background(), principal, "", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -454,6 +454,32 @@ func TestOrganizationalScopeCanReadCapabilityDirectory(t *testing.T) {
 	}
 }
 
+func TestQualifiedPersonnelIgnoresDatesButRequiresActiveVerifiedRecords(t *testing.T) {
+	now := time.Now().UTC()
+	repository := &capabilityRepository{capabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-0001", ResourceName: "张三", UserID: "user-1", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive, ValidFrom: now.AddDate(0, -1, 0), ValidUntil: now.AddDate(0, 1, 0)},
+		{ResourceType: "PERSON", ResourceID: "P-0002", ResourceName: "已离职", UserID: "user-2", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusMissing},
+		{ResourceType: "PERSON", ResourceID: "P-0003", ResourceName: "已过期", UserID: "user-3", Codes: []string{"CISP"}, Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive, ValidUntil: now.AddDate(0, 0, -1)},
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-1", ResourceName: "设备", Status: "ACTIVE"},
+	}}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.team.assign", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	page, err := service.ListQualifiedPersonnel(context.Background(), principal, "CISP", 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("page=%+v", page)
+	}
+	users := map[string]bool{}
+	for _, item := range page.Items {
+		users[item.UserID] = true
+	}
+	if !users["user-1"] || !users["user-3"] {
+		t.Fatalf("qualified users=%v, want current and historically expired personnel", users)
+	}
+}
+
 // 按项目或个人范围的角色不能读租户级能力目录，避免跨项目泄露人员资质/设备主数据。
 func TestProjectScopeStillCannotReadCapabilityDirectory(t *testing.T) {
 	service := &Service{Repo: &capabilityRepository{}}
@@ -763,7 +789,7 @@ func (r *confirmScopeRepository) ConfirmServiceItems(_ context.Context, filter p
 func TestConfirmServiceItemsForwardsScopeFilterToRepository(t *testing.T) {
 	repository := &confirmScopeRepository{items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配"}}}
 	service := &Service{Repo: repository}
-	principal := principalWith("service_item.confirm", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-1"})
+	principal := principalWith("service_item.confirm", platform.DataScope{RoleCode: "business_admin", ScopeType: "PROJECT", ScopeID: "PJ-1"})
 
 	items, err := service.ConfirmServiceItems(context.Background(), principal, []string{"SI-1"})
 	if err != nil {
