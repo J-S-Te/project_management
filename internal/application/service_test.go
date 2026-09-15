@@ -12,6 +12,12 @@ import (
 	"github.com/j-s-te/project-management/internal/platform"
 )
 
+type approvedContractVerifierStub struct{}
+
+func (approvedContractVerifierStub) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
+}
+
 type scopeRepository struct {
 	lastFilter platform.ScopeFilter
 	created    domain.Project
@@ -72,7 +78,11 @@ func (r *scopeRepository) Dashboard(_ context.Context, filter platform.ScopeFilt
 }
 
 func principalWith(permission string, scopes ...platform.DataScope) platform.Principal {
-	return platform.Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", Permissions: map[string]bool{permission: true}, DataScopes: scopes}
+	roles := []string{}
+	if len(scopes) > 0 && scopes[0].RoleCode != "" {
+		roles = append(roles, scopes[0].RoleCode)
+	}
+	return platform.Principal{TenantID: "tenant-1", IdentityID: "identity-1", UserID: "identity-1", Roles: roles, Permissions: map[string]bool{permission: true}, DataScopes: scopes}
 }
 
 func TestApplicationScopeAllowsAllProjectQueries(t *testing.T) {
@@ -95,10 +105,10 @@ func TestProjectPermissionWithoutScopeIsForbidden(t *testing.T) {
 }
 
 func TestSelfCreateStoresStableOwnerIdentity(t *testing.T) {
-	repository := &scopeRepository{}
-	service := &Service{Repo: repository}
-	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"})
-	created, err := service.CreateProject(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"})
+	repository := &serviceProjectRepository{}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +119,8 @@ func TestSelfCreateStoresStableOwnerIdentity(t *testing.T) {
 
 func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	repository := &serviceProjectRepository{}
-	service := &Service{Repo: repository}
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,24 +130,38 @@ func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 }
 
 func TestOrganizationCreateRequiresAndStoresAuthorizedOwnerOrg(t *testing.T) {
-	repository := &scopeRepository{}
-	service := &Service{Repo: repository}
-	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "ORG", ScopeID: "org-1"})
-	created, err := service.CreateProject(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"})
+	repository := &serviceProjectRepository{}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "ORG", ScopeID: "org-1"})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}})
 	if err != nil || created.OwnerOrgID != "org-1" {
 		t.Fatalf("created=%+v error=%v", created, err)
 	}
-	_, err = service.CreateProject(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-2", OwnerOrgID: "org-2"})
+	_, err = service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-2", ContractID: "C-2", OwnerOrgID: "org-2"}, []domain.ContractService{{Site: "杭州机房"}})
 	if err != ErrForbidden {
 		t.Fatalf("cross-org create error=%v", err)
 	}
 }
 
 func TestProjectOnlyScopeCannotCreateUnassignedProject(t *testing.T) {
-	service := &Service{Repo: &scopeRepository{}}
-	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "PROJECT", ScopeID: "PJ-existing"})
-	if _, err := service.CreateProject(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"}); err != ErrForbidden {
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "PROJECT", ScopeID: "PJ-existing"})
+	if _, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}}); err != ErrForbidden {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestProjectCreationIsLimitedToAdminAndBusinessAdmin(t *testing.T) {
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	for _, role := range []string{"system_admin", "project_manager", "team_lead"} {
+		principal := principalWith("project.create", platform.DataScope{RoleCode: role, ScopeType: "APPLICATION"})
+		if _, err := service.CreateProject(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-" + role}); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("role %s error=%v, want forbidden", role, err)
+		}
+	}
+	admin := principalWith("project.create", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
+	if _, err := service.CreateProjectWithServiceItems(context.Background(), admin, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-admin", ContractID: "C-admin"}, []domain.ContractService{{Site: "杭州机房"}}); err != nil {
+		t.Fatalf("admin must be allowed to create: %v", err)
 	}
 }
 
@@ -419,7 +443,7 @@ func (r *capabilityRepository) ListEquipmentReservations(context.Context, string
 // 需要看到目录数据来渲染表单，写权限仍由 resource.manage 全量范围把守。
 func TestOrganizationalScopeCanReadCapabilityDirectory(t *testing.T) {
 	repository := &capabilityRepository{capabilities: []domain.Capability{{ResourceType: "PERSON", ResourceID: "P-0001"}}}
-	service := &Service{Repo: repository}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
 	principal := principalWith("project.resource.read", platform.DataScope{RoleCode: "quality_manager", ScopeType: "ORG", ScopeID: "org-1"})
 	items, err := service.ListCapabilities(context.Background(), principal, "PERSON")
 	if err != nil {
@@ -455,10 +479,10 @@ func (r *splitRuleRepository) ListRules(context.Context, string, string) ([]doma
 // 技术总监复核窗口的唯一入口，渗透测试项因此既不能复核也不能发布实施计划。
 func TestManualProjectCreationAlwaysWaitsForConfirmation(t *testing.T) {
 	repository := &splitRuleRepository{rules: []domain.Rule{{Enabled: true, Name: "大额批次", Scope: "金额超过 50 万元"}}}
-	service := &Service{Repo: repository}
-	principal := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"})
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"})
 	created, err := service.CreateProjectWithServiceItems(context.Background(), principal,
-		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"},
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
 		[]domain.ContractService{
 			{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"},
 			{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "STANDARD"},
@@ -609,10 +633,10 @@ func stringPtr(value string) *string { return &value }
 // 未配置任何拆解规则时行为与历史一致：全部服务项待人工确认，不自动放行。
 func TestSplitRulesWithoutRulesKeepManualConfirm(t *testing.T) {
 	repository := &serviceProjectRepository{}
-	service := &Service{Repo: repository}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
 	_, err := service.CreateProjectWithServiceItems(context.Background(),
-		principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "SELF", ScopeID: "identity-1"}),
-		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1"},
+		principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}),
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
 		[]domain.ContractService{{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"}})
 	if err != nil {
 		t.Fatal(err)

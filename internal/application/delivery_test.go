@@ -1179,3 +1179,48 @@ func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
 		t.Fatalf("空租户不应扫描")
 	}
 }
+
+// 生产仓储具备 outbox 时，SLA 扫描只负责可靠入队，不能绕过账本直接调用平台通知。
+func TestScanSlaNotificationsEnqueuesDurably(t *testing.T) {
+	now := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
+	base := &assigneeRepository{
+		hookRepository: hookRepository{
+			overdue: []domain.SlaOverdueItem{{
+				ID: "SI-OUTBOX", ProjectID: "PJ-1", Status: "实施中",
+				StatusChangedAt: now.Add(-30 * time.Hour),
+			}},
+			rules: []domain.Rule{{Kind: "sla", Enabled: true, Name: "待实施超期", Status: "实施中", DeadlineHours: 10, RemindHours: 2}},
+		},
+		item: domain.ServiceItem{TenantID: "t1", ProjectID: "PJ-1", TeamLeadID: "u-lead"},
+	}
+	repo := &slaOutboxRepository{assigneeRepository: base}
+	direct := &notificationStub{}
+	service := &Service{Repo: repo, Notifications: direct}
+
+	count, err := service.ScanSlaNotifications(context.Background(), "t1", now)
+	if err != nil || count != 1 {
+		t.Fatalf("durable scan failed: count=%d err=%v", count, err)
+	}
+	if len(repo.enqueued) != 1 {
+		t.Fatalf("SLA notification must be enqueued exactly once, got %+v", repo.enqueued)
+	}
+	if len(direct.published) != 0 {
+		t.Fatalf("outbox-capable repository must not publish directly, got %+v", direct.published)
+	}
+	if repo.enqueued[0].IdempotencyKey != "sla-SI-OUTBOX-"+domain.SlaKindStatusOverdue+"-2026-09-13" {
+		t.Fatalf("unexpected outbox idempotency key %q", repo.enqueued[0].IdempotencyKey)
+	}
+}
+
+type slaOutboxRepository struct {
+	*assigneeRepository
+	enqueued []domain.NotificationMessage
+}
+
+func (r *slaOutboxRepository) EnqueueNotification(_ context.Context, tenantID string, message domain.NotificationMessage) (bool, error) {
+	if tenantID != "t1" {
+		return false, errors.New("unexpected tenant")
+	}
+	r.enqueued = append(r.enqueued, message)
+	return true, nil
+}

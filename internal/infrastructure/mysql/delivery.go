@@ -44,7 +44,7 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			// 同一 (tenant_id, contract_id, contract_version) 并发激活时，唯一键
 			// uq_pm_project_contract_version 会让后到的事务失败；这里翻译成语义哨兵，
@@ -55,18 +55,121 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 			return err
 		}
 		for _, item := range items {
-			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
 		}
-		return createEvent(tx, event)
+		if err := createEvent(tx, event); err != nil {
+			return err
+		}
+		return createNotificationOutbox(tx, event)
 	})
+}
+
+func createNotificationOutbox(tx *gorm.DB, event domain.DeliveryEvent) error {
+	if event.Notification == nil || len(event.Notification.Recipients) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(event.Notification)
+	if err != nil {
+		return err
+	}
+	idempotencyKey := strings.TrimSpace(event.Notification.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = event.ID
+	}
+	return tx.Create(&notificationOutboxRecord{
+		EventID: event.ID, TenantID: event.TenantID, EventType: event.Type,
+		IdempotencyKey: idempotencyKey,
+		AggregateType:  "service_item", AggregateID: event.ServiceItemID,
+		Payload: payload, Status: "PENDING", CreatedAt: event.CreatedAt,
+	}).Error
+}
+
+func (r *Repository) EnqueueNotification(ctx context.Context, tenantID string, message domain.NotificationMessage) (bool, error) {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return false, err
+	}
+	idempotencyKey := strings.TrimSpace(message.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = message.EventID
+	}
+	record := notificationOutboxRecord{EventID: message.EventID, TenantID: tenantID, IdempotencyKey: idempotencyKey, EventType: message.EventType, AggregateType: message.ReferenceType, AggregateID: message.ReferenceID, Payload: payload, Status: "PENDING", CreatedAt: message.OccurredAt}
+	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&record)
+	return result.RowsAffected == 1, result.Error
+}
+
+func (r *Repository) ClaimNotificationOutbox(ctx context.Context, workerID string, limit int, now time.Time) ([]domain.NotificationOutboxItem, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var claimed []notificationOutboxRecord
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("status IN ? AND (next_retry_at IS NULL OR next_retry_at <= ?) AND (locked_until IS NULL OR locked_until < ?)", []string{"PENDING", "RETRY_WAIT", "PROCESSING"}, now, now).
+			Order("created_at ASC").Limit(limit).Find(&claimed).Error; err != nil {
+			return err
+		}
+		if len(claimed) == 0 {
+			return nil
+		}
+		ids := make([]uint64, 0, len(claimed))
+		for _, row := range claimed {
+			ids = append(ids, row.ID)
+		}
+		return tx.Model(&notificationOutboxRecord{}).Where("id IN ?", ids).Updates(map[string]any{
+			"status": "PROCESSING", "locked_by": workerID, "locked_until": now.Add(2 * time.Minute),
+		}).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]domain.NotificationOutboxItem, 0, len(claimed))
+	for _, row := range claimed {
+		var message domain.NotificationMessage
+		if err := json.Unmarshal(row.Payload, &message); err != nil {
+			return nil, err
+		}
+		items = append(items, domain.NotificationOutboxItem{ID: row.ID, Message: message, RetryCount: row.RetryCount})
+	}
+	return items, nil
+}
+
+func (r *Repository) MarkNotificationOutboxSent(ctx context.Context, id uint64, workerID string, now time.Time) error {
+	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
+		Where("id=? AND status='PROCESSING' AND locked_by=?", id, workerID).
+		Updates(map[string]any{"status": "SENT", "sent_at": now, "locked_by": "", "locked_until": nil, "last_error_summary": ""})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+func (r *Repository) MarkNotificationOutboxRetry(ctx context.Context, id uint64, workerID string, next time.Time, dead bool) error {
+	status := "RETRY_WAIT"
+	if dead {
+		status = "DEAD_LETTER"
+	}
+	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
+		Where("id=? AND status='PROCESSING' AND locked_by=?", id, workerID).
+		Updates(map[string]any{"status": status, "retry_count": gorm.Expr("retry_count + 1"), "next_retry_at": next, "locked_by": "", "locked_until": nil})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
 }
 
 func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project domain.Project, items []domain.ServiceItem) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, Contract: project.Contract, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			// 手动创建没有合同激活那样的幂等回读：撞唯一键 uq_pm_project_contract_version
 			// 说明同合同同版本已有项目，翻译成语义哨兵交由应用层给出可执行提示，
@@ -77,7 +180,7 @@ func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project 
 			return err
 		}
 		for _, item := range items {
-			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
+			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
@@ -98,7 +201,10 @@ func (r *Repository) SyncContractStampStatus(ctx context.Context, project domain
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		return createEvent(tx, event)
+		if err := createEvent(tx, event); err != nil {
+			return err
+		}
+		return createNotificationOutbox(tx, event)
 	})
 }
 
@@ -138,7 +244,10 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 				return err
 			}
 		}
-		return createEvent(tx, event)
+		if err := createEvent(tx, event); err != nil {
+			return err
+		}
+		return createNotificationOutbox(tx, event)
 	})
 }
 
@@ -253,12 +362,30 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		}
 		current := reportPhaseRank(item.ReportStatus)
 		next := reportPhaseRank(phase)
-		if next <= current {
+		if next != current+1 {
 			return application.ErrValidation
+		}
+		revision, err := lockReportRevision(tx, item)
+		if err != nil {
+			return err
+		}
+		if revision.ValidityStatus != "ACTIVE" || reportPhaseRank(revision.Status) != current {
+			return application.ErrConflict
+		}
+		if err := advanceReportRevision(tx, &revision, phase, event); err != nil {
+			return err
 		}
 		updates["report_status"] = phase
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
+		switch phase {
+		case "COMPILING":
+			updates["report_prepared_by"] = event.ActorUserID
+		case "REVIEWED":
+			updates["report_reviewed_by"] = event.ActorUserID
+		case "ISSUED":
+			updates["report_issued_by"] = event.ActorUserID
+		}
 	case application.EventEquipmentReturned:
 		// 设备归还只能作用于已进入交付的服务项：待确认/待复核/待分配还没有设备清单可还，
 		// 已终止是终态，允许事后归还等于让终态数据可被改写。
@@ -316,8 +443,14 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if item.Status != "现场实施完成" || (item.ReportStatus != "ISSUED" && item.ReportStatus != "ARCHIVED") {
 			return application.ErrValidation
 		}
-		updates["report_status"] = "COMPILING"
+		if err := invalidateAndCreateReportRevision(tx, item, event); err != nil {
+			return err
+		}
+		updates["report_status"] = "NONE"
 		updates["report_revision"] = item.ReportRevision + 1
+		updates["report_prepared_by"] = ""
+		updates["report_reviewed_by"] = ""
+		updates["report_issued_by"] = ""
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
 	case application.EventFieldRecordSubmitted:
@@ -328,18 +461,27 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 		updates["status"] = "实施中"
+		if err := persistEvidenceFiles(tx, item, event, "FIELD"); err != nil {
+			return err
+		}
 	case application.EventFieldCompleted:
 		// 按服务项确认现场完成：先做完的项不必等项目里最后一个动作"顺带"完成。
 		if item.Status != "实施中" {
 			return application.ErrValidation
 		}
 		updates["status"] = "现场实施完成"
-		updates["report_status"] = "COMPILING"
+		updates["report_status"] = "NONE"
+		if err := ensureReportRevision(tx, item, event.CreatedAt); err != nil {
+			return err
+		}
 	case application.EventDeviationReported:
 		if item.Status != "实施中" {
 			return application.ErrValidation
 		}
 		updates["status"] = "异常处理中"
+		if err := persistEvidenceFiles(tx, item, event, "DEVIATION"); err != nil {
+			return err
+		}
 	case application.EventDeviationReviewed:
 		if item.Status != "异常处理中" {
 			return application.ErrValidation
@@ -419,15 +561,7 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		if err := tx.Where("tenant_id=? AND project_id=?", project.TenantID, project.ID).Find(&oldItems).Error; err != nil {
 			return err
 		}
-		oldIDs := make([]string, 0, len(oldItems))
-		for _, old := range oldItems {
-			oldIDs = append(oldIDs, old.ID)
-		}
-		if len(oldIDs) > 0 {
-			if err := tx.Where("tenant_id=? AND service_item_id IN ?", project.TenantID, oldIDs).Delete(&implPlanRecord{}).Error; err != nil {
-				return err
-			}
-		}
+		// 实施计划和交付事件属于旧服务项的历史证据，随服务项归档保留，不做物理删除。
 		if err := tx.Where("tenant_id=? AND project_id=?", project.TenantID, project.ID).Delete(&serviceItemRecord{}).Error; err != nil {
 			return err
 		}
@@ -444,7 +578,7 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 			if strings.TrimSpace(item.ID) == "" {
 				item.ID = serviceItemIDFor(project.ID, maxSequence+index+1)
 			}
-			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &event.CreatedAt, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
+			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &event.CreatedAt, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
@@ -872,6 +1006,185 @@ func reportPhaseRank(phase string) int {
 	default:
 		return 0
 	}
+}
+
+func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) error {
+	var count int64
+	if err := tx.Model(&reportRevisionRecord{}).
+		Where("tenant_id=? AND service_item_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	status := strings.ToUpper(strings.TrimSpace(item.ReportStatus))
+	if reportPhaseRank(status) == 0 {
+		status = "NONE"
+	}
+	return tx.Create(&reportRevisionRecord{
+		TenantID: item.TenantID, ServiceItemID: item.ID, Revision: item.ReportRevision,
+		Status: status, ValidityStatus: "ACTIVE", CreatedAt: now, UpdatedAt: now,
+	}).Error
+}
+
+func (r *Repository) ListReportRevisions(ctx context.Context, tenantID, itemID string) ([]domain.ReportRevision, error) {
+	var rows []reportRevisionRecord
+	if err := r.db.WithContext(ctx).Where("tenant_id=? AND service_item_id=?", tenantID, itemID).
+		Order("revision DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	items := make([]domain.ReportRevision, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, domain.ReportRevision{
+			ID: row.ID, ServiceItemID: row.ServiceItemID, Revision: row.Revision,
+			Status: row.Status, ValidityStatus: row.ValidityStatus,
+			CorrectionRequestID: row.CorrectionRequestID, CorrectionReason: row.CorrectionReason,
+			FileID: row.FileID, FileName: row.FileName, FileMIME: row.FileMIME,
+			FileSize: row.FileSize, FileSHA256: row.FileSHA256,
+			PreparedBy: row.PreparedBy, PreparedAt: formatOptionalTime(row.PreparedAt),
+			ReviewedBy: row.ReviewedBy, ReviewedAt: formatOptionalTime(row.ReviewedAt),
+			IssuedBy: row.IssuedBy, IssuedAt: formatOptionalTime(row.IssuedAt),
+			ArchivedBy: row.ArchivedBy, ArchivedAt: formatOptionalTime(row.ArchivedAt),
+			InvalidatedBy: row.InvalidatedBy, InvalidatedAt: formatOptionalTime(row.InvalidatedAt),
+			CreatedAt: row.CreatedAt.UTC().Format(time.RFC3339), UpdatedAt: row.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return items, nil
+}
+
+func (r *Repository) RegisterReportArtifact(ctx context.Context, tenantID, itemID string, revision uint64, input domain.ReportArtifactInput, actor string, now time.Time) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var item serviceItemRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND id=?", tenantID, itemID).Take(&item).Error; err != nil {
+			return mapNotFound(err)
+		}
+		if item.ReportRevision != revision || (item.ReportStatus != "COMPILING" && item.ReportStatus != "NONE") {
+			return application.PreconditionError("只能为当前处于编制阶段的报告版本登记文件")
+		}
+		if err := ensureReportRevision(tx, &item, now); err != nil {
+			return err
+		}
+		result := tx.Model(&reportRevisionRecord{}).Where("tenant_id=? AND service_item_id=? AND revision=? AND validity_status='ACTIVE'", tenantID, itemID, revision).
+			Updates(map[string]any{"file_id": input.FileID, "file_name": input.FileName, "file_mime": input.MIME, "file_size": input.Size, "file_sha256": input.SHA256, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return application.ErrConflict
+		}
+		return nil
+	})
+}
+
+func persistEvidenceFiles(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent, kind string) error {
+	raw, ok := event.Payload["evidence_files"]
+	if !ok || raw == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	var files []domain.ReportArtifactInput
+	if err = json.Unmarshal(encoded, &files); err != nil {
+		return application.ErrValidation
+	}
+	for _, file := range files {
+		record := evidenceFileRecord{
+			TenantID: item.TenantID, ServiceItemID: item.ID, EvidenceKind: kind,
+			FileID: file.FileID, FileName: file.FileName, FileMIME: file.MIME,
+			FileSize: file.Size, FileSHA256: file.SHA256,
+			CreatedBy: event.ActorUserID, CreatedAt: event.CreatedAt,
+		}
+		if err = tx.Create(&record).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func lockReportRevision(tx *gorm.DB, item *serviceItemRecord) (reportRevisionRecord, error) {
+	if err := ensureReportRevision(tx, item, time.Now().UTC()); err != nil {
+		return reportRevisionRecord{}, err
+	}
+	var revision reportRevisionRecord
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("tenant_id=? AND service_item_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
+		Take(&revision).Error
+	return revision, err
+}
+
+func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase string, event domain.DeliveryEvent) error {
+	actor := strings.TrimSpace(event.ActorUserID)
+	if actor == "" {
+		return application.ErrValidation
+	}
+	updates := map[string]any{"status": phase, "updated_at": event.CreatedAt}
+	switch phase {
+	case "COMPILING":
+		updates["prepared_by"], updates["prepared_at"] = actor, event.CreatedAt
+	case "REVIEWED":
+		if revision.PreparedBy == "" || actor == revision.PreparedBy {
+			return application.PreconditionError("报告审核人与编制人必须是不同人员")
+		}
+		if strings.TrimSpace(revision.FileID) == "" || strings.TrimSpace(revision.FileSHA256) == "" {
+			return application.PreconditionError("请先上传并登记当前报告版本文件，再提交审核")
+		}
+		updates["reviewed_by"], updates["reviewed_at"] = actor, event.CreatedAt
+	case "ISSUED":
+		if revision.ReviewedBy == "" || actor == revision.PreparedBy || actor == revision.ReviewedBy {
+			return application.PreconditionError("报告签发人必须与编制人、审核人不同")
+		}
+		updates["issued_by"], updates["issued_at"] = actor, event.CreatedAt
+	case "ARCHIVED":
+		if revision.IssuedBy == "" {
+			return application.PreconditionError("报告尚未完成签发，不能归档")
+		}
+		updates["archived_by"], updates["archived_at"] = actor, event.CreatedAt
+	default:
+		return application.ErrValidation
+	}
+	result := tx.Model(&reportRevisionRecord{}).
+		Where("id=? AND status=? AND validity_status='ACTIVE'", revision.ID, revision.Status).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+func invalidateAndCreateReportRevision(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	current, err := lockReportRevision(tx, item)
+	if err != nil {
+		return err
+	}
+	if current.ValidityStatus != "ACTIVE" {
+		return application.ErrConflict
+	}
+	result := tx.Model(&reportRevisionRecord{}).Where("id=? AND validity_status='ACTIVE'", current.ID).
+		Updates(map[string]any{"validity_status": "VOID", "invalidated_by": event.ActorUserID, "invalidated_at": event.CreatedAt, "updated_at": event.CreatedAt})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return tx.Create(&reportRevisionRecord{
+		TenantID: item.TenantID, ServiceItemID: item.ID, Revision: item.ReportRevision + 1,
+		Status: "NONE", ValidityStatus: "ACTIVE", CorrectionRequestID: stringValue(event.Payload, "request_id"),
+		CorrectionReason: stringValue(event.Payload, "reason"), CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
+	}).Error
 }
 func jsonValue(v any) []byte { b, _ := json.Marshal(v); return b }
 func stringValue(values map[string]any, key string) string {

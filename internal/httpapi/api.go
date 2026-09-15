@@ -113,6 +113,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
 	api.POST("/service-items/:id/field-complete", require("project.field.complete"), h.completeServiceItemField)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
+	api.GET("/service-items/:id/report-revisions", require("project.read"), h.listReportRevisions)
+	api.POST("/service-items/:id/evidence", requireAny("project.field.execute", "project.deviation.report", "project.report.prepare"), h.uploadEvidence)
+	api.PUT("/service-items/:id/report-revisions/:revision/artifact", require("project.report.prepare"), h.registerReportArtifact)
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
 	// （团队负责人 / 项目经理 / 工程师 / 设备 / 能力码），参与项目工作的角色都需要渲染
 	// 这些表单，而分配、指派、维护等写操作仍由各自的 assign/manage 权限单独把守。
@@ -176,7 +179,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 路由层只做粗粒度放行：具体阶段权限（编制/审核/签发用 project.report.manage，
 	// 归档用 project.report.archive）由应用层 reportPhasePermission 判定。
 	// 缺 project.report.manage 会让质量管理员在路由层就被拦死，编制/审核/签发全部不可用。
-	api.POST("/service-items/:id/report-status", requireAny("project.field.complete", "project.report.archive", "project.report.manage"), h.updateReportStatus)
+	api.POST("/service-items/:id/report-status", requireAny("project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive"), h.updateReportStatus)
 	return router
 }
 
@@ -471,7 +474,7 @@ func navigationSections(roles []string) []string {
 		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director": {"dashboard", "monitoring", "projects", "qualifications", "methods", "exceptions", "standards", "reports"},
+		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports"},
 		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
 		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）：只给 sites
 		// 不给 qualifications 会让这份权限无处使用，资质维护只剩质量管理员一条路径。
@@ -544,9 +547,10 @@ func (h *Handler) createProject(c *gin.Context) {
 		return
 	}
 	if strings.TrimSpace(request.ContractID) == "" {
-		writeServiceError(c, application.ErrValidation)
+		writeServiceError(c, application.ValidationError("请选择已通过审批的合同"))
 		return
 	}
+	request.Project.ContractID = strings.TrimSpace(request.ContractID)
 	request.Project.ContractVersion = strings.TrimSpace(request.ContractVersion)
 	item, err := h.service.CreateProjectWithServiceItems(c.Request.Context(), principal(c), request.Project, request.ServiceItems)
 	if err != nil {
@@ -623,6 +627,49 @@ func (h *Handler) listServiceItems(c *gin.Context) {
 		return
 	}
 	writePage(c, items, page, pageSize)
+}
+
+func (h *Handler) listReportRevisions(c *gin.Context) {
+	items, err := h.service.ListReportRevisions(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
+func (h *Handler) registerReportArtifact(c *gin.Context) {
+	revision, err := strconv.ParseUint(c.Param("revision"), 10, 64)
+	if err != nil {
+		writeServiceError(c, application.ValidationError("报告版本号不正确"))
+		return
+	}
+	var input domain.ReportArtifactInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.RegisterReportArtifact(c.Request.Context(), principal(c), c.Param("id"), revision, input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "registered"})
+}
+
+func (h *Handler) uploadEvidence(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 21<<20)
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		writeServiceError(c, application.ValidationError("请选择证据文件"))
+		return
+	}
+	defer file.Close()
+	kind := c.PostForm("kind")
+	artifact, err := h.service.UploadEvidence(c.Request.Context(), principal(c), c.Param("id"), kind, c.GetHeader("X-Request-ID"), header.Filename, header.Header.Get("Content-Type"), file)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, artifact)
 }
 
 // listPersonnel 把基础平台负责人目录代理给服务项操作台，前端据此渲染人员下拉框，

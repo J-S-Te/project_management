@@ -110,7 +110,23 @@ func main() {
 		logger.Error("database schema is behind the application code; run project-migrate before serving traffic",
 			"pending_migrations", pendingMigrations, "count", len(pendingMigrations))
 	}
-	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Logger: logger}
+	var contracts platform.ApprovedContractVerifier
+	if cfg.ContractApprovalValidationEnabled {
+		contracts = platform.NewApprovedContractVerifier(cfg.PlatformBaseURL, cfg.ContractApprovalValidationURL, cfg.ContractApprovalValidationClientID, cfg.ContractApprovalValidationClientSecret, cfg.ContractApprovalValidationScope)
+		if contracts == nil {
+			logger.Error("contract approval validation is enabled but client configuration is incomplete")
+			os.Exit(1)
+		}
+	}
+	var evidenceFiles platform.EvidenceFileGateway
+	if cfg.FileGatewayEnabled {
+		evidenceFiles = platform.NewEvidenceFileGateway(cfg.PlatformBaseURL, cfg.FileGatewayBaseURL, cfg.FileGatewayApplicationID, cfg.FileGatewayClientID, cfg.FileGatewayClientSecret)
+		if evidenceFiles == nil {
+			logger.Error("file gateway is enabled but client configuration is incomplete")
+			os.Exit(1)
+		}
+	}
+	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, Logger: logger}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		PendingMigrations: pendingMigrations,
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
