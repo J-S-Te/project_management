@@ -347,6 +347,27 @@ func TestLoginOmitsEmptyIdentityProviderHint(t *testing.T) {
 	}
 }
 
+func TestLoginForwardsForcedLoginPrompt(t *testing.T) {
+	codec, err := newSecretCodec([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeOIDCStore{}
+	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", IdentityProviderHint: "basic-platform"}, store: store, codec: codec, now: time.Now, oauth: oauth2.Config{ClientID: "project_management-dev-web", RedirectURL: "http://localhost/callback", Endpoint: oauth2.Endpoint{AuthURL: "http://keycloak/authorize"}}}
+	response := httptest.NewRecorder()
+	auth.Login(response, httptest.NewRequest(http.MethodGet, "/auth/login?prompt=login", nil))
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("prompt"); got != "login" {
+		t.Fatalf("prompt = %q, want login", got)
+	}
+	if got := location.Query().Get("kc_idp_hint"); got != "basic-platform" {
+		t.Fatalf("kc_idp_hint = %q, want basic-platform", got)
+	}
+}
+
 func TestLogoutUsesDiscoveredEndSessionEndpoint(t *testing.T) {
 	codec, err := newSecretCodec([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {

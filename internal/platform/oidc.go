@@ -196,6 +196,9 @@ func (a *OIDCAuthenticator) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authOptions := []oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("prompt")), "login") {
+		authOptions = append(authOptions, oauth2.SetAuthURLParam("prompt", "login"))
+	}
 	if hint := strings.TrimSpace(a.options.IdentityProviderHint); hint != "" {
 		authOptions = append(authOptions, oauth2.SetAuthURLParam("kc_idp_hint", hint))
 	}
