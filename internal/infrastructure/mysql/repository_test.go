@@ -22,6 +22,27 @@ func TestCanStartPreparationAllowsReentryAfterFieldRollback(t *testing.T) {
 	}
 }
 
+func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testing.T) {
+	references := []platform.ApprovedContract{
+		{ID: "C-1", Number: "HT-1", Version: 4},
+		{ID: "C-2", Number: "HT-2", Version: 4},
+		{ID: "C-3", Number: "HT-3", Version: 4},
+		{ID: "C-4", Number: "HT-4", Version: 4},
+		{ID: "C-5", Number: "HT-5", Version: 4},
+	}
+	records := []projectRecord{
+		{ID: "PJ-current", ContractID: "C-1", Contract: "HT-1", ContractVersion: "4"},
+		// 生产历史记录把合同编号写入 contract_id；必须通过合同号和版本兼容识别。
+		{ID: "PJ-legacy", ContractID: "HT-2", Contract: "HT-2", ContractVersion: "4"},
+		{ID: "PJ-old-version", ContractID: "HT-3", Contract: "HT-3", ContractVersion: "3"},
+		{ID: "PJ-unrelated", ContractID: "E2E-1", Contract: "E2E-1"},
+	}
+
+	if got := countMatchedContractReferences(records, references); got != 2 {
+		t.Fatalf("matched references=%d, want 2", got)
+	}
+}
+
 func dryRunDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(mysql.New(mysql.Config{DSN: "project:secret@tcp(127.0.0.1:3306)/project_management", SkipInitializeWithVersion: true}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})

@@ -577,19 +577,49 @@ func (r *Repository) CountExistingContractReferences(ctx context.Context, tenant
 		return 0, nil
 	}
 	ids := make([]string, 0, len(references))
-	legacyKeys := make([]string, 0, len(references))
+	numbers := make([]string, 0, len(references))
 	for _, reference := range references {
 		if id := strings.TrimSpace(reference.ID); id != "" {
 			ids = append(ids, id)
 		}
-		legacyKeys = append(legacyKeys, strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10))
+		if number := strings.TrimSpace(reference.Number); number != "" {
+			numbers = append(numbers, number)
+		}
 	}
-	var count int64
+	var records []projectRecord
 	err := r.db.WithContext(ctx).Model(&projectRecord{}).
+		Select("id", "contract", "contract_id", "contract_version").
 		Where("tenant_id = ?", tenantID).
-		Where("contract_id IN ? OR CONCAT(contract, ?) IN ?", ids, "\x1f", legacyKeys).
-		Distinct("id").Count(&count).Error
-	return int(count), err
+		Where("contract_id IN ? OR contract IN ?", ids, numbers).
+		Find(&records).Error
+	if err != nil {
+		return 0, err
+	}
+	return countMatchedContractReferences(records, references), nil
+}
+
+func countMatchedContractReferences(records []projectRecord, references []platform.ApprovedContract) int {
+	referenceByID := make(map[string]string, len(references))
+	referenceByLegacyKey := make(map[string]string, len(references))
+	for _, reference := range references {
+		id := strings.TrimSpace(reference.ID)
+		if id == "" {
+			continue
+		}
+		referenceByID[id] = id
+		referenceByLegacyKey[strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10)] = id
+	}
+	matched := make(map[string]bool, len(references))
+	for _, record := range records {
+		if id := referenceByID[strings.TrimSpace(record.ContractID)]; id != "" {
+			matched[id] = true
+			continue
+		}
+		if id := referenceByLegacyKey[strings.TrimSpace(record.Contract)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; id != "" {
+			matched[id] = true
+		}
+	}
+	return len(matched)
 }
 
 func unique(values []string) map[string]bool {
