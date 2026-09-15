@@ -14,8 +14,21 @@ import (
 
 type approvedContractVerifierStub struct{}
 
+func (approvedContractVerifierStub) List(_ context.Context, _ int) ([]platform.ApprovedContract, error) {
+	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
+}
+
 func (approvedContractVerifierStub) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
+}
+
+type failingApprovedContractVerifier struct{}
+
+func (failingApprovedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return nil, errors.New("contract service unavailable")
+}
+func (failingApprovedContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
+	return platform.ApprovedContract{}, errors.New("contract service unavailable")
 }
 
 type scopeRepository struct {
@@ -114,6 +127,31 @@ func TestSelfCreateStoresStableOwnerIdentity(t *testing.T) {
 	}
 	if created.OwnerIdentityID != "identity-1" || repository.created.OwnerIdentityID != "identity-1" {
 		t.Fatalf("created=%+v stored=%+v", created, repository.created)
+	}
+}
+
+func TestBusinessAdminListsApprovedContractsThroughBackendIntegration(t *testing.T) {
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	items, err := service.ListApprovedContracts(context.Background(), principal, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "C-1" || !items[0].ApprovalPassed {
+		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestApprovedContractListRequiresCreationRoleAndReportsDependencyFailure(t *testing.T) {
+	unauthorized := principalWith("project.create", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	if _, err := service.ListApprovedContracts(context.Background(), unauthorized, 50); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unauthorized error=%v", err)
+	}
+	admin := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	service.Contracts = failingApprovedContractVerifier{}
+	if _, err := service.ListApprovedContracts(context.Background(), admin, 50); !errors.Is(err, ErrContractUnavailable) {
+		t.Fatalf("dependency error=%v", err)
 	}
 }
 

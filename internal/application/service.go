@@ -32,6 +32,9 @@ var (
 	ErrServiceTimeout = errors.New("service processing timeout")
 	// ErrPersonnelUnavailable 表示项目子系统尚未开通基础平台人员目录集成。
 	ErrPersonnelUnavailable = errors.New("platform personnel directory is unavailable")
+	// ErrContractUnavailable 表示项目子系统无法通过机器身份读取合同审批结果。
+	// 它与浏览器会话无关，应以 503 暴露为可重试的子系统依赖故障。
+	ErrContractUnavailable = errors.New("approved contract service is unavailable")
 	// ErrPrecondition 表示请求本身合法，但服务项尚未满足该操作的前置状态，
 	// 例如未完成执行指派、能力校验未通过、特殊方法未复核。它与 ErrValidation
 	// 必须区分：前者要告诉用户"先去哪一步"，后者才提示"检查输入"。
@@ -139,6 +142,31 @@ func (s *Service) GetProject(ctx context.Context, p platform.Principal, id strin
 		return domain.Project{}, err
 	}
 	return masked[0], nil
+}
+
+// ListApprovedContracts 通过项目后端的机器身份读取当前租户已审批合同。
+// 浏览器只持有项目系统会话，不需要也不应跨子系统复用合同系统 Cookie。
+func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principal, limit int) ([]platform.ApprovedContract, error) {
+	if !mayCreateProject(p) {
+		return nil, ErrForbidden
+	}
+	if _, err := authorizeProjectScope(p, "project.create"); err != nil {
+		return nil, err
+	}
+	if s.Contracts == nil {
+		return nil, ErrContractUnavailable
+	}
+	items, err := s.Contracts.List(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+	}
+	approved := make([]platform.ApprovedContract, 0, len(items))
+	for _, item := range items {
+		if item.ID != "" && item.ApprovalPassed {
+			approved = append(approved, item)
+		}
+	}
+	return approved, nil
 }
 func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.Dashboard, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
@@ -399,11 +427,11 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		return input, ValidationError("项目至少需要一个服务项")
 	}
 	if s.Contracts == nil {
-		return input, PreconditionError("合同审批校验服务未配置，暂不能创建项目")
+		return input, ErrContractUnavailable
 	}
 	approved, approvalErr := s.Contracts.Get(ctx, input.ContractID)
 	if approvalErr != nil {
-		return input, PreconditionError("无法确认合同审批状态，请稍后重试")
+		return input, fmt.Errorf("%w: %v", ErrContractUnavailable, approvalErr)
 	}
 	if !approved.ApprovalPassed {
 		return input, PreconditionError("所选合同尚未通过审批")

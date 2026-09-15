@@ -32,6 +32,10 @@ type integrationVerifier struct {
 
 type approvedContractVerifier struct{}
 
+func (approvedContractVerifier) List(_ context.Context, _ int) ([]platform.ApprovedContract, error) {
+	return []platform.ApprovedContract{{ID: "approved-1", Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
+}
+
 func (approvedContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
 }
@@ -286,6 +290,21 @@ func TestProjectCreationAndRead(t *testing.T) {
 	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestApprovedContractsUseProjectSessionAndCreationPermission(t *testing.T) {
+	allowed := perform(router(t, map[string]bool{"project.create": true}, nil), http.MethodGet, "/api/v1/approved-contracts?limit=200", "")
+	if allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"contract_number":"HT-1"`) {
+		t.Fatalf("allowed status=%d body=%s", allowed.Code, allowed.Body.String())
+	}
+	denied := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodGet, "/api/v1/approved-contracts", "")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("denied status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	invalid := perform(router(t, map[string]bool{"project.create": true}, nil), http.MethodGet, "/api/v1/approved-contracts?limit=201", "")
+	if invalid.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 }
 
