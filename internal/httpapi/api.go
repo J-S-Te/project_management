@@ -459,7 +459,7 @@ func (h *Handler) roleCatalog(c *gin.Context) {
 var allNavigationSections = []string{
 	"dashboard", "monitoring",
 	"projects", "decomposition",
-	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "sites", "assignments", "methods",
+	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
 }
@@ -477,10 +477,10 @@ func navigationSections(roles []string) []string {
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
 		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports"},
-		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "sites", "assignments", "implementation", "reports"},
-		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）：只给 sites
-		// 不给 qualifications 会让这份权限无处使用，资质维护只剩质量管理员一条路径。
-		"device_admin": {"dashboard", "projects", "equipment", "sites", "qualifications"},
+		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
+		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）；
+		// qualifications 仍是这份权限对应的业务维护入口。
+		"device_admin": {"dashboard", "projects", "equipment", "qualifications"},
 		// 治理类配置（含检测标准、资质/能力编码）由 project_rule.manage 把守：
 		// 质量管理员必须能看到它们，否则必检能力码没有可维护的入口。
 		"quality_manager": {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "standards", "capability-codes", "reports"},

@@ -563,9 +563,9 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	return input, errors.New("project repository does not support atomic service-item creation")
 }
 
-// resolveActiveSite turns the display name into a stable site-code relationship. Legacy callers
-// may omit the code only while no site ledger is available; once a code is supplied it must name
-// an active row in the same tenant and the persisted display name is taken from that row.
+// resolveActiveSite keeps implementation locations as free text for current clients. Legacy
+// callers may still send a site code; when they do, preserve the historical relationship only
+// after validating that it names an active row in the same tenant.
 func (s *Service) resolveActiveSite(ctx context.Context, tenantID, name, code string) (string, string, error) {
 	name, code = strings.TrimSpace(name), strings.TrimSpace(code)
 	if code == "" {
