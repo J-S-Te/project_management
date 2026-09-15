@@ -620,7 +620,10 @@ func TestAssignExecutionTeamCannotShrinkPersistedRequiredCodes(t *testing.T) {
 		Permissions: map[string]bool{"project.execution.assign": true},
 		DataScopes:  []platform.DataScope{{RoleCode: "team_lead", ScopeType: "APPLICATION"}},
 	}
-	service := Service{Repo: repository}
+	service := Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleProjectManager: {"PM-1"},
+		assignmentRoleEngineer:       {"ENG-1"},
+	}}}
 
 	result, err := service.AssignExecutionTeam(context.Background(), principal, "SI-1", domain.ExecutionAssignmentInput{
 		ProjectManagerID: "PM-1", EngineerIDs: []string{"ENG-1"}, RequiredCodes: []string{"extra"},
@@ -650,7 +653,11 @@ func TestAssignmentsRequireQualifiedPeopleAndStorePlatformUserIDs(t *testing.T) 
 		{ResourceType: "PERSON", ResourceID: "P-ENGINEER", UserID: "user-engineer", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
 	}
 	principal := platform.Principal{TenantID: "t1", IdentityID: "admin-identity", UserID: "admin-user", Roles: []string{"business_admin"}, Permissions: map[string]bool{"project.team.assign": true, "project.execution.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
-	service := Service{Repo: repository}
+	service := Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleTeamLead:       {"user-lead"},
+		assignmentRoleProjectManager: {"user-manager"},
+		assignmentRoleEngineer:       {"user-engineer"},
+	}}}
 	if err := service.AssignTeam(context.Background(), principal, "SI-1", domain.TeamAssignmentInput{TeamLeadID: "P-LEAD", ExpectedVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -672,6 +679,25 @@ func TestAssignmentsRequireQualifiedPeopleAndStorePlatformUserIDs(t *testing.T) 
 	repository.foundCapabilities = nil
 	if err := service.AssignTeam(context.Background(), principal, "SI-1", domain.TeamAssignmentInput{TeamLeadID: "unknown"}); !errors.Is(err, ErrPrecondition) {
 		t.Fatalf("unqualified team lead err=%v", err)
+	}
+}
+
+func TestAssignmentsRejectQualifiedPeopleWithoutRequiredRole(t *testing.T) {
+	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
+		item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配"},
+	}, foundCapabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-LEAD", UserID: "user-qualified", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+	}}
+	principal := platform.Principal{TenantID: "t1", UserID: "admin-user", Permissions: map[string]bool{"project.team.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	service := Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleTeamLead: {"another-user"},
+	}}}
+	err := service.AssignTeam(context.Background(), principal, "SI-1", domain.TeamAssignmentInput{TeamLeadID: "P-LEAD"})
+	if !errors.Is(err, ErrPrecondition) || !strings.Contains(err.Error(), "团队负责人角色") {
+		t.Fatalf("role mismatch error=%v, want team-lead precondition", err)
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("events=%d, role mismatch must not be persisted", len(repository.events))
 	}
 }
 

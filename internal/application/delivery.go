@@ -55,6 +55,11 @@ const (
 	// EventWarningTriggered 是配置驱动的派生事件：任务分配/执行团队指派产生
 	// 能力冲突且有启用的「冲突预警规则」时才追加。
 	EventWarningTriggered = "WARNING_TRIGGERED"
+
+	assignmentRoleTeamLead       = "team_lead"
+	assignmentRoleProjectManager = "project_manager"
+	assignmentRoleEngineer       = "engineer"
+	assignmentRoleDirectorySize  = 50
 )
 
 type DeliveryRepository interface {
@@ -520,6 +525,13 @@ func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID s
 	if !ok {
 		return PreconditionError("所选团队负责人不在有效人员资质库中，请先维护人员资质")
 	}
+	allowed, err := s.assignmentRoleUserIDs(ctx, assignmentRoleTeamLead)
+	if err != nil {
+		return err
+	}
+	if _, ok := allowed[canonical]; !ok {
+		return PreconditionError("所选人员未被授予团队负责人角色，请先维护角色权限")
+	}
 	input.TeamLeadID = canonical
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID}))
 }
@@ -655,6 +667,22 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 		canonicalEngineers = append(canonicalEngineers, canonical)
 	}
 	input.EngineerIDs = canonicalEngineers
+	managerIDs, err := s.assignmentRoleUserIDs(ctx, assignmentRoleProjectManager)
+	if err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	if _, ok := managerIDs[input.ProjectManagerID]; !ok {
+		return domain.ConflictCheckResult{}, PreconditionError("所选人员未被授予项目经理角色，请先维护角色权限")
+	}
+	engineerIDs, err := s.assignmentRoleUserIDs(ctx, assignmentRoleEngineer)
+	if err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	for _, engineerID := range input.EngineerIDs {
+		if _, ok := engineerIDs[engineerID]; !ok {
+			return domain.ConflictCheckResult{}, PreconditionError("所选人员未被授予工程师角色，请先维护角色权限")
+		}
+	}
 	result := checkCapabilities(required, ids, caps)
 	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
 	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload)); err != nil {
@@ -1863,17 +1891,52 @@ func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, ty
 	return repo.ListCapabilities(ctx, p.TenantID, typ)
 }
 
-// ListQualifiedPersonnel is the only assignment picker source. It deliberately
-// reads the project qualification ledger instead of enumerating the platform
-// role directory: a platform account is not assignable until an active,
-// identity-verified PERSON record exists. Personnel validity dates are not an
-// assignment constraint; only equipment calibration uses a date window.
-func (s *Service) ListQualifiedPersonnel(ctx context.Context, p platform.Principal, keyword string, page, pageSize int) (domain.QualifiedPersonnelPage, error) {
+// assignmentRoleUserIDs 从基础平台读取指定项目角色的有效授权用户。候选列表与提交校验
+// 共用该口径，避免调用方绕过前端直接提交“有资质但没有对应职责权限”的人员。
+func (s *Service) assignmentRoleUserIDs(ctx context.Context, roleCode string) (map[string]struct{}, error) {
+	roleCode = strings.ToLower(strings.TrimSpace(roleCode))
+	switch roleCode {
+	case assignmentRoleTeamLead, assignmentRoleProjectManager, assignmentRoleEngineer:
+	default:
+		return nil, ValidationError("人员职责必须是团队负责人、项目经理或工程师")
+	}
+	if s.Personnel == nil {
+		return nil, ErrPersonnelUnavailable
+	}
+	allowed := map[string]struct{}{}
+	for page := 1; ; page++ {
+		result, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{
+			RoleCodes: []string{roleCode}, Page: page, PageSize: assignmentRoleDirectorySize,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrPersonnelUnavailable, err)
+		}
+		for _, person := range result.Items {
+			if userID := strings.TrimSpace(person.UserID); userID != "" {
+				allowed[userID] = struct{}{}
+			}
+		}
+		if len(result.Items) == 0 || result.Total <= int64(page*assignmentRoleDirectorySize) {
+			break
+		}
+	}
+	return allowed, nil
+}
+
+// ListQualifiedPersonnel is the only assignment picker source. A person must
+// simultaneously have an active identity-linked PERSON qualification record
+// and the requested effective platform role. Personnel dates do not constrain
+// assignment; only equipment calibration uses a validity window.
+func (s *Service) ListQualifiedPersonnel(ctx context.Context, p platform.Principal, roleCode, keyword string, page, pageSize int) (domain.QualifiedPersonnelPage, error) {
 	result := domain.QualifiedPersonnelPage{Items: []domain.QualifiedPersonnel{}}
 	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
 		return result, ErrForbidden
 	}
 	repo, err := s.deliveryRepo()
+	if err != nil {
+		return result, err
+	}
+	allowed, err := s.assignmentRoleUserIDs(ctx, roleCode)
 	if err != nil {
 		return result, err
 	}
@@ -1890,14 +1953,18 @@ func (s *Service) ListQualifiedPersonnel(ctx context.Context, p platform.Princip
 	wanted := strings.ToLower(strings.TrimSpace(keyword))
 	eligible := make([]domain.QualifiedPersonnel, 0, len(items))
 	for _, item := range items {
-		if item.Status != "ACTIVE" || item.IdentityStatus != domain.IdentityStatusActive || strings.TrimSpace(item.UserID) == "" {
+		userID := strings.TrimSpace(item.UserID)
+		if item.Status != "ACTIVE" || item.IdentityStatus != domain.IdentityStatusActive || userID == "" {
+			continue
+		}
+		if _, ok := allowed[userID]; !ok {
 			continue
 		}
 		searchable := strings.ToLower(item.ResourceID + " " + item.ResourceName + " " + strings.Join(item.Codes, " "))
 		if wanted != "" && !strings.Contains(searchable, wanted) {
 			continue
 		}
-		eligible = append(eligible, domain.QualifiedPersonnel{UserID: strings.TrimSpace(item.UserID), ResourceID: item.ResourceID, DisplayName: item.ResourceName, Codes: append([]string{}, item.Codes...), IdentityStatus: item.IdentityStatus})
+		eligible = append(eligible, domain.QualifiedPersonnel{UserID: userID, ResourceID: item.ResourceID, DisplayName: item.ResourceName, Codes: append([]string{}, item.Codes...), IdentityStatus: item.IdentityStatus})
 	}
 	sort.SliceStable(eligible, func(i, j int) bool {
 		if eligible[i].DisplayName == eligible[j].DisplayName {
