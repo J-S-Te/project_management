@@ -102,6 +102,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/auth/me", h.me)
 	api.GET("/navigation", require("project.read"), h.navigation)
 	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
+	api.GET("/rule-configuration-catalog", require("project.read"), h.ruleConfigurationCatalog)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
@@ -453,6 +454,16 @@ func (h *Handler) roleCatalog(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, map[string]any{"roles": roles, "catalog_version": principal(c).CatalogVersion})
+}
+
+// ruleConfigurationCatalog 下发规则运行时真正支持的事件和服务项状态。
+// 选项与校验共用 application 包中的同一目录，避免前端下拉与后端执行口径漂移。
+func (h *Handler) ruleConfigurationCatalog(c *gin.Context) {
+	automationTriggers, slaStatuses := application.RuleConfigurationCatalog()
+	writeData(c, http.StatusOK, map[string]any{
+		"automation_triggers": automationTriggers,
+		"sla_statuses":        slaStatuses,
+	})
 }
 
 // allNavigationSections 是本子系统前端已实现的全部工作区栏目，顺序与页面分组一致。

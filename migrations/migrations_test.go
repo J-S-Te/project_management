@@ -169,6 +169,31 @@ func TestSplitRuleConfigMigration(t *testing.T) {
 	}
 }
 
+func TestRuleConfigurationConstraintMigrationPreservesHistoryAndPreventsActiveDuplicates(t *testing.T) {
+	body, err := Files.ReadFile("000023_rule_configuration_constraints.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"UPDATE pm_automation AS duplicate_rule",
+		"uq_pm_automation_active_condition",
+		"UPDATE pm_field_permission AS duplicate_rule",
+		"uq_pm_field_permission_active_condition",
+		"UPDATE pm_sla AS duplicate_rule",
+		"uq_pm_sla_active_status",
+		"GENERATED ALWAYS AS (CASE WHEN enabled = TRUE",
+		"duplicate_rule.updated_by = 'migration-000023'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("rule constraint migration missing %q", required)
+		}
+	}
+	if strings.Contains(strings.ToUpper(sql), "DELETE FROM") {
+		t.Fatal("duplicate rule migration must preserve historical rows instead of deleting them")
+	}
+}
+
 // 资质/能力编码使用独立的租户目录，并从存量能力档案回填，
 // 避免上线后旧编码因未手工重录而立即失效。
 func TestCapabilityCodeCatalogMigration(t *testing.T) {

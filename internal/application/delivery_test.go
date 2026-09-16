@@ -764,7 +764,7 @@ func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
 	principal := platform.Principal{TenantID: "t1", UserID: "u1"}
 
 	t.Run("enabled matching rule appends AUTOMATION_TRIGGERED", func(t *testing.T) {
-		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "通知技术总监"}}}
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}
 		service := Service{Repo: repo}
 		err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"}))
 		if err != nil {
@@ -778,8 +778,19 @@ func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
 			t.Fatalf("derived event lost context: %+v", triggered)
 		}
 		targets, _ := triggered.Payload["targets"].([]string)
-		if len(targets) != 1 || targets[0] != "通知技术总监" {
+		if len(targets) != 1 || targets[0] != "technical_director" {
 			t.Fatalf("derived event targets wrong: %+v", triggered.Payload)
+		}
+	})
+
+	t.Run("legacy free-text action target is ignored", func(t *testing.T) {
+		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: EventDeviationReported, Target: "创建整改工单"}}}
+		service := Service{Repo: repo}
+		if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventDeviationReported, nil)); err != nil {
+			t.Fatalf("applyEvent failed: %v", err)
+		}
+		if len(repo.events) != 1 {
+			t.Fatalf("invalid legacy target must not create a derived action: %+v", repo.events)
 		}
 	})
 
