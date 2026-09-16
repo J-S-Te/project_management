@@ -145,8 +145,8 @@ type Dashboard struct {
 	ProjectCount     int    `json:"project_count"`
 	InFlightProjects int    `json:"in_flight_projects"`
 	RiskProjects     int    `json:"risk_projects"`
-	// PendingProjectCreation is tenant-wide and shown only to roles allowed to
-	// create projects. Available=false means the contract dependency could not
+	// PendingProjectCreation is tenant-wide and shown only to project creators and
+	// technical directors. Available=false means the contract dependency could not
 	// be queried; zero remains a real, distinguishable business result.
 	PendingProjectCreation          int  `json:"pending_project_creation"`
 	PendingProjectCreationAvailable bool `json:"pending_project_creation_available"`

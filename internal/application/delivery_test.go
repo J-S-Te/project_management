@@ -960,12 +960,18 @@ func (stub *notificationStub) Publish(_ context.Context, event platform.Notifica
 
 // 自动化规则的 target 是应用角色码：命中后按角色解析出人员并投递站内信，
 // 而不是只写一条没人消费的派生事件。
-func TestAutomationNotificationResolvesRoleTargets(t *testing.T) {
+func TestAutomationNotificationResolvesMultipleRoleTargets(t *testing.T) {
 	notifications := &notificationStub{}
-	repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}
+	repo := &hookRepository{rules: []domain.Rule{
+		{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"},
+		{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "quality_manager"},
+	}}
 	service := &Service{
 		Repo: repo, Notifications: notifications,
-		Personnel: roleDirectoryStub{byRole: map[string][]string{"technical_director": {"u-lead", "u-lead2"}}},
+		Personnel: roleDirectoryStub{byRole: map[string][]string{
+			"technical_director": {"u-lead", "u-shared"},
+			"quality_manager":    {"u-quality", "u-shared"},
+		}},
 	}
 	principal := platform.Principal{TenantID: "t1", UserID: "u1"}
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"})); err != nil {
@@ -975,8 +981,8 @@ func TestAutomationNotificationResolvesRoleTargets(t *testing.T) {
 		t.Fatalf("expected one notification, got %+v", notifications.published)
 	}
 	event := notifications.published[0]
-	if len(event.Recipients) != 2 || event.Recipients[0] != "u-lead" {
-		t.Fatalf("recipients must come from the role directory: %+v", event.Recipients)
+	if len(event.Recipients) != 3 || event.Recipients[0] != "u-lead" || event.Recipients[2] != "u-quality" {
+		t.Fatalf("recipients must combine role directories and de-duplicate shared users: %+v", event.Recipients)
 	}
 	if event.EventType != EventAutomationTriggered || event.IdempotencyKey == "" {
 		t.Fatalf("notification payload = %+v", event)

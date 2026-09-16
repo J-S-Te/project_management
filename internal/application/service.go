@@ -187,7 +187,7 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 		s.Logger.Warn("unknown service item statuses detected",
 			"tenant_id", p.TenantID, "project_count", result.UnknownStatusItems)
 	}
-	if mayCreateProject(p) {
+	if mayViewPendingProjectCreation(p) {
 		s.populatePendingProjectCreation(ctx, p.TenantID, &result)
 	}
 	return result, nil
@@ -602,6 +602,19 @@ func mayCreateProject(p platform.Principal) bool {
 	for _, role := range p.Roles {
 		switch strings.TrimSpace(role) {
 		case "admin", "business_admin":
+			return true
+		}
+	}
+	return false
+}
+
+// mayViewPendingProjectCreation separates management visibility from the high-impact
+// project creation action. Technical directors need the tenant-wide backlog metric for
+// delivery governance, but must not gain project.create or the approved-contract picker.
+func mayViewPendingProjectCreation(p platform.Principal) bool {
+	for _, role := range p.Roles {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "admin", "business_admin", "technical_director":
 			return true
 		}
 	}

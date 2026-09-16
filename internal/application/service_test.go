@@ -178,6 +178,47 @@ func TestBusinessAdminDashboardCountsApprovedContractsWithoutProjects(t *testing
 	}
 }
 
+func TestTechnicalDirectorDashboardCanSeePendingProjectCreationWithoutCreatePermission(t *testing.T) {
+	repository := &scopeRepository{existingContractReferences: 3}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "director-1", UserID: "director-1",
+		Roles:       []string{"technical_director"},
+		Permissions: map[string]bool{"project.read": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "technical_director", ScopeType: "APPLICATION"}},
+	}
+
+	dashboard, err := service.Dashboard(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dashboard.PendingProjectCreationAvailable || dashboard.PendingProjectCreation != 2 {
+		t.Fatalf("dashboard=%+v, want 2 pending project creations", dashboard)
+	}
+	if mayCreateProject(principal) {
+		t.Fatal("technical director must not gain project creation permission from metric visibility")
+	}
+}
+
+func TestProjectManagerDashboardDoesNotQueryTenantWidePendingProjectCreation(t *testing.T) {
+	repository := &scopeRepository{existingContractReferences: 3}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "manager-1", UserID: "manager-1",
+		Roles:       []string{"project_manager"},
+		Permissions: map[string]bool{"project.read": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}},
+	}
+
+	dashboard, err := service.Dashboard(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.PendingProjectCreationAvailable || dashboard.PendingProjectCreation != 0 {
+		t.Fatalf("dashboard=%+v, project manager must not receive tenant-wide pending metric", dashboard)
+	}
+}
+
 func TestBusinessAdminDashboardKeepsProjectDataAvailableWhenContractCountFails(t *testing.T) {
 	service := &Service{Repo: &scopeRepository{}, Contracts: failingApprovedContractVerifier{}}
 	principal := platform.Principal{
