@@ -1239,6 +1239,29 @@ func TestQualifiedPersonnelEndpointUsesProjectCapabilityLedger(t *testing.T) {
 	}
 }
 
+func TestUpsertPersonCapabilityAcceptsLegacyEmptyOptionalDates(t *testing.T) {
+	repository := &repo{rules: []domain.Rule{{Kind: "capability-codes", Scope: "商用密码测评师", CheckType: "PERSON", Enabled: true}}}
+	directory := &recordingOwnerDirectoryStub{items: []platform.OwnerDirectoryUser{{UserID: "01M0BVT7HT076SDJT4T98MZQR0", DisplayName: "密评组长"}}}
+	service := &application.Service{Repo: repository, Personnel: directory}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "identity-1", UserID: "admin-1",
+		Permissions: map[string]bool{"project.resource.manage": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "quality_manager", ScopeType: "APPLICATION"}},
+	}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodPut, "/api/v1/capabilities", `{"resource_type":"PERSON","resource_id":"P-0003","resource_name":"密评组长","user_id":"01M0BVT7HT076SDJT4T98MZQR0","codes":["商用密码测评师"],"valid_from":"","valid_until":"","status":"ACTIVE","usage_scope":"ANY"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.capabilities) != 1 {
+		t.Fatalf("saved capabilities=%+v", repository.capabilities)
+	}
+	saved := repository.capabilities[0]
+	if !saved.ValidFrom.IsZero() || !saved.ValidUntil.IsZero() || saved.UserID != "01M0BVT7HT076SDJT4T98MZQR0" || saved.ResourceName != "密评组长" {
+		t.Fatalf("saved capability=%+v", saved)
+	}
+}
+
 type recordingOwnerDirectoryStub struct {
 	last  platform.OwnerDirectoryQuery
 	items []platform.OwnerDirectoryUser

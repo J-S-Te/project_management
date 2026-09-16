@@ -1060,12 +1060,58 @@ func (h *Handler) listCapabilities(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, items)
 }
+
+// capabilityUpsertRequest keeps optional dates as strings at the HTTP boundary.
+// Binding directly into time.Time rejects empty strings from older clients before
+// PERSON-specific normalization can intentionally discard those fields.
+type capabilityUpsertRequest struct {
+	ResourceType string   `json:"resource_type"`
+	ResourceID   string   `json:"resource_id"`
+	ResourceName string   `json:"resource_name"`
+	UserID       string   `json:"user_id"`
+	Codes        []string `json:"codes"`
+	ValidFrom    string   `json:"valid_from"`
+	ValidUntil   string   `json:"valid_until"`
+	Status       string   `json:"status"`
+	UsageScope   string   `json:"usage_scope"`
+}
+
+func (input capabilityUpsertRequest) capability() (domain.Capability, error) {
+	item := domain.Capability{
+		ResourceType: input.ResourceType,
+		ResourceID:   input.ResourceID,
+		ResourceName: input.ResourceName,
+		UserID:       input.UserID,
+		Codes:        input.Codes,
+		Status:       input.Status,
+		UsageScope:   input.UsageScope,
+	}
+	// 人员资质不受日期限制，旧客户端即使仍携带空日期也应被正常接受并忽略。
+	if strings.EqualFold(strings.TrimSpace(input.ResourceType), "EQUIPMENT") {
+		var err error
+		item.ValidFrom, err = parseFlexibleTime(input.ValidFrom)
+		if err != nil {
+			return item, application.ValidationError("检定开始时间格式不正确")
+		}
+		item.ValidUntil, err = parseFlexibleTime(input.ValidUntil)
+		if err != nil {
+			return item, application.ValidationError("检定到期时间格式不正确")
+		}
+	}
+	return item, nil
+}
+
 func (h *Handler) upsertCapability(c *gin.Context) {
-	var input domain.Capability
+	var input capabilityUpsertRequest
 	if !decode(c, &input) {
 		return
 	}
-	item, err := h.service.UpsertCapability(c.Request.Context(), principal(c), input)
+	capability, err := input.capability()
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	item, err := h.service.UpsertCapability(c.Request.Context(), principal(c), capability)
 	if err != nil {
 		writeServiceError(c, err)
 		return
