@@ -222,6 +222,14 @@ func (s *Service) resolveSplitPlan(ctx context.Context, tenantID, customer, cont
 	if err != nil {
 		return SplitPlan{}, err
 	}
+	// 停用自定义拆解规则时回退到系统的安全默认方案，并且不再匹配任何覆盖规则。
+	// 合同仍需生成服务项，因此不能简单返回空方案；安全默认方案会按「批次 + 检测类别」
+	// 分组并全部进入待确认，避免停用规则后合同自动放行或被历史特例继续改写。
+	if !policy.Enabled {
+		fallback := domain.DefaultSplitPolicy()
+		fallback.Enabled = false
+		return SplitPlan{SplitPolicy: fallback}, nil
+	}
 	plan := SplitPlan{SplitPolicy: policy}
 	overrides, err := repo.ListSplitOverrides(ctx, tenantID)
 	if err != nil {

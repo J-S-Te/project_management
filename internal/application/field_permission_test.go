@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -86,6 +87,47 @@ func TestServiceItemAssignmentFieldsAreMaskable(t *testing.T) {
 	}
 	if len(item.EngineerIDs) != 1 || item.EngineerIDs[0] != maskedFieldValue {
 		t.Fatalf("engineer list must be masked: %+v", item.EngineerIDs)
+	}
+}
+
+func TestFieldPermissionRulesOnlyAcceptSupportedHiddenFields(t *testing.T) {
+	repository := &scopeRepository{}
+	service := &Service{Repo: repository}
+	principal := principalWith("project.field_permission.manage", platform.DataScope{RoleCode: "admin", ScopeType: "TENANT", ScopeID: "tenant-1"})
+
+	created, err := service.CreateRule(context.Background(), principal, domain.Rule{
+		Kind: "permissions", Name: "隐藏客户", RoleCode: " engineer ", FieldName: " customer ", AccessLevel: " HIDDEN ", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.RoleCode != "engineer" || created.FieldName != "customer" || created.AccessLevel != "hidden" {
+		t.Fatalf("rule was not normalized: %+v", created)
+	}
+
+	for _, test := range []struct {
+		name  string
+		field string
+		level string
+	}{
+		{name: "unknown field", field: "report_revenue", level: "hidden"},
+		{name: "view is not implemented", field: "customer", level: "view"},
+		{name: "edit is not implemented", field: "site", level: "edit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := service.CreateRule(context.Background(), principal, domain.Rule{
+				Kind: "permissions", Name: "非法规则", RoleCode: "engineer", FieldName: test.field, AccessLevel: test.level,
+			})
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("error=%v, want validation error", err)
+			}
+		})
+	}
+
+	if _, err := service.UpdateRule(context.Background(), principal, 9, domain.Rule{
+		Kind: "permissions", Name: "非法更新", RoleCode: "engineer", FieldName: "customer", AccessLevel: "edit",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("update error=%v, want validation error", err)
 	}
 }
 

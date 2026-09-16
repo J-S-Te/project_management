@@ -652,8 +652,8 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 			return input, ErrValidation
 		}
 	case "permissions":
-		if strings.TrimSpace(input.RoleCode) == "" || strings.TrimSpace(input.FieldName) == "" {
-			return input, ErrValidation
+		if err := normalizeFieldPermissionRule(&input); err != nil {
+			return input, err
 		}
 	case "sla":
 		if strings.TrimSpace(input.Status) == "" || input.DeadlineHours <= 0 {
@@ -697,6 +697,11 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 			return domain.Rule{}, err
 		}
 		if err := s.ensureCapabilityCodeIdentityUnchanged(ctx, p.TenantID, input); err != nil {
+			return domain.Rule{}, err
+		}
+	}
+	if input.Kind == "permissions" {
+		if err := normalizeFieldPermissionRule(&input); err != nil {
 			return domain.Rule{}, err
 		}
 	}

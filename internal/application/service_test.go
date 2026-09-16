@@ -728,6 +728,57 @@ func TestSplitOverrideAppliesByPriority(t *testing.T) {
 	}
 }
 
+type splitPlanRepository struct {
+	capabilityCodeSplitRepository
+	policy    domain.SplitPolicy
+	overrides []domain.SplitOverride
+}
+
+func (r *splitPlanRepository) GetSplitPolicy(context.Context, string) (domain.SplitPolicy, error) {
+	return r.policy, nil
+}
+
+func (r *splitPlanRepository) ListSplitOverrides(context.Context, string) ([]domain.SplitOverride, error) {
+	return r.overrides, nil
+}
+
+// 停用租户自定义规则后必须回退到安全默认口径，并跳过历史覆盖规则。
+// 回归背景：Enabled 过去只被保存和展示，运行时仍会执行已停用策略及覆盖规则。
+func TestDisabledSplitPolicyFallsBackToSafeDefaults(t *testing.T) {
+	policy := domain.DefaultSplitPolicy()
+	policy.Enabled = false
+	policy.DimensionPrimary = domain.SplitDimensionSite
+	policy.DimensionSecondary = domain.SplitDimensionTestMode
+	policy.DefaultStatus = domain.ServiceItemStatusPendingAssign
+	repository := &splitPlanRepository{
+		policy: policy,
+		overrides: []domain.SplitOverride{{
+			ID:       9,
+			Name:     "历史自动放行特例",
+			Enabled:  true,
+			Priority: 1,
+			Settings: domain.SplitOverrideSettings{DefaultStatus: stringPtr(domain.ServiceItemStatusPendingAssign)},
+		}},
+	}
+	service := &Service{Repo: repository}
+	plan, err := service.resolveSplitPlan(context.Background(), "tenant-1", "客户", "HT-1", 2, []string{"等保测评"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Enabled {
+		t.Fatal("回退方案应保留停用标记，供审计和调用方识别")
+	}
+	if plan.DimensionPrimary != domain.SplitDimensionBatch || plan.DimensionSecondary != domain.SplitDimensionCategory {
+		t.Fatalf("停用后应回退到安全默认分组，实际 %+v", plan.SplitPolicy)
+	}
+	if plan.DefaultStatus != domain.ServiceItemStatusPendingConfirm || plan.MissingRuleAction != domain.SplitMissingHumanConfirm {
+		t.Fatalf("停用后不应自动放行，实际 %+v", plan.SplitPolicy)
+	}
+	if plan.AppliedOverrideID != 0 || plan.AppliedOverride != "" {
+		t.Fatalf("停用后不应继续命中覆盖规则，实际 %+v", plan)
+	}
+}
+
 // 分组维度由配置决定：默认「批次 + 检测类别」，覆盖规则可改成「场所 + 批次 + 检测类别」。
 func TestSplitGroupingFollowsDimensionConfig(t *testing.T) {
 	index := map[string]domain.DetectionCategory{
