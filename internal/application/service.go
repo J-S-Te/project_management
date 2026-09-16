@@ -466,10 +466,11 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if err != nil {
 		return input, err
 	}
-	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Customer) == "" || strings.TrimSpace(input.Contract) == "" {
+	if strings.TrimSpace(input.Name) == "" {
 		return input, ErrValidation
 	}
-	if strings.TrimSpace(input.ContractID) == "" {
+	input.ContractID = strings.TrimSpace(input.ContractID)
+	if input.ContractID == "" {
 		return input, ValidationError("请选择已通过审批的合同")
 	}
 	if len(requested) == 0 {
@@ -485,6 +486,15 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if !approved.ApprovalPassed {
 		return input, PreconditionError("所选合同尚未通过审批")
 	}
+	if strings.TrimSpace(approved.ID) == "" || strings.TrimSpace(approved.ID) != input.ContractID {
+		return input, fmt.Errorf("%w: contract approval service returned mismatched contract", ErrContractUnavailable)
+	}
+	if strings.TrimSpace(approved.Number) == "" || strings.TrimSpace(approved.CustomerName) == "" {
+		return input, PreconditionError("所选合同缺少合同编号或客户信息，请先在合同管理系统中补全")
+	}
+	// 合同编号、版本与客户资料只能来自合同管理系统。浏览器提交的同名字段即使被
+	// 篡改也不会落库，避免项目台账与已审批合同产生无法审计的偏差。
+	input.ContractID = strings.TrimSpace(approved.ID)
 	input.Contract = strings.TrimSpace(approved.Number)
 	input.Customer = strings.TrimSpace(approved.CustomerName)
 	input.CustomerID = strings.TrimSpace(approved.CustomerID)
@@ -642,8 +652,8 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 			return input, ErrValidation
 		}
 	case "permissions":
-		if strings.TrimSpace(input.RoleCode) == "" || strings.TrimSpace(input.FieldName) == "" {
-			return input, ErrValidation
+		if err := normalizeFieldPermissionRule(&input); err != nil {
+			return input, err
 		}
 	case "sla":
 		if strings.TrimSpace(input.Status) == "" || input.DeadlineHours <= 0 {
@@ -687,6 +697,11 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 			return domain.Rule{}, err
 		}
 		if err := s.ensureCapabilityCodeIdentityUnchanged(ctx, p.TenantID, input); err != nil {
+			return domain.Rule{}, err
+		}
+	}
+	if input.Kind == "permissions" {
+		if err := normalizeFieldPermissionRule(&input); err != nil {
 			return domain.Rule{}, err
 		}
 	}

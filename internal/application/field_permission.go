@@ -27,6 +27,30 @@ var maskableServiceItemFields = map[string]struct{}{
 	"team_lead_id": {}, "project_manager_id": {}, "engineer_ids": {},
 }
 
+// normalizeFieldPermissionRule 将字段级权限限制在运行时真正支持的白名单与 hidden
+// 语义内。未知字段过去可以成功落库却永远不生效，view/edit 也只有展示数据、没有写侧
+// 授权含义；两类配置都必须在服务端拒绝，不能只依赖前端下拉菜单。
+func normalizeFieldPermissionRule(input *domain.Rule) error {
+	input.RoleCode = strings.TrimSpace(input.RoleCode)
+	input.FieldName = strings.TrimSpace(input.FieldName)
+	input.AccessLevel = strings.ToLower(strings.TrimSpace(input.AccessLevel))
+	if input.RoleCode == "" || input.FieldName == "" {
+		return ValidationError("角色和字段不能为空")
+	}
+	_, projectField := maskableProjectFields[input.FieldName]
+	_, serviceItemField := maskableServiceItemFields[input.FieldName]
+	if !projectField && !serviceItemField {
+		return ValidationError("所选字段不支持字段级隐藏")
+	}
+	if input.AccessLevel == "" {
+		input.AccessLevel = "hidden"
+	}
+	if input.AccessLevel != "hidden" {
+		return ValidationError("当前仅支持隐藏字段；只读和可编辑尚未开放")
+	}
+	return nil
+}
+
 func maskProjectField(project *domain.Project, field string) {
 	switch field {
 	case "name":

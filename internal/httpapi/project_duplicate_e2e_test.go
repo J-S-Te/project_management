@@ -17,12 +17,34 @@ import (
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"github.com/j-s-te/project-management/internal/platform"
 	"io"
 	"log/slog"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+type duplicateContractVerifier struct{}
+
+func (duplicateContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return nil, nil
+}
+
+func (duplicateContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", nil
+}
+
+func (duplicateContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	version := uint64(1)
+	if id == "approved-dup-v2" {
+		version = 2
+	}
+	return platform.ApprovedContract{
+		ID: id, Number: "HT-DUP-1", CustomerName: "走查客户", Version: version,
+		Status: "approved", ApprovalPassed: true,
+	}, nil
+}
 
 func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
@@ -43,10 +65,10 @@ func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Contracts: duplicateContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	body := `{"name":"走查重复项目","customer":"走查客户","contract":"HT-DUP-1","contract_id":"approved-dup-1","contract_version":"v1",
+	body := `{"name":"走查重复项目","contract_id":"approved-dup-v1",
 		"service_items":[{"source_id":"MANUAL-001","site":"杭州机房","category":"等保测评","test_mode":"STANDARD"}]}`
 	status, response := e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", body)
 	if status != http.StatusCreated {
@@ -74,7 +96,7 @@ func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 		t.Fatalf("提示应包含已存在项目编号与替代动作：%s", response)
 	}
 	// 换一个版本号可以正常创建：同一合同的后续版本是合法业务场景。
-	nextVersion := strings.Replace(body, `"contract_version":"v1"`, `"contract_version":"v2"`, 1)
+	nextVersion := strings.Replace(body, `"contract_id":"approved-dup-v1"`, `"contract_id":"approved-dup-v2"`, 1)
 	status, response = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", nextVersion)
 	if status != http.StatusCreated {
 		t.Fatalf("同合同新版本应可创建：HTTP %d %s", status, response)

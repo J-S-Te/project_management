@@ -557,9 +557,8 @@ func (h *Handler) listApprovedContracts(c *gin.Context) {
 func (h *Handler) createProject(c *gin.Context) {
 	var request struct {
 		domain.Project
-		ContractID      string                   `json:"contract_id"`
-		ContractVersion string                   `json:"contract_version"`
-		ServiceItems    []domain.ContractService `json:"service_items"`
+		ContractID   string                   `json:"contract_id"`
+		ServiceItems []domain.ContractService `json:"service_items"`
 	}
 	if !decode(c, &request) {
 		return
@@ -569,7 +568,12 @@ func (h *Handler) createProject(c *gin.Context) {
 		return
 	}
 	request.Project.ContractID = strings.TrimSpace(request.ContractID)
-	request.Project.ContractVersion = strings.TrimSpace(request.ContractVersion)
+	// 合同编号、客户与版本由应用层按 contract_id 向合同管理系统重新读取，绝不
+	// 接受浏览器提供的快照值。这里清空兼容请求中可能残留的旧字段，明确安全边界。
+	request.Project.Contract = ""
+	request.Project.ContractVersion = ""
+	request.Project.Customer = ""
+	request.Project.CustomerID = ""
 	item, err := h.service.CreateProjectWithServiceItems(c.Request.Context(), principal(c), request.Project, request.ServiceItems)
 	if err != nil {
 		writeServiceError(c, err)

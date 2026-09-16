@@ -34,7 +34,7 @@ var ruleCreateCases = []struct {
 	{"split-rules", "走查拆解规则", `{"kind":"split-rules","name":"走查拆解规则","scope":"浙江","enabled":true}`, "pm_split_rule"},
 	{"warning-rules", "走查预警规则", `{"kind":"warning-rules","name":"走查预警规则","check_type":"超期","threshold":"3","enabled":true}`, "pm_warning_rule"},
 	{"automations", "走查自动化", `{"kind":"automations","name":"走查自动化","trigger":"DEVIATION_REPORTED","target":"technical_director","enabled":true}`, "pm_automation"},
-	{"permissions", "走查字段权限", `{"kind":"permissions","name":"走查字段权限","role_code":"engineer","field_name":"customer","access_level":"view","enabled":true}`, "pm_field_permission"},
+	{"permissions", "走查字段权限", `{"kind":"permissions","name":"走查字段权限","role_code":"engineer","field_name":"customer","access_level":"hidden","enabled":true}`, "pm_field_permission"},
 	{"sla", "走查 SLA", `{"kind":"sla","name":"走查 SLA","status":"实施中","deadline_hours":24,"remind_hours":4,"enabled":true}`, "pm_sla"},
 	{"standards", "走查标准", `{"kind":"standards","name":"走查标准","scope":"GB/T 28448","enabled":true}`, "pm_standard"},
 	{"capability-codes", "CISP-PTE", `{"kind":"capability-codes","name":"CISP-PTE","scope":" cisp-pte ","check_type":" person ","enabled":true}`, "pm_capability_code"},

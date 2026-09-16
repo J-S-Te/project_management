@@ -53,7 +53,7 @@ func TestManualProjectCreationWaitsForDecompositionConfirmation(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// 租户里有一条启用中的拆解规则，适用范围与手动清单的任何字段都不相干
@@ -65,7 +65,7 @@ func TestManualProjectCreationWaitsForDecompositionConfirmation(t *testing.T) {
 	}
 
 	// 业务管理员手动创建项目：一条常规项 + 一条渗透测试（特殊方法）项。
-	payload := `{"name":"走查手动项目","customer":"走查客户","contract":"HT-MANUAL-1","contract_id":"approved-manual-1","service_items":[` +
+	payload := `{"name":"走查手动项目","contract_id":"approved-manual-1","service_items":[` +
 		`{"site":"杭州机房","category":"等级保护","system":"核心系统","test_mode":"STANDARD"},` +
 		`{"site":"杭州机房","category":"渗透测试","system":"核心系统","test_mode":"PENETRATION"}]}`
 	status, body = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", payload)

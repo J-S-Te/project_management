@@ -278,7 +278,7 @@ func perform(handler http.Handler, method, path, body string) *httptest.Response
 
 func TestProjectCreationAndRead(t *testing.T) {
 	handler := router(t, map[string]bool{"project.create": true, "project.read": true}, nil)
-	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"示例客户","contract":"HT-1","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
+	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"伪造客户","contract":"FAKE-1","contract_version":"999","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -290,6 +290,9 @@ func TestProjectCreationAndRead(t *testing.T) {
 	}
 	if created.Data.ID == "" {
 		t.Fatal("project id missing")
+	}
+	if created.Data.Contract != "HT-1" || created.Data.Customer != "示例客户" || created.Data.ContractVersion != "1" {
+		t.Fatalf("contract snapshot must come from contract management: %+v", created.Data)
 	}
 	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if response.Code != http.StatusOK {

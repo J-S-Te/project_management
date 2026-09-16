@@ -212,7 +212,7 @@ func TestApprovedContractListRequiresCreationRoleAndReportsDependencyFailure(t *
 func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	repository := &serviceProjectRepository{}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "伪造客户", Contract: "FAKE-1", ContractID: "C-1", ContractVersion: "999"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +221,9 @@ func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	}
 	if repository.items[0].Site != "杭州机房" || repository.items[0].SiteCode != "" {
 		t.Fatalf("free-text implementation site was not preserved: %+v", repository.items[0])
+	}
+	if created.Contract != "HT-1" || created.Customer != "客户" || created.ContractVersion != "1" || repository.created.Contract != "HT-1" {
+		t.Fatalf("contract fields were not replaced with the approved contract snapshot: created=%+v stored=%+v", created, repository.created)
 	}
 }
 
@@ -722,6 +725,57 @@ func TestSplitOverrideAppliesByPriority(t *testing.T) {
 	}
 	if !overrides[0].Matches("某某银行", "HT-1", 5, []string{"渗透测试"}) {
 		t.Fatal("未配置类别条件时不应因传入类别而失配")
+	}
+}
+
+type splitPlanRepository struct {
+	capabilityCodeSplitRepository
+	policy    domain.SplitPolicy
+	overrides []domain.SplitOverride
+}
+
+func (r *splitPlanRepository) GetSplitPolicy(context.Context, string) (domain.SplitPolicy, error) {
+	return r.policy, nil
+}
+
+func (r *splitPlanRepository) ListSplitOverrides(context.Context, string) ([]domain.SplitOverride, error) {
+	return r.overrides, nil
+}
+
+// 停用租户自定义规则后必须回退到安全默认口径，并跳过历史覆盖规则。
+// 回归背景：Enabled 过去只被保存和展示，运行时仍会执行已停用策略及覆盖规则。
+func TestDisabledSplitPolicyFallsBackToSafeDefaults(t *testing.T) {
+	policy := domain.DefaultSplitPolicy()
+	policy.Enabled = false
+	policy.DimensionPrimary = domain.SplitDimensionSite
+	policy.DimensionSecondary = domain.SplitDimensionTestMode
+	policy.DefaultStatus = domain.ServiceItemStatusPendingAssign
+	repository := &splitPlanRepository{
+		policy: policy,
+		overrides: []domain.SplitOverride{{
+			ID:       9,
+			Name:     "历史自动放行特例",
+			Enabled:  true,
+			Priority: 1,
+			Settings: domain.SplitOverrideSettings{DefaultStatus: stringPtr(domain.ServiceItemStatusPendingAssign)},
+		}},
+	}
+	service := &Service{Repo: repository}
+	plan, err := service.resolveSplitPlan(context.Background(), "tenant-1", "客户", "HT-1", 2, []string{"等保测评"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Enabled {
+		t.Fatal("回退方案应保留停用标记，供审计和调用方识别")
+	}
+	if plan.DimensionPrimary != domain.SplitDimensionBatch || plan.DimensionSecondary != domain.SplitDimensionCategory {
+		t.Fatalf("停用后应回退到安全默认分组，实际 %+v", plan.SplitPolicy)
+	}
+	if plan.DefaultStatus != domain.ServiceItemStatusPendingConfirm || plan.MissingRuleAction != domain.SplitMissingHumanConfirm {
+		t.Fatalf("停用后不应自动放行，实际 %+v", plan.SplitPolicy)
+	}
+	if plan.AppliedOverrideID != 0 || plan.AppliedOverride != "" {
+		t.Fatalf("停用后不应继续命中覆盖规则，实际 %+v", plan)
 	}
 }
 
