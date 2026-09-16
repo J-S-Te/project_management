@@ -510,7 +510,7 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 		"planning":       {"project.implementation.plan"},
 		"preparation":    {"project.implementation.plan"},
 		"methods":        {"project.special_method.review"},
-		"reports":        {"project.report.manage", "project.report.archive"},
+		"reports":        {"project.report.manage", "project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive"},
 		"allocation":     {"project.team.assign", "project.execution.assign"},
 		"assignments":    {"project.execution.assign"},
 		"inbox":          {"project.execution.assign"},
@@ -532,7 +532,7 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 		"team_lead":            {"project.execution.assign", "project.deviation.review", "project.resource.read"},
 		"technical_director":   {"project.special_method.review", "project.report.archive", "project.deviation.review", "project.resource.read"},
 		"project_manager":      {"project.implementation.plan", "project.report.manage", "project.field.complete", "project.resource.read"},
-		"quality_manager":      {"project_rule.manage", "project.report.manage", "project.report.archive", "project.resource.manage", "project.resource.read"},
+		"quality_manager":      {"project_rule.manage", "project.report.review", "project.resource.read"},
 		"device_admin":         {"project.device.manage", "project.device.read", "project.resource.manage", "project.resource.read"},
 		"engineer":             {"project.field.execute", "project.deviation.report"},
 		"penetration_engineer": {"project.field.execute", "project.deviation.report"},
@@ -686,10 +686,33 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 			t.Fatalf("business_admin must not see %q: %s", section, businessAdmin)
 		}
 	}
-	// 设备管理员默认进入设备能力页，而不是被兜底到 dashboard/projects。
+	// 设备管理员只进入资源分配分组，并默认进入设备能力页。
 	deviceAdmin := navigationBodyForRole(t, "device_admin")
-	if !strings.Contains(deviceAdmin, `"equipment"`) || !strings.Contains(deviceAdmin, `"projects"`) {
+	for _, section := range []string{"equipment", "qualifications"} {
+		if !strings.Contains(deviceAdmin, `"`+section+`"`) {
+			t.Fatalf("device_admin must see %q: %s", section, deviceAdmin)
+		}
+	}
+	for _, section := range []string{"dashboard", "monitoring", "projects", "decomposition", "implementation"} {
+		if strings.Contains(deviceAdmin, `"`+section+`"`) {
+			t.Fatalf("device_admin must not see %q: %s", section, deviceAdmin)
+		}
+	}
+	if !strings.Contains(deviceAdmin, `"default_section":"equipment"`) {
 		t.Fatalf("device_admin navigation = %s", deviceAdmin)
+	}
+
+	// 质量管理员只看到现场实施分组，不进入总览、项目、资源和系统配置。
+	qualityManager := navigationBodyForRole(t, "quality_manager")
+	for _, section := range []string{"implementation", "exceptions", "standards", "reports"} {
+		if !strings.Contains(qualityManager, `"`+section+`"`) {
+			t.Fatalf("quality_manager must see %q: %s", section, qualityManager)
+		}
+	}
+	for _, section := range []string{"dashboard", "monitoring", "projects", "allocation", "qualifications", "equipment", "split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes"} {
+		if strings.Contains(qualityManager, `"`+section+`"`) {
+			t.Fatalf("quality_manager must not see %q: %s", section, qualityManager)
+		}
 	}
 	for _, role := range []string{"project_manager", "device_admin"} {
 		body := navigationBodyForRole(t, role)
@@ -708,6 +731,8 @@ func TestRoleNavigationMatchesPrototypeWorkspaces(t *testing.T) {
 		{"team_lead", "assignments"},
 		{"technical_director", "standards"},
 		{"project_manager", "reports"},
+		{"quality_manager", "implementation"},
+		{"device_admin", "equipment"},
 		{"admin", "permissions"},
 	}
 	for _, tc := range tests {

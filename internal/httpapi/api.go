@@ -489,12 +489,12 @@ func navigationSections(roles []string) []string {
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
 		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports"},
 		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
-		// 设备管理员按职责矩阵同时维护资质与能力（project.resource.manage）；
-		// qualifications 仍是这份权限对应的业务维护入口。
-		"device_admin": {"dashboard", "projects", "equipment", "qualifications"},
-		// 治理类配置（含检测标准、资质/能力编码）由 project_rule.manage 把守：
-		// 质量管理员必须能看到它们，否则必检能力码没有可维护的入口。
-		"quality_manager": {"dashboard", "monitoring", "projects", "qualifications", "split-rules", "warning-rules", "automations", "sla", "standards", "capability-codes", "reports"},
+		// 设备管理员只进入「资源分配」分组中的设备/资质维护，不暴露执行总览和项目管理。
+		// equipment 放在首位，使其成为该角色的默认工作区。
+		"device_admin": {"equipment", "qualifications"},
+		// 质量管理员只进入「现场实施」分组：跟踪实施、评审异常、评估标准变更并审核报告。
+		// 项目列表和系统配置不属于该岗位工作台。
+		"quality_manager": {"implementation", "exceptions", "standards", "reports"},
 		"engineer":        {"projects", "implementation", "exceptions"},
 		// 渗透测试工程师不持有 project.implementation.plan（该权限按职责矩阵只授予项目经理），
 		// 因此不能看到 planning：那里是实施计划与设备清单的录入表单，能填却没有提交按钮。
