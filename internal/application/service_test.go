@@ -212,7 +212,7 @@ func TestApprovedContractListRequiresCreationRoleAndReportsDependencyFailure(t *
 func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	repository := &serviceProjectRepository{}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "伪造客户", Contract: "FAKE-1", ContractID: "C-1", ContractVersion: "999"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +221,9 @@ func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	}
 	if repository.items[0].Site != "杭州机房" || repository.items[0].SiteCode != "" {
 		t.Fatalf("free-text implementation site was not preserved: %+v", repository.items[0])
+	}
+	if created.Contract != "HT-1" || created.Customer != "客户" || created.ContractVersion != "1" || repository.created.Contract != "HT-1" {
+		t.Fatalf("contract fields were not replaced with the approved contract snapshot: created=%+v stored=%+v", created, repository.created)
 	}
 }
 
