@@ -369,6 +369,44 @@ func TestRoleCatalogRequiresProjectRead(t *testing.T) {
 	}
 }
 
+func TestRuleConfigurationCatalogExposesRuntimeWhitelists(t *testing.T) {
+	response := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodGet, "/api/v1/rule-configuration-catalog", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data struct {
+			AutomationTriggers []struct {
+				Value string `json:"value"`
+				Label string `json:"label"`
+			} `json:"automation_triggers"`
+			SLAStatuses []struct {
+				Value string `json:"value"`
+				Label string `json:"label"`
+			} `json:"sla_statuses"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, response.Body.String())
+	}
+	if len(body.Data.AutomationTriggers) == 0 || len(body.Data.SLAStatuses) == 0 {
+		t.Fatalf("catalog is incomplete: %s", response.Body.String())
+	}
+	for _, option := range append(body.Data.AutomationTriggers, body.Data.SLAStatuses...) {
+		if option.Value == "" || option.Label == "" {
+			t.Fatalf("catalog option is incomplete: %+v", option)
+		}
+	}
+	if strings.Contains(response.Body.String(), `"value":"AUTOMATION_TRIGGERED"`) {
+		t.Fatalf("derived automation event must not be configurable: %s", response.Body.String())
+	}
+
+	denied := perform(router(t, map[string]bool{}, nil), http.MethodGet, "/api/v1/rule-configuration-catalog", "")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("denied status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
 // ruleRouter 构造带预置规则的处理器：删除用例需要同时断言响应与仓储中的剩余行。
 func ruleRouter(t *testing.T, permissions map[string]bool, rules []domain.Rule) (http.Handler, *repo) {
 	t.Helper()

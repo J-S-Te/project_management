@@ -2472,7 +2472,13 @@ func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEven
 		if !rule.Enabled || strings.TrimSpace(rule.Trigger) != event.Type {
 			continue
 		}
-		targets = append(targets, strings.TrimSpace(rule.Target))
+		target := strings.TrimSpace(rule.Target)
+		// 历史数据可能保存过“通知技术总监 / 创建工单”等自由文本。只有当前应用
+		// 角色目录中的角色码才是可执行目标，避免旧的展示性描述继续生成假动作事件。
+		if validateCatalogRole(target) != nil {
+			continue
+		}
+		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
 		return
@@ -2628,11 +2634,11 @@ func (s *Service) fireConflictWarning(ctx context.Context, p platform.Principal,
 func conflictKind(conflict string) string {
 	switch {
 	case strings.Contains(conflict, "资质"):
-		return "资质能力冲突"
+		return warningCheckQualification
 	case strings.Contains(conflict, "缺少能力"):
-		return "能力缺失"
+		return warningCheckCapability
 	default:
-		return "其他冲突"
+		return warningCheckOther
 	}
 }
 

@@ -1,13 +1,32 @@
 package mysql
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	drivermysql "github.com/go-sql-driver/mysql"
+	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/platform"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+func TestTranslateRuleWriteErrorMapsConcurrentDuplicateRules(t *testing.T) {
+	duplicate := &drivermysql.MySQLError{Number: 1062, Message: "duplicate entry"}
+	for _, kind := range []string{"automations", "permissions", "sla"} {
+		if err := translateRuleWriteError(kind, duplicate); !errors.Is(err, application.ErrResourceConflict) {
+			t.Fatalf("kind=%s error=%v, want resource conflict", kind, err)
+		}
+	}
+	if err := translateRuleWriteError("capability-codes", duplicate); !errors.Is(err, application.ErrValidation) {
+		t.Fatalf("capability duplicate error=%v, want validation", err)
+	}
+	original := errors.New("database unavailable")
+	if err := translateRuleWriteError("sla", original); err != original {
+		t.Fatalf("non-duplicate error was rewritten: %v", err)
+	}
+}
 
 func TestCanStartPreparationAllowsReentryAfterFieldRollback(t *testing.T) {
 	for _, status := range []string{"待实施", "实施准备中"} {

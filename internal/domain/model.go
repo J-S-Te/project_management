@@ -122,7 +122,7 @@ type Rule struct {
 	// CheckType / Threshold 用于预警规则。
 	CheckType string `json:"check_type,omitempty"`
 	Threshold string `json:"threshold,omitempty"`
-	// Target 用于自动化动作目标。
+	// Target 是自动化站内通知的项目角色码，必须来自服务端角色目录。
 	Target string `json:"target,omitempty"`
 	// RoleCode / FieldName / AccessLevel 用于字段级权限。
 	RoleCode    string `json:"role_code,omitempty"`

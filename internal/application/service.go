@@ -635,50 +635,12 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
 		return input, err
 	}
-	if strings.TrimSpace(input.Name) == "" {
-		return input, ErrValidation
-	}
-	switch input.Kind {
-	case "split-rules":
-		if strings.TrimSpace(input.Scope) == "" {
-			return input, ErrValidation
-		}
-	case "warning-rules":
-		if strings.TrimSpace(input.CheckType) == "" {
-			return input, ErrValidation
-		}
-	case "automations":
-		if strings.TrimSpace(input.Trigger) == "" || strings.TrimSpace(input.Target) == "" {
-			return input, ErrValidation
-		}
-	case "permissions":
-		if err := normalizeFieldPermissionRule(&input); err != nil {
-			return input, err
-		}
-	case "sla":
-		if strings.TrimSpace(input.Status) == "" || input.DeadlineHours <= 0 {
-			return input, ErrValidation
-		}
-	case "standards":
-		if strings.TrimSpace(input.Scope) == "" {
-			return input, ErrValidation
-		}
-	case capabilityCodeRuleKind:
-		if err := normalizeCapabilityCodeRule(&input); err != nil {
-			return input, err
-		}
-		if err := s.ensureCapabilityCodeUnique(ctx, p.TenantID, input, 0); err != nil {
-			return input, err
-		}
-	default:
-		return input, ErrValidation
+	if err := s.normalizeAndValidateRule(ctx, p, &input, 0, false); err != nil {
+		return input, err
 	}
 	input.TenantID = p.TenantID
 	input.UpdatedBy = p.UserID
 	input.Updated = time.Now().Format("2006-01-02 15:04")
-	if input.AccessLevel == "" {
-		input.AccessLevel = "view"
-	}
 	return s.Repo.CreateRule(ctx, input)
 }
 
@@ -689,21 +651,8 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
 		return domain.Rule{}, err
 	}
-	if strings.TrimSpace(input.Name) == "" {
-		return domain.Rule{}, ErrValidation
-	}
-	if input.Kind == capabilityCodeRuleKind {
-		if err := normalizeCapabilityCodeRule(&input); err != nil {
-			return domain.Rule{}, err
-		}
-		if err := s.ensureCapabilityCodeIdentityUnchanged(ctx, p.TenantID, input); err != nil {
-			return domain.Rule{}, err
-		}
-	}
-	if input.Kind == "permissions" {
-		if err := normalizeFieldPermissionRule(&input); err != nil {
-			return domain.Rule{}, err
-		}
+	if err := s.normalizeAndValidateRule(ctx, p, &input, id, true); err != nil {
+		return domain.Rule{}, err
 	}
 	input.TenantID = p.TenantID
 	input.UpdatedBy = p.UserID
@@ -712,10 +661,38 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 }
 
 func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind string, id int64, enabled bool) (domain.Rule, error) {
+	kind = strings.TrimSpace(kind)
 	if err := requireApplicationAuthorization(p, ruleKindPermission(kind)); err != nil {
 		return domain.Rule{}, err
 	}
-	return s.Repo.SetRuleEnabled(ctx, p.TenantID, strings.TrimSpace(kind), id, enabled, p.UserID)
+	if enabled {
+		rules, err := s.Repo.ListRules(ctx, p.TenantID, kind)
+		if err != nil {
+			return domain.Rule{}, err
+		}
+		var target *domain.Rule
+		for index := range rules {
+			if rules[index].ID == id {
+				target = &rules[index]
+				break
+			}
+		}
+		if target == nil {
+			return domain.Rule{}, ErrNotFound
+		}
+		if err := s.normalizeAndValidateRule(ctx, p, target, id, false); err != nil {
+			return domain.Rule{}, err
+		}
+		// 重新启用既是一次规则写入：统一校验可能把历史值规范化（例如事件码大小写、
+		// 角色/状态两端空白和旧阈值格式），必须连同启用状态整行持久化，不能只更新
+		// enabled 后让“校验通过但运行时仍匹配不到”的旧值留在数据库。
+		target.Enabled = true
+		target.TenantID = p.TenantID
+		target.UpdatedBy = p.UserID
+		target.Updated = time.Now().Format("2006-01-02 15:04")
+		return s.Repo.UpdateRule(ctx, p.TenantID, kind, id, *target)
+	}
+	return s.Repo.SetRuleEnabled(ctx, p.TenantID, kind, id, enabled, p.UserID)
 }
 
 // DeleteRule 删除一条配置规则。kind 必填：各类配置分别成表，只有 kind 才能确定目标表，

@@ -309,11 +309,7 @@ func (r *Repository) CreateRule(ctx context.Context, item domain.Rule) (domain.R
 		return item, err
 	}
 	if err := r.db.WithContext(ctx).Create(record).Error; err != nil {
-		var mysqlError *drivermysql.MySQLError
-		if item.Kind == "capability-codes" && errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
-			return item, application.ValidationError("同一类型的资质 / 能力编码已存在")
-		}
-		return item, err
+		return item, translateRuleWriteError(item.Kind, err)
 	}
 	// 规则主键是数据库自增生成的：必须用 Create 回填后的真实 ID 回读。
 	// 此前用的是入参 ID——客户端新建时不传 ID（值为 0），GetRule 因此判定「不存在」，
@@ -393,7 +389,7 @@ func (r *Repository) DeleteRule(ctx context.Context, tenant, kind string, id int
 		return nil
 	})
 	if err != nil {
-		return domain.Rule{}, err
+		return domain.Rule{}, translateRuleWriteError(kind, err)
 	}
 	return removed, nil
 }
@@ -423,9 +419,24 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, tenant, kind string, id
 		return nil
 	})
 	if err != nil {
-		return domain.Rule{}, err
+		return domain.Rule{}, translateRuleWriteError(kind, err)
 	}
 	return r.GetRule(ctx, tenant, kind, id)
+}
+
+func translateRuleWriteError(kind string, err error) error {
+	var mysqlError *drivermysql.MySQLError
+	if !errors.As(err, &mysqlError) || mysqlError.Number != 1062 {
+		return err
+	}
+	switch kind {
+	case "capability-codes":
+		return application.ValidationError("同一类型的资质 / 能力编码已存在")
+	case "automations", "permissions", "sla":
+		return application.ConflictError("相同生效条件的启用规则已存在，请直接编辑或停用原配置")
+	default:
+		return err
+	}
 }
 
 // CountCapabilityCodeReferences 统计目录编码在能力档案、服务项和检测类别中的引用。
@@ -507,7 +518,7 @@ func (r *Repository) UpdateRule(ctx context.Context, tenant, kind string, id int
 		return nil
 	})
 	if err != nil {
-		return domain.Rule{}, err
+		return domain.Rule{}, translateRuleWriteError(kind, err)
 	}
 	return r.GetRule(ctx, tenant, kind, id)
 }
