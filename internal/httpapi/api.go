@@ -105,6 +105,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/rule-configuration-catalog", require("project.read"), h.ruleConfigurationCatalog)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
+	api.GET("/projects-monitoring", require("project.read"), h.monitorProjects)
 	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
 	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
 	api.POST("/projects", require("project.create"), h.createProject)
@@ -541,6 +542,26 @@ func (h *Handler) listProjects(c *gin.Context) {
 		return
 	}
 	writePage(c, items, page, pageSize)
+}
+func (h *Handler) monitorProjects(c *gin.Context) {
+	page, pageSize, err := pageParams(c)
+	if err != nil {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
+	truthy := func(value string) bool { return value == "1" || strings.EqualFold(value, "true") }
+	result, err := h.service.MonitorProjects(c.Request.Context(), principal(c), domain.ProjectMonitoringQuery{
+		Page: page, PageSize: pageSize, Keyword: c.Query("q"), Status: c.Query("status"),
+		Customer: c.Query("customer"), Category: c.Query("category"), Team: c.Query("team"),
+		ProjectManagerID: c.Query("project_manager_id"), RiskOnly: truthy(c.Query("risk")),
+		SLAOnly: truthy(c.Query("sla")), ConflictOnly: truthy(c.Query("conflict")),
+		DueFrom: c.Query("due_from"), DueTo: c.Query("due_to"),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, result)
 }
 func (h *Handler) getProject(c *gin.Context) {
 	item, err := h.service.GetProject(c.Request.Context(), principal(c), c.Param("id"))

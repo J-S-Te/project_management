@@ -1205,6 +1205,40 @@ func TestSlaOverdueEndpointReturnsOverdueItems(t *testing.T) {
 	}
 }
 
+func TestProjectMonitoringReturnsServerSnapshotAndRealPagination(t *testing.T) {
+	repository := &repo{
+		projects: []domain.Project{
+			{ID: "PJ-2", Customer: "乙客户", Status: "实施中", UpdatedAt: time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)},
+			{ID: "PJ-1", Customer: "甲客户", Status: "待分配", UpdatedAt: time.Date(2026, 9, 17, 9, 0, 0, 0, time.UTC)},
+			{ID: "PJ-DONE", Customer: "丙客户", Status: domain.ProjectStatusCompleted},
+		},
+		items: []domain.ServiceItem{
+			{ID: "SI-2", ProjectID: "PJ-2", Status: "实施中", Category: "渗透测试", ProjectManagerID: "pm-2", ConflictStatus: "CONFLICT", PlannedEnd: "2026-09-20T00:00:00Z"},
+			{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Category: "等保测评", ProjectManagerID: "pm-1"},
+		},
+	}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Permissions: map[string]bool{"project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/projects-monitoring?page=1&page_size=1&conflict=true", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"total":1`, `"page_size":1`, `"server_time"`, `"snapshot_version"`, `"PJ-2"`, `"conflict_items":1`, `"current":"现场实施"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("missing %s in %s", expected, body)
+		}
+	}
+	if strings.Contains(body, "PJ-DONE") || strings.Contains(body, "PJ-1") {
+		t.Fatalf("terminal/non-conflict projects leaked into filtered page: %s", body)
+	}
+	invalidDate := perform(handler, http.MethodGet, "/api/v1/projects-monitoring?due_from=2026-09-30&due_to=2026-09-01", "")
+	if invalidDate.Code != http.StatusUnprocessableEntity || !strings.Contains(invalidDate.Body.String(), "起始日期") {
+		t.Fatalf("invalid date range status=%d body=%s", invalidDate.Code, invalidDate.Body.String())
+	}
+}
+
 func TestPersonnelEndpointForwardsRoleCodes(t *testing.T) {
 	directory := &recordingOwnerDirectoryStub{}
 	service := &application.Service{Repo: &repo{}, Personnel: directory}
