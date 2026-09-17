@@ -52,7 +52,7 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// ---- ① 默认分组规则：未配置时返回原型默认值 ----

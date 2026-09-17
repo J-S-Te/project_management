@@ -53,7 +53,7 @@ func newInvEnv(t *testing.T) *invEnv {
 		t.Fatalf("open database: %v", err)
 	}
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &invEnv{t: t, db: db, handler: httpapi.NewRouter(service, switchIdentityFor(invTenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	env.clean()
 	t.Cleanup(env.clean)

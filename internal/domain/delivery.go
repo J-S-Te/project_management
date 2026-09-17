@@ -76,6 +76,10 @@ type Capability struct {
 	ValidFrom  time.Time `json:"valid_from"`
 	ValidUntil time.Time `json:"valid_until"`
 	Status     string    `json:"status"`
+	// EffectiveStatus 是结合手工启停状态与设备检定有效期计算出的当前业务状态。
+	// Status 仍保留持久化值，避免读取列表后编辑记录时把派生状态误写回数据库。
+	EffectiveStatus string `json:"effective_status"`
+	StatusReason    string `json:"status_reason,omitempty"`
 	// UsageScope 为 ANY（可借出）或 COMPANY_ONLY（仅在公司使用，不可借出）。
 	UsageScope string `json:"usage_scope"`
 	// IdentityStatus 是人员档案与基础平台负责人目录的复核结果：

@@ -30,6 +30,13 @@ func (approvedContractVerifierStub) ListReferences(context.Context, string, int)
 func (approvedContractVerifierStub) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
 }
+func (approvedContractVerifierStub) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: 1, ServiceItems: []platform.ApprovedContractService{
+		{SourceID: "S1", Name: "等保测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", System: "核心系统", SystemLevel: "三级", Requirement: "按标准执行", TestMode: "STANDARD"},
+		{SourceID: "S2", Name: "软件测试", ServiceType: "软件测试", Site: "默认场所", Batch: "第二批", Category: "软件测试", System: "业务系统", SystemLevel: "二级", Requirement: "按标准执行", TestMode: "STANDARD"},
+		{SourceID: "S3", Name: "渗透测试", ServiceType: "渗透测试", Site: "默认场所", Batch: "第三批", Category: "渗透测试", System: "门户", SystemLevel: "三级", Requirement: "黑盒测试", TestMode: "PENETRATION"},
+	}}, nil
+}
 
 type failingApprovedContractVerifier struct{}
 
@@ -41,6 +48,9 @@ func (failingApprovedContractVerifier) ListReferences(context.Context, string, i
 }
 func (failingApprovedContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{}, errors.New("contract service unavailable")
+}
+func (failingApprovedContractVerifier) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{}, errors.New("contract service unavailable")
 }
 
 type scopeRepository struct {
@@ -107,6 +117,10 @@ func (r *scopeRepository) Dashboard(_ context.Context, filter platform.ScopeFilt
 	return domain.Dashboard{}, nil
 }
 
+func (r *scopeRepository) ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error) {
+	return domain.DefaultDetectionCategories(), nil
+}
+
 func principalWith(permission string, scopes ...platform.DataScope) platform.Principal {
 	roles := []string{}
 	if len(scopes) > 0 && scopes[0].RoleCode != "" {
@@ -138,7 +152,7 @@ func TestSelfCreateStoresStableOwnerIdentity(t *testing.T) {
 	repository := &serviceProjectRepository{}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
 	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"})
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +170,33 @@ func TestBusinessAdminListsApprovedContractsThroughBackendIntegration(t *testing
 	}
 	if len(items) != 1 || items[0].ID != "C-1" || !items[0].ApprovalPassed {
 		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestBusinessAdminListsApprovedContractServiceItemsThroughBackendIntegration(t *testing.T) {
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	catalog, err := service.ListApprovedContractServiceItems(context.Background(), principal, "C-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.ContractID != "C-1" || catalog.ContractVersion != 1 || len(catalog.ServiceItems) != 3 || catalog.ServiceItems[0].SourceID != "S1" {
+		t.Fatalf("catalog=%+v", catalog)
+	}
+}
+
+func TestProjectCreationRejectsUnknownAndDuplicateContractServiceSelections(t *testing.T) {
+	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	project := domain.Project{Name: "项目", ContractID: "C-1"}
+
+	_, err := service.CreateProjectWithServiceItems(context.Background(), principal, project, []domain.ContractService{{SourceID: "UNKNOWN", Site: "杭州机房"}})
+	if err == nil || !strings.Contains(err.Error(), "不属于当前合同") {
+		t.Fatalf("unknown source error=%v", err)
+	}
+	_, err = service.CreateProjectWithServiceItems(context.Background(), principal, project, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}, {SourceID: "S1", Site: "上海机房"}})
+	if err == nil || !strings.Contains(err.Error(), "不能重复关联") {
+		t.Fatalf("duplicate source error=%v", err)
 	}
 }
 
@@ -253,7 +294,7 @@ func TestApprovedContractListRequiresCreationRoleAndReportsDependencyFailure(t *
 func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	repository := &serviceProjectRepository{}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "伪造客户", Contract: "FAKE-1", ContractID: "C-1", ContractVersion: "999"}, []domain.ContractService{{Site: "杭州机房", Batch: "第一批", Category: "信息安全检测", Requirement: "按标准执行"}})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}), domain.Project{Name: "项目", Customer: "伪造客户", Contract: "FAKE-1", ContractID: "C-1", ContractVersion: "999"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房", Batch: "伪造批次", Category: "伪造类别", Requirement: "伪造要求"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,6 +303,9 @@ func TestProjectCreationCanPersistInitialServiceItemsAtomically(t *testing.T) {
 	}
 	if repository.items[0].Site != "杭州机房" || repository.items[0].SiteCode != "" {
 		t.Fatalf("free-text implementation site was not preserved: %+v", repository.items[0])
+	}
+	if repository.items[0].Batch != "第一批" || repository.items[0].Category != "等保测评" || repository.items[0].Requirement != "按标准执行" || repository.items[0].SystemLevel != "三级" {
+		t.Fatalf("contract-owned service fields were not rebuilt from the approved catalog: %+v", repository.items[0])
 	}
 	if created.Contract != "HT-1" || created.Customer != "客户" || created.ContractVersion != "1" || repository.created.Contract != "HT-1" {
 		t.Fatalf("contract fields were not replaced with the approved contract snapshot: created=%+v stored=%+v", created, repository.created)
@@ -272,11 +316,11 @@ func TestOrganizationCreateRequiresAndStoresAuthorizedOwnerOrg(t *testing.T) {
 	repository := &serviceProjectRepository{}
 	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
 	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "ORG", ScopeID: "org-1"})
-	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}})
+	created, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}})
 	if err != nil || created.OwnerOrgID != "org-1" {
 		t.Fatalf("created=%+v error=%v", created, err)
 	}
-	_, err = service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-2", ContractID: "C-2", OwnerOrgID: "org-2"}, []domain.ContractService{{Site: "杭州机房"}})
+	_, err = service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-2", ContractID: "C-2", OwnerOrgID: "org-2"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}})
 	if err != ErrForbidden {
 		t.Fatalf("cross-org create error=%v", err)
 	}
@@ -285,7 +329,7 @@ func TestOrganizationCreateRequiresAndStoresAuthorizedOwnerOrg(t *testing.T) {
 func TestProjectOnlyScopeCannotCreateUnassignedProject(t *testing.T) {
 	service := &Service{Repo: &serviceProjectRepository{}, Contracts: approvedContractVerifierStub{}}
 	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "PROJECT", ScopeID: "PJ-existing"})
-	if _, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{Site: "杭州机房"}}); err != ErrForbidden {
+	if _, err := service.CreateProjectWithServiceItems(context.Background(), principal, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}}); err != ErrForbidden {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -299,7 +343,7 @@ func TestProjectCreationIsLimitedToAdminAndBusinessAdmin(t *testing.T) {
 		}
 	}
 	admin := principalWith("project.create", platform.DataScope{RoleCode: "admin", ScopeType: "APPLICATION"})
-	if _, err := service.CreateProjectWithServiceItems(context.Background(), admin, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-admin", ContractID: "C-admin"}, []domain.ContractService{{Site: "杭州机房"}}); err != nil {
+	if _, err := service.CreateProjectWithServiceItems(context.Background(), admin, domain.Project{Name: "项目", Customer: "客户", Contract: "HT-admin", ContractID: "C-admin"}, []domain.ContractService{{SourceID: "S1", Site: "杭州机房"}}); err != nil {
 		t.Fatalf("admin must be allowed to create: %v", err)
 	}
 }
@@ -655,9 +699,9 @@ func TestManualProjectCreationAlwaysWaitsForConfirmation(t *testing.T) {
 	created, err := service.CreateProjectWithServiceItems(context.Background(), principal,
 		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
 		[]domain.ContractService{
-			{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"},
-			{Site: "上海机房", Batch: "ZH-金额超过 50 万元-001", TestMode: "STANDARD"},
-			{Site: "杭州机房", Batch: "第一批", TestMode: "PENETRATION"},
+			{SourceID: "S1", Site: "杭州机房"},
+			{SourceID: "S2", Site: "上海机房"},
+			{SourceID: "S3", Site: "杭州机房"},
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -859,12 +903,38 @@ func TestSplitRulesWithoutRulesKeepManualConfirm(t *testing.T) {
 	_, err := service.CreateProjectWithServiceItems(context.Background(),
 		principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"}),
 		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
-		[]domain.ContractService{{Site: "杭州机房", Batch: "第一批", TestMode: "STANDARD"}})
+		[]domain.ContractService{{SourceID: "S1", Site: "杭州机房"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(repository.items) != 1 || repository.items[0].Status != "待确认" {
 		t.Fatalf("items=%+v", repository.items)
+	}
+}
+
+type controlledCategoryRepository struct {
+	serviceProjectRepository
+	categories []domain.DetectionCategory
+}
+
+func (r *controlledCategoryRepository) ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error) {
+	return r.categories, nil
+}
+
+func TestControlledDetectionCategoriesRejectUnknownAndDisabledValues(t *testing.T) {
+	repository := &controlledCategoryRepository{categories: []domain.DetectionCategory{
+		{Category: "等保测评", Enabled: true},
+		{Category: "历史停用类别", Enabled: false},
+	}}
+	service := &Service{Repo: repository}
+	if err := service.validateControlledDetectionCategories(context.Background(), "tenant-1", []string{" 等保测评 "}); err != nil {
+		t.Fatalf("enabled category rejected: %v", err)
+	}
+	for _, category := range []string{"历史停用类别", "任意文本类别", ""} {
+		err := service.validateControlledDetectionCategories(context.Background(), "tenant-1", []string{category})
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("category %q error = %v, want ErrValidation", category, err)
+		}
 	}
 }
 

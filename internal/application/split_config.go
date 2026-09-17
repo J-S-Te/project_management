@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -30,6 +31,10 @@ type SplitRuleConfigRepository interface {
 	ListSplitOverrides(context.Context, string) ([]domain.SplitOverride, error)
 	SaveSplitOverride(context.Context, string, domain.SplitOverride, string) (domain.SplitOverride, error)
 	DeleteSplitOverride(context.Context, string, int64) (domain.SplitOverride, error)
+}
+
+type detectionCategoryReader interface {
+	ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error)
 }
 
 func (s *Service) splitConfigRepo() (SplitRuleConfigRepository, error) {
@@ -294,6 +299,36 @@ func (s *Service) splitCategoryDomain(ctx context.Context, tenantID string) (map
 
 func splitCategoryKey(category string) string {
 	return strings.ToLower(strings.TrimSpace(category))
+}
+
+// validateControlledDetectionCategories is the write-side guard for project service items.
+// The category directory is the canonical service-type domain: browser controls are only a UX
+// aid and direct API calls must not be able to persist arbitrary text or disabled categories.
+func (s *Service) validateControlledDetectionCategories(ctx context.Context, tenantID string, categories []string) error {
+	repo, ok := s.Repo.(detectionCategoryReader)
+	if !ok {
+		return errors.New("detection category directory unavailable")
+	}
+	items, err := repo.ListDetectionCategories(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	enabled := make(map[string]string, len(items))
+	for _, item := range items {
+		if item.Enabled {
+			enabled[splitCategoryKey(item.Category)] = strings.TrimSpace(item.Category)
+		}
+	}
+	for _, category := range categories {
+		category = strings.TrimSpace(category)
+		if category == "" {
+			return ValidationError("检测类别不能为空")
+		}
+		if _, exists := enabled[splitCategoryKey(category)]; !exists {
+			return ValidationError(fmt.Sprintf("检测类别「%s」不在启用的检测类别域中，请先在拆解规则中配置或启用", category))
+		}
+	}
+	return nil
 }
 
 // resolveSplitOutcome 按生效方案与检测类别域决定一个分组的初始状态与方法类型。

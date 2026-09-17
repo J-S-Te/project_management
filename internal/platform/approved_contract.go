@@ -21,10 +21,32 @@ type ApprovedContract struct {
 	ApprovalPassed bool   `json:"approval_passed"`
 }
 
+// ApprovedContractService is the approved contract's project-facing service
+// scope. It contains no contract text, pricing, contacts or file metadata.
+type ApprovedContractService struct {
+	SourceID    string `json:"source_id"`
+	Name        string `json:"name"`
+	ServiceType string `json:"service_type"`
+	Site        string `json:"site"`
+	Batch       string `json:"batch"`
+	Category    string `json:"category"`
+	System      string `json:"system"`
+	SystemLevel string `json:"system_level"`
+	Requirement string `json:"requirement"`
+	TestMode    string `json:"test_mode"`
+}
+
+type ApprovedContractServiceCatalog struct {
+	ContractID      string                    `json:"contract_id"`
+	ContractVersion uint64                    `json:"contract_version"`
+	ServiceItems    []ApprovedContractService `json:"service_items"`
+}
+
 type ApprovedContractVerifier interface {
 	List(context.Context, int) ([]ApprovedContract, error)
 	ListReferences(context.Context, string, int) ([]ApprovedContract, string, error)
 	Get(context.Context, string) (ApprovedContract, error)
+	GetServiceItems(context.Context, string) (ApprovedContractServiceCatalog, error)
 }
 
 type approvedContractClient struct {
@@ -174,6 +196,43 @@ func (c *approvedContractClient) Get(ctx context.Context, contractID string) (Ap
 	}
 	if envelope.Code != "OK" || envelope.Data.ID == "" {
 		return ApprovedContract{}, fmt.Errorf("contract approval service returned invalid data")
+	}
+	return envelope.Data, nil
+}
+
+func (c *approvedContractClient) GetServiceItems(ctx context.Context, contractID string) (ApprovedContractServiceCatalog, error) {
+	contractID = strings.TrimSpace(contractID)
+	if contractID == "" {
+		return ApprovedContractServiceCatalog{}, fmt.Errorf("contract id is empty")
+	}
+	token, err := c.service.token(ctx, c.scope)
+	if err != nil {
+		return ApprovedContractServiceCatalog{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+url.PathEscape(contractID)+"/service-items", nil)
+	if err != nil {
+		return ApprovedContractServiceCatalog{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	response, err := c.service.client.Do(request)
+	if err != nil {
+		return ApprovedContractServiceCatalog{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return ApprovedContractServiceCatalog{}, fmt.Errorf("contract approval service returned %d", response.StatusCode)
+	}
+	var envelope struct {
+		Code string                         `json:"code"`
+		Data ApprovedContractServiceCatalog `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+		return ApprovedContractServiceCatalog{}, err
+	}
+	if envelope.Code != "OK" || strings.TrimSpace(envelope.Data.ContractID) == "" || envelope.Data.ServiceItems == nil {
+		return ApprovedContractServiceCatalog{}, fmt.Errorf("contract approval service returned invalid service items")
 	}
 	return envelope.Data, nil
 }

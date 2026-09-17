@@ -44,6 +44,13 @@ func (approvedContractVerifier) Get(_ context.Context, id string) (platform.Appr
 	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}, nil
 }
 
+func (approvedContractVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: 1, ServiceItems: []platform.ApprovedContractService{
+		{SourceID: "SVC-1", Name: "等级保护测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", System: "核心系统", SystemLevel: "三级", Requirement: "按标准执行", TestMode: "STANDARD"},
+		{SourceID: "SVC-2", Name: "渗透测试", ServiceType: "渗透测试", Site: "默认场所", Batch: "第一批", Category: "渗透测试", System: "核心系统", SystemLevel: "三级", Requirement: "黑盒测试", TestMode: "PENETRATION"},
+	}}, nil
+}
+
 func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) (platform.ServiceTokenIdentity, error) {
 	v.token = token
 	if v.identity.TenantID == "" {
@@ -131,6 +138,9 @@ func (r *repo) ListEquipmentReservations(_ context.Context, tenant, exclude stri
 }
 func (r *repo) FindCapabilities(_ context.Context, tenant, at string, ids []string) ([]domain.Capability, error) {
 	return r.capabilities, nil
+}
+func (r *repo) ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error) {
+	return domain.DefaultDetectionCategories(), nil
 }
 
 func (r *repo) ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error) {
@@ -278,7 +288,7 @@ func perform(handler http.Handler, method, path, body string) *httptest.Response
 
 func TestProjectCreationAndRead(t *testing.T) {
 	handler := router(t, map[string]bool{"project.create": true, "project.read": true}, nil)
-	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"伪造客户","contract":"FAKE-1","contract_version":"999","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
+	response := perform(handler, http.MethodPost, "/api/v1/projects", `{"name":"新项目","customer":"伪造客户","contract":"FAKE-1","contract_version":"999","contract_id":"approved-1","service_items":[{"source_id":"SVC-1","site":"杭州机房","category":"伪造类别"}]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -312,6 +322,17 @@ func TestApprovedContractsUseProjectSessionAndCreationPermission(t *testing.T) {
 	invalid := perform(router(t, map[string]bool{"project.create": true}, nil), http.MethodGet, "/api/v1/approved-contracts?limit=201", "")
 	if invalid.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestApprovedContractServiceItemsUseProjectSessionAndCreationPermission(t *testing.T) {
+	allowed := perform(router(t, map[string]bool{"project.create": true}, nil), http.MethodGet, "/api/v1/approved-contracts/approved-1/service-items", "")
+	if allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"source_id":"SVC-1"`) || !strings.Contains(allowed.Body.String(), `"system_level":"三级"`) {
+		t.Fatalf("allowed status=%d body=%s", allowed.Code, allowed.Body.String())
+	}
+	denied := perform(router(t, map[string]bool{"project.read": true}, nil), http.MethodGet, "/api/v1/approved-contracts/approved-1/service-items", "")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("denied status=%d body=%s", denied.Code, denied.Body.String())
 	}
 }
 
@@ -1009,7 +1030,7 @@ func TestMeReturnsStableIdentityAndDataScopes(t *testing.T) {
 }
 func TestWriteIsReportedToAudit(t *testing.T) {
 	reporter := &audit{}
-	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1","contract_id":"approved-1","service_items":[{"site":"杭州机房"}]}`)
+	response := perform(router(t, map[string]bool{"project.create": true}, reporter), http.MethodPost, "/api/v1/projects", `{"name":"审计项目","customer":"客户","contract":"HT-1","contract_id":"approved-1","service_items":[{"source_id":"SVC-1","site":"杭州机房"}]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d", response.Code)
 	}

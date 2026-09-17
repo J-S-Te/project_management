@@ -350,11 +350,22 @@ func syncExistingContract(ctx context.Context, repo DeliveryRepository, p platfo
 }
 
 func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal, projectID string, input domain.DecompositionAdjustmentInput) error {
-	if err := s.authorizeProject(ctx, p, "project.decomposition.manage", projectID); err != nil {
+	filter, err := authorizeProjectScope(p, "project.decomposition.manage")
+	if err != nil {
+		return err
+	}
+	project, err := s.Repo.GetProject(ctx, filter, projectID)
+	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
+	}
+	if len(input.Items) == 0 {
+		return ValidationError("调整后的服务项清单不能为空")
+	}
+	if err := s.verifyApprovedSupplementContract(ctx, project, input.SupplementContractID); err != nil {
+		return err
 	}
 	// 拆解调整是人填清单：按原型流程，调整后进入补充协议并重新确认，
 	// 因此一律回到「待确认」，不套用默认进入状态；口径（特殊方法/体系要求）仍由检测类别域解析。
@@ -367,6 +378,13 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		return planErr
 	}
 	items := make([]domain.ServiceItem, 0, len(input.Items))
+	categories := make([]string, 0, len(input.Items))
+	for _, source := range input.Items {
+		categories = append(categories, source.Category)
+	}
+	if err := s.validateControlledDetectionCategories(ctx, p.TenantID, categories); err != nil {
+		return err
+	}
 	for _, source := range input.Items {
 		if source.SourceID == "" || source.Site == "" || source.Batch == "" || source.Category == "" {
 			return ErrValidation
@@ -385,6 +403,43 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, SiteCode: source.SiteCode, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
+}
+
+// verifyApprovedSupplementContract prevents the decomposition form from turning an arbitrary
+// string into evidence of a supplement agreement. The selected record must be a different,
+// approved contract for the same customer; the contract service remains the authority.
+func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project domain.Project, supplementContractID string) error {
+	supplementContractID = strings.TrimSpace(supplementContractID)
+	if supplementContractID == "" {
+		return ValidationError("请选择已审批的补充协议")
+	}
+	if strings.TrimSpace(project.ContractID) != "" && supplementContractID == strings.TrimSpace(project.ContractID) {
+		return ValidationError("补充协议不能与原合同相同")
+	}
+	if s.Contracts == nil {
+		return ErrContractUnavailable
+	}
+	supplement, err := s.Contracts.Get(ctx, supplementContractID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+	}
+	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !strings.EqualFold(strings.TrimSpace(supplement.Status), "approved") {
+		return PreconditionError("所选补充协议尚未审批通过")
+	}
+	projectCustomerID := strings.TrimSpace(project.CustomerID)
+	supplementCustomerID := strings.TrimSpace(supplement.CustomerID)
+	if projectCustomerID != "" {
+		if supplementCustomerID == "" || projectCustomerID != supplementCustomerID {
+			return PreconditionError("补充协议与当前项目不属于同一客户")
+		}
+		return nil
+	}
+	projectCustomerName := strings.TrimSpace(project.Customer)
+	supplementCustomerName := strings.TrimSpace(supplement.CustomerName)
+	if projectCustomerName == "" || supplementCustomerName == "" || !strings.EqualFold(projectCustomerName, supplementCustomerName) {
+		return PreconditionError("补充协议与当前项目不属于同一客户")
+	}
+	return nil
 }
 
 // ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。
@@ -1692,6 +1747,47 @@ func validateCapability(item domain.Capability) error {
 	return nil
 }
 
+const (
+	capabilityEffectiveActive          = "ACTIVE"
+	capabilityEffectiveDisabled        = "DISABLED"
+	capabilityEffectiveExpired         = "EXPIRED"
+	capabilityEffectiveNotYetEffective = "NOT_YET_EFFECTIVE"
+)
+
+// deriveCapabilityEffectiveStatus keeps the persisted administration switch separate from the
+// current business state. Equipment validity is date-based, so an ACTIVE row becomes ineffective
+// automatically on the day after valid_until without requiring a scheduler or a write on read.
+func deriveCapabilityEffectiveStatus(item domain.Capability, now time.Time) domain.Capability {
+	item.EffectiveStatus = capabilityEffectiveDisabled
+	item.StatusReason = "已手工停用"
+	if item.Status != "ACTIVE" {
+		return item
+	}
+	item.EffectiveStatus = capabilityEffectiveActive
+	item.StatusReason = ""
+	if item.ResourceType != "EQUIPMENT" {
+		return item
+	}
+	today := dayOf(now.UTC())
+	if !item.ValidFrom.IsZero() && dayOf(item.ValidFrom).After(today) {
+		item.EffectiveStatus = capabilityEffectiveNotYetEffective
+		item.StatusReason = "检定有效期尚未开始"
+		return item
+	}
+	if !item.ValidUntil.IsZero() && dayOf(item.ValidUntil).Before(today) {
+		item.EffectiveStatus = capabilityEffectiveExpired
+		item.StatusReason = "检定有效期已过期"
+	}
+	return item
+}
+
+func deriveCapabilityEffectiveStatuses(items []domain.Capability, now time.Time) []domain.Capability {
+	for index := range items {
+		items[index] = deriveCapabilityEffectiveStatus(items[index], now)
+	}
+	return items
+}
+
 // resourceIDPrefix 区分人员与设备的资源编号前缀，避免两类编号混用。
 // existingUsageScope 在既有能力目录里查同编号设备的使用范围；查不到时返回默认的可借出，
 // 保证新增设备与历史数据都落在同一个默认值上。
@@ -1795,7 +1891,11 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	if item.ResourceType == "EQUIPMENT" && strings.TrimSpace(item.UsageScope) == "" {
 		item.UsageScope = existingUsageScope(existing, item.ResourceID)
 	}
-	return repo.UpsertCapability(ctx, item, p.UserID)
+	saved, err := repo.UpsertCapability(ctx, item, p.UserID)
+	if err != nil {
+		return saved, err
+	}
+	return deriveCapabilityEffectiveStatus(saved, time.Now().UTC()), nil
 }
 
 // resolveCapabilityPerson 以平台 user_id 精确查询人员目录。目录只会返回本应用可见的
@@ -1888,7 +1988,11 @@ func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, ty
 	if e != nil {
 		return nil, e
 	}
-	return repo.ListCapabilities(ctx, p.TenantID, typ)
+	items, err := repo.ListCapabilities(ctx, p.TenantID, typ)
+	if err != nil {
+		return nil, err
+	}
+	return deriveCapabilityEffectiveStatuses(items, time.Now().UTC()), nil
 }
 
 // assignmentRoleUserIDs 从基础平台读取指定项目角色的有效授权用户。候选列表与提交校验
@@ -2091,6 +2195,7 @@ func (s *Service) ListEquipment(ctx context.Context, p platform.Principal) ([]do
 	if err != nil {
 		return nil, err
 	}
+	items = deriveCapabilityEffectiveStatuses(items, time.Now().UTC())
 	// 「在公司 / 不在公司」不落库：当前时间落在某条未归还的占用时段内即为借出中。
 	reservations, err := repo.ListEquipmentReservations(ctx, p.TenantID, "")
 	if err != nil {
@@ -2156,7 +2261,11 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
-	return repo.UpsertCapability(ctx, item, p.UserID)
+	saved, err := repo.UpsertCapability(ctx, item, p.UserID)
+	if err != nil {
+		return saved, err
+	}
+	return deriveCapabilityEffectiveStatus(saved, time.Now().UTC()), nil
 }
 
 // DeleteEquipment 删除未被活动实施计划占用的设备主数据。已完成或已归还设备的历史快照

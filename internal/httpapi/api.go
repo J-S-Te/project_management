@@ -106,6 +106,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
+	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
 	api.POST("/projects", require("project.create"), h.createProject)
 	api.POST("/contracts/activate", require("project.contract.import"), h.activateContract)
 	api.GET("/projects/:id", require("project.read"), h.getProject)
@@ -564,6 +565,15 @@ func (h *Handler) listApprovedContracts(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, items)
+}
+
+func (h *Handler) listApprovedContractServiceItems(c *gin.Context) {
+	catalog, err := h.service.ListApprovedContractServiceItems(c.Request.Context(), principal(c), c.Param("contractID"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, catalog)
 }
 func (h *Handler) createProject(c *gin.Context) {
 	var request struct {
