@@ -172,6 +172,36 @@ func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principa
 	}
 	return approved, nil
 }
+
+// ListApprovedContractServiceItems returns the authoritative, project-facing
+// service scope for one approved contract. The browser never calls Contract
+// Management directly and receives no contract text, price, contact or file.
+func (s *Service) ListApprovedContractServiceItems(ctx context.Context, p platform.Principal, contractID string) (platform.ApprovedContractServiceCatalog, error) {
+	if !mayCreateProject(p) {
+		return platform.ApprovedContractServiceCatalog{}, ErrForbidden
+	}
+	if _, err := authorizeProjectScope(p, "project.create"); err != nil {
+		return platform.ApprovedContractServiceCatalog{}, err
+	}
+	contractID = strings.TrimSpace(contractID)
+	if contractID == "" {
+		return platform.ApprovedContractServiceCatalog{}, ValidationError("请选择已通过审批的合同")
+	}
+	if s.Contracts == nil {
+		return platform.ApprovedContractServiceCatalog{}, ErrContractUnavailable
+	}
+	catalog, err := s.Contracts.GetServiceItems(ctx, contractID)
+	if err != nil {
+		return platform.ApprovedContractServiceCatalog{}, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+	}
+	if strings.TrimSpace(catalog.ContractID) != contractID {
+		return platform.ApprovedContractServiceCatalog{}, fmt.Errorf("%w: contract service catalog returned mismatched contract", ErrContractUnavailable)
+	}
+	if catalog.ServiceItems == nil {
+		catalog.ServiceItems = []platform.ApprovedContractService{}
+	}
+	return catalog, nil
+}
 func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.Dashboard, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
@@ -492,6 +522,24 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if strings.TrimSpace(approved.Number) == "" || strings.TrimSpace(approved.CustomerName) == "" {
 		return input, PreconditionError("所选合同缺少合同编号或客户信息，请先在合同管理系统中补全")
 	}
+	catalog, catalogErr := s.Contracts.GetServiceItems(ctx, input.ContractID)
+	if catalogErr != nil {
+		return input, fmt.Errorf("%w: %v", ErrContractUnavailable, catalogErr)
+	}
+	if strings.TrimSpace(catalog.ContractID) != input.ContractID || catalog.ContractVersion != approved.Version {
+		return input, PreconditionError("合同服务范围已发生变化，请重新选择合同后再提交")
+	}
+	requested, err = approvedContractServices(requested, catalog.ServiceItems)
+	if err != nil {
+		return input, err
+	}
+	categories := make([]string, 0, len(requested))
+	for _, item := range requested {
+		categories = append(categories, item.Category)
+	}
+	if err := s.validateControlledDetectionCategories(ctx, p.TenantID, categories); err != nil {
+		return input, err
+	}
 	// 合同编号、版本与客户资料只能来自合同管理系统。浏览器提交的同名字段即使被
 	// 篡改也不会落库，避免项目台账与已审批合同产生无法审计的偏差。
 	input.ContractID = strings.TrimSpace(approved.ID)
@@ -571,6 +619,50 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		return input, nil
 	}
 	return input, errors.New("project repository does not support atomic service-item creation")
+}
+
+// approvedContractServices resolves browser selections against the latest
+// approved contract catalog. Only source_id and the project-specific site
+// supplement are accepted from the browser; contract-owned fields are rebuilt
+// from the authoritative catalog to prevent scope spoofing.
+func approvedContractServices(requested []domain.ContractService, catalog []platform.ApprovedContractService) ([]domain.ContractService, error) {
+	byID := make(map[string]platform.ApprovedContractService, len(catalog))
+	for _, item := range catalog {
+		sourceID := strings.TrimSpace(item.SourceID)
+		if sourceID == "" || byID[sourceID].SourceID != "" {
+			return nil, fmt.Errorf("%w: contract service catalog contains invalid source identifiers", ErrContractUnavailable)
+		}
+		item.SourceID = sourceID
+		byID[sourceID] = item
+	}
+	result := make([]domain.ContractService, 0, len(requested))
+	selected := make(map[string]bool, len(requested))
+	for _, selection := range requested {
+		sourceID := strings.TrimSpace(selection.SourceID)
+		item, ok := byID[sourceID]
+		if sourceID == "" || !ok {
+			return nil, ValidationError("所选服务项不属于当前合同，请刷新合同服务范围后重试")
+		}
+		if selected[sourceID] {
+			return nil, ValidationError("同一合同服务项不能重复关联")
+		}
+		selected[sourceID] = true
+		site := firstNonEmpty(selection.Site, item.Site)
+		if strings.TrimSpace(site) == "" {
+			return nil, ValidationError("请填写所选服务项的实施场所")
+		}
+		mode := strings.ToUpper(strings.TrimSpace(item.TestMode))
+		if mode != "STANDARD" && mode != "PENETRATION" {
+			return nil, fmt.Errorf("%w: contract service catalog contains invalid test mode", ErrContractUnavailable)
+		}
+		result = append(result, domain.ContractService{
+			SourceID: sourceID, Name: strings.TrimSpace(item.Name), Site: strings.TrimSpace(site),
+			Batch: strings.TrimSpace(item.Batch), Category: strings.TrimSpace(item.Category),
+			System: strings.TrimSpace(item.System), SystemLevel: strings.TrimSpace(item.SystemLevel),
+			Requirement: strings.TrimSpace(item.Requirement), TestMode: mode,
+		})
+	}
+	return result, nil
 }
 
 // resolveActiveSite keeps implementation locations as free text for current clients. Legacy

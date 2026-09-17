@@ -12,6 +12,62 @@ import (
 	"github.com/j-s-te/project-management/internal/domain"
 )
 
+type supplementContractVerifier struct {
+	contract platform.ApprovedContract
+	err      error
+}
+
+func (v supplementContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return nil, v.err
+}
+func (v supplementContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", v.err
+}
+func (v supplementContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
+	return v.contract, v.err
+}
+func (v supplementContractVerifier) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{}, v.err
+}
+
+func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) {
+	project := domain.Project{ContractID: "CONTRACT-1", CustomerID: "CUSTOMER-1", Customer: "示例客户"}
+	cases := []struct {
+		name        string
+		id          string
+		contract    platform.ApprovedContract
+		want        error
+		messagePart string
+	}{
+		{name: "same as original", id: "CONTRACT-1", want: ErrValidation, messagePart: "不能与原合同相同"},
+		{name: "not approved", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "draft"}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		{name: "missing customer identity", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerName: "示例客户", Status: "approved", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "同一客户"},
+		{name: "other customer", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-2", Status: "approved", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "同一客户"},
+		{name: "approved supplement", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "approved", ApprovalPassed: true}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &Service{Contracts: supplementContractVerifier{contract: testCase.contract}}
+			err := service.verifyApprovedSupplementContract(context.Background(), project, testCase.id)
+			if testCase.want == nil {
+				if err != nil {
+					t.Fatalf("approved supplement rejected: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, testCase.want) || !strings.Contains(UserMessage(err), testCase.messagePart) {
+				t.Fatalf("error = %v, want %v containing %q", err, testCase.want, testCase.messagePart)
+			}
+		})
+	}
+	t.Run("legacy project matches authoritative customer name", func(t *testing.T) {
+		service := &Service{Contracts: supplementContractVerifier{contract: platform.ApprovedContract{ID: "SUP-1", CustomerName: "示例客户", Status: "approved", ApprovalPassed: true}}}
+		if err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Customer: "示例客户"}, "SUP-1"); err != nil {
+			t.Fatalf("legacy project supplement rejected: %v", err)
+		}
+	})
+}
+
 func TestValidatePenetrationComplianceRequiresFullAuthorizationSet(t *testing.T) {
 	valid := domain.ImplementationPlanInput{
 		PenetrationTestPlan: "扫描与漏洞验证步骤",
@@ -261,6 +317,29 @@ func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T)
 			_, err := service.resolvePreparationEquipment(context.Background(), repo, "tenant-1", "SI-SELF", tc.rows, start, end)
 			if err == nil || !strings.Contains(err.Error(), tc.expected) {
 				t.Fatalf("error=%v, want contains %q", err, tc.expected)
+			}
+		})
+	}
+}
+
+func TestDeriveCapabilityEffectiveStatusMarksExpiredEquipmentInvalid(t *testing.T) {
+	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		item   domain.Capability
+		status string
+	}{
+		{name: "expired", item: domain.Capability{ResourceType: "EQUIPMENT", Status: "ACTIVE", ValidUntil: time.Date(2026, time.September, 10, 23, 59, 0, 0, time.UTC)}, status: capabilityEffectiveExpired},
+		{name: "last valid day is inclusive", item: domain.Capability{ResourceType: "EQUIPMENT", Status: "ACTIVE", ValidUntil: time.Date(2026, time.September, 17, 0, 0, 0, 0, time.UTC)}, status: capabilityEffectiveActive},
+		{name: "future", item: domain.Capability{ResourceType: "EQUIPMENT", Status: "ACTIVE", ValidFrom: time.Date(2026, time.September, 18, 0, 0, 0, 0, time.UTC)}, status: capabilityEffectiveNotYetEffective},
+		{name: "manual disable wins", item: domain.Capability{ResourceType: "EQUIPMENT", Status: "DISABLED", ValidUntil: time.Date(2027, time.September, 17, 0, 0, 0, 0, time.UTC)}, status: capabilityEffectiveDisabled},
+		{name: "person ignores dates", item: domain.Capability{ResourceType: "PERSON", Status: "ACTIVE", ValidUntil: time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)}, status: capabilityEffectiveActive},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := deriveCapabilityEffectiveStatus(test.item, now)
+			if got.EffectiveStatus != test.status {
+				t.Fatalf("effective status = %q, want %q", got.EffectiveStatus, test.status)
 			}
 		})
 	}

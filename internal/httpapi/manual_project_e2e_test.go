@@ -66,8 +66,8 @@ func TestManualProjectCreationWaitsForDecompositionConfirmation(t *testing.T) {
 
 	// 业务管理员手动创建项目：一条常规项 + 一条渗透测试（特殊方法）项。
 	payload := `{"name":"走查手动项目","contract_id":"approved-manual-1","service_items":[` +
-		`{"site":"杭州机房","category":"等级保护","system":"核心系统","test_mode":"STANDARD"},` +
-		`{"site":"杭州机房","category":"渗透测试","system":"核心系统","test_mode":"PENETRATION"}]}`
+		`{"source_id":"SVC-1","site":"杭州机房"},` +
+		`{"source_id":"SVC-2","site":"杭州机房"}]}`
 	status, body = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", payload)
 	if status < 200 || status > 299 {
 		t.Fatalf("创建项目失败: HTTP %d %s", status, body)

@@ -46,6 +46,16 @@ func (duplicateContractVerifier) Get(_ context.Context, id string) (platform.App
 	}, nil
 }
 
+func (duplicateContractVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	version := uint64(1)
+	if id == "approved-dup-v2" {
+		version = 2
+	}
+	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: version, ServiceItems: []platform.ApprovedContractService{{
+		SourceID: "SVC-1", Name: "等保测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", TestMode: "STANDARD",
+	}}}, nil
+}
+
 func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
@@ -69,7 +79,7 @@ func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	body := `{"name":"走查重复项目","contract_id":"approved-dup-v1",
-		"service_items":[{"source_id":"MANUAL-001","site":"杭州机房","category":"等保测评","test_mode":"STANDARD"}]}`
+		"service_items":[{"source_id":"SVC-1","site":"杭州机房"}]}`
 	status, response := e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", body)
 	if status != http.StatusCreated {
 		t.Fatalf("首次创建应成功：HTTP %d %s", status, response)
