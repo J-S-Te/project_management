@@ -587,6 +587,36 @@ func (r *Repository) CountExistingContractReferences(ctx context.Context, tenant
 	if len(references) == 0 {
 		return 0, nil
 	}
+	records, err := r.existingContractReferenceRecords(ctx, tenantID, references)
+	if err != nil {
+		return 0, err
+	}
+	return len(matchedContractReferenceKeys(records, references)), nil
+}
+
+// FilterUnreferencedApprovedContracts is the authoritative source for the new
+// project picker. It intentionally ignores the current user's project scope:
+// contract-to-project uniqueness is tenant-wide, so projects hidden from the
+// caller must still remove their contracts from the selectable list.
+func (r *Repository) FilterUnreferencedApprovedContracts(ctx context.Context, tenantID string, references []platform.ApprovedContract) ([]platform.ApprovedContract, error) {
+	if len(references) == 0 {
+		return []platform.ApprovedContract{}, nil
+	}
+	records, err := r.existingContractReferenceRecords(ctx, tenantID, references)
+	if err != nil {
+		return nil, err
+	}
+	matched := matchedContractReferenceKeys(records, references)
+	available := make([]platform.ApprovedContract, 0, len(references)-len(matched))
+	for _, reference := range references {
+		if !matched[approvedContractReferenceKey(reference)] {
+			available = append(available, reference)
+		}
+	}
+	return available, nil
+}
+
+func (r *Repository) existingContractReferenceRecords(ctx context.Context, tenantID string, references []platform.ApprovedContract) ([]projectRecord, error) {
 	ids := make([]string, 0, len(references))
 	numbers := make([]string, 0, len(references))
 	for _, reference := range references {
@@ -603,13 +633,18 @@ func (r *Repository) CountExistingContractReferences(ctx context.Context, tenant
 		Where("tenant_id = ?", tenantID).
 		Where("contract_id IN ? OR contract IN ?", ids, numbers).
 		Find(&records).Error
-	if err != nil {
-		return 0, err
-	}
-	return countMatchedContractReferences(records, references), nil
+	return records, err
 }
 
 func countMatchedContractReferences(records []projectRecord, references []platform.ApprovedContract) int {
+	return len(matchedContractReferenceKeys(records, references))
+}
+
+func approvedContractReferenceKey(reference platform.ApprovedContract) string {
+	return strings.TrimSpace(reference.ID) + "\x1f" + strconv.FormatUint(reference.Version, 10)
+}
+
+func matchedContractReferenceKeys(records []projectRecord, references []platform.ApprovedContract) map[string]bool {
 	referenceByID := make(map[string]string, len(references))
 	referenceByLegacyKey := make(map[string]string, len(references))
 	for _, reference := range references {
@@ -617,20 +652,21 @@ func countMatchedContractReferences(records []projectRecord, references []platfo
 		if id == "" {
 			continue
 		}
-		referenceByID[id] = id
-		referenceByLegacyKey[strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10)] = id
+		key := approvedContractReferenceKey(reference)
+		referenceByID[id+"\x1f"+strconv.FormatUint(reference.Version, 10)] = key
+		referenceByLegacyKey[strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10)] = key
 	}
 	matched := make(map[string]bool, len(references))
 	for _, record := range records {
-		if id := referenceByID[strings.TrimSpace(record.ContractID)]; id != "" {
-			matched[id] = true
+		if key := referenceByID[strings.TrimSpace(record.ContractID)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; key != "" {
+			matched[key] = true
 			continue
 		}
-		if id := referenceByLegacyKey[strings.TrimSpace(record.Contract)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; id != "" {
-			matched[id] = true
+		if key := referenceByLegacyKey[strings.TrimSpace(record.Contract)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; key != "" {
+			matched[key] = true
 		}
 	}
-	return len(matched)
+	return matched
 }
 
 func unique(values []string) map[string]bool {

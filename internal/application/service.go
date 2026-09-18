@@ -102,6 +102,14 @@ type ExistingContractReferenceCounter interface {
 	CountExistingContractReferences(context.Context, string, []platform.ApprovedContract) (int, error)
 }
 
+// AvailableApprovedContractFilter removes contract versions that are already
+// bound to any project in the tenant. This must use tenant-wide data rather
+// than the caller's project data scope, otherwise a restricted user could see
+// and select a contract whose project is owned by another team.
+type AvailableApprovedContractFilter interface {
+	FilterUnreferencedApprovedContracts(context.Context, string, []platform.ApprovedContract) ([]platform.ApprovedContract, error)
+}
+
 type Service struct {
 	Repo Repository
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
@@ -170,7 +178,15 @@ func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principa
 			approved = append(approved, item)
 		}
 	}
-	return approved, nil
+	filter, ok := s.Repo.(AvailableApprovedContractFilter)
+	if !ok {
+		return nil, fmt.Errorf("approved contract availability filter is not configured")
+	}
+	available, err := filter.FilterUnreferencedApprovedContracts(ctx, p.TenantID, approved)
+	if err != nil {
+		return nil, fmt.Errorf("filter approved contracts already linked to projects: %w", err)
+	}
+	return available, nil
 }
 
 // ListApprovedContractServiceItems returns the authoritative, project-facing
