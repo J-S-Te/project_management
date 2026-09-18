@@ -11,7 +11,6 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,24 +29,42 @@ import (
 
 const e2eTenant = "PM-E2E-TENANT"
 
-// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 5）。
+// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 6）。
 // 不得自行发明权限，否则走查结果不代表真实角色能力。
 var e2eRolePermissions = map[string][]string{
-	"business_admin": {"project.read", "project.create", "service_item.confirm", "project.decomposition.manage", "project.resource.read", "project.team.assign"},
-	"team_lead":      {"project.read", "project.resource.read", "project.execution.assign", "project.deviation.review"},
+	"business_admin": {"project.read", "project.create", "service_item.confirm", "project.decomposition.manage", "project.resource.read", "project.team.assign", "project.team.revoke"},
+	"team_lead":      {"project.read", "project.resource.read", "project.execution.assign", "project.execution.revoke", "project.rollback.request", "project.deviation.review"},
 	"project_manager": {"project.read", "project.resource.read", "project.implementation.plan",
-		"project.field.complete", "project.report.manage"},
+		"project.implementation.revoke", "project.rollback.request", "project.report.correction.request",
+		"project.field.complete", "project.report.prepare"},
 	"engineer":           {"project.read", "project.field.execute", "project.deviation.report"},
-	"technical_director": {"project.read", "project.resource.read", "project.deviation.review", "project.special_method.review", "project.report.archive"},
-	"quality_manager":    {"project.read", "project_rule.manage", "project.resource.read", "project.resource.manage", "project.report.manage", "project.report.archive"},
+	"technical_director": {"project.read", "project.resource.read", "project.rollback.approve", "project.report.correction.approve", "project.deviation.review", "project.special_method.review", "project.report.issue", "project.report.archive"},
+	"quality_manager":    {"project.read", "project_rule.manage", "project.resource.read", "project.resource.manage", "project.report.review"},
 	// admin 持有全部权限：规则配置里「字段级权限」走 project.field_permission.manage，
 	// 只有 admin/system_admin 同时具备，用它覆盖六种规则类型。
-	"admin": {"project.read", "project.create", "service_item.confirm", "project_rule.manage", "project.contract.import", "project.decomposition.manage", "project.resource.read", "project.resource.manage", "project.device.read", "project.device.manage", "project.team.assign", "project.execution.assign", "project.implementation.plan", "project.field.execute", "project.deviation.report", "project.deviation.review", "project.special_method.review", "project.field.complete", "project.report.manage", "project.report.archive", "project.field_permission.manage"},
+	"admin": {"project.read", "project.create", "service_item.confirm", "project_rule.manage", "project.contract.import", "project.decomposition.manage", "project.resource.read", "project.resource.manage", "project.device.read", "project.device.manage", "project.team.assign", "project.team.revoke", "project.execution.assign", "project.execution.revoke", "project.implementation.plan", "project.implementation.revoke", "project.rollback.request", "project.rollback.approve", "project.field.execute", "project.deviation.report", "project.deviation.review", "project.special_method.review", "project.field.complete", "project.report.manage", "project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive", "project.report.correction.request", "project.report.correction.approve", "project.field_permission.manage"},
 }
 
 // switchIdentity 按请求头 X-E2E-Role 返回对应角色的 Principal，用于在一个路由实例上
 // 模拟「不同角色依次点击」。
 type switchIdentity struct{}
+
+type e2ePersonnelDirectory struct{}
+
+func (e2ePersonnelDirectory) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	usersByRole := map[string]platform.OwnerDirectoryUser{
+		"team_lead":       {UserID: "team_lead", DisplayName: "走查团队负责人"},
+		"project_manager": {UserID: "project_manager", DisplayName: "走查项目经理"},
+		"engineer":        {UserID: "engineer", DisplayName: "走查工程师"},
+	}
+	items := make([]platform.OwnerDirectoryUser, 0, len(query.RoleCodes))
+	for _, role := range query.RoleCodes {
+		if user, ok := usersByRole[role]; ok {
+			items = append(items, user)
+		}
+	}
+	return platform.OwnerDirectoryPage{Items: items, Page: query.Page, PageSize: query.PageSize, Total: int64(len(items))}, nil
+}
 
 func (switchIdentity) Authenticate(_ context.Context, request *http.Request) (platform.Principal, error) {
 	role := strings.TrimSpace(request.Header.Get("X-E2E-Role"))
@@ -64,7 +81,7 @@ func (switchIdentity) Authenticate(_ context.Context, request *http.Request) (pl
 		Roles: []string{role}, Permissions: granted,
 		DataScopes:            []platform.DataScope{{RoleCode: role, ScopeType: "APPLICATION"}},
 		AuthorizationRevision: 1,
-		CatalogVersion:        "5",
+		CatalogVersion:        "6",
 	}, nil
 }
 
@@ -106,6 +123,9 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	ctx := context.Background()
 	cleanup := func() {
 		for _, statement := range []string{
+			`DELETE FROM pm_notification_outbox WHERE tenant_id = '` + e2eTenant + `'`,
+			`DELETE FROM pm_evidence_file WHERE tenant_id = '` + e2eTenant + `'`,
+			`DELETE FROM pm_report_revision WHERE tenant_id = '` + e2eTenant + `'`,
 			`DELETE FROM pm_delivery_event WHERE tenant_id = '` + e2eTenant + `'`,
 			`DELETE FROM pm_capability WHERE tenant_id = '` + e2eTenant + `'`,
 			`DELETE FROM pm_impl_plan WHERE tenant_id = '` + e2eTenant + `'`,
@@ -125,12 +145,12 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 		 VALUES ('PJ-E2E-001', '` + e2eTenant + `', '端到端走查项目', '走查客户', 'C-E2E-001', 'v1', 'NONE', 1, '待拆解确认', NOW(3), NOW(3))`,
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, batch, site, category, source_service_id, requirement, test_mode, status, report_status, conflict_status, created_at, updated_at)
 		 VALUES ('SI-E2E-001', '` + e2eTenant + `', 'PJ-E2E-001', 'B1', '杭州机房', '等级保护', 'S1', '走查服务项', 'STANDARD', '待确认', 'NONE', 'UNCHECKED', NOW(3), NOW(3))`,
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-E2E-LEAD', '` + e2eTenant + `', 'PERSON', 'PM-E2E-LEAD', '走查团队负责人', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-E2E-PM', '` + e2eTenant + `', 'PERSON', 'PM-E2E-PM', '走查项目经理', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-E2E-ENG', '` + e2eTenant + `', 'PERSON', 'PM-E2E-ENG', '走查工程师', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, user_id, identity_status, identity_checked_at, updated_at, updated_by)
+		 VALUES ('CAP-E2E-LEAD', '` + e2eTenant + `', 'PERSON', 'PM-E2E-LEAD', '走查团队负责人', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'team_lead', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, user_id, identity_status, identity_checked_at, updated_at, updated_by)
+		 VALUES ('CAP-E2E-PM', '` + e2eTenant + `', 'PERSON', 'PM-E2E-PM', '走查项目经理', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'project_manager', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, user_id, identity_status, identity_checked_at, updated_at, updated_by)
+		 VALUES ('CAP-E2E-ENG', '` + e2eTenant + `', 'PERSON', 'PM-E2E-ENG', '走查工程师', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'engineer', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
 		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
 		 VALUES ('CAP-E2E-EQ', '` + e2eTenant + `', 'EQUIPMENT', 'EQ-E2E-001', '走查设备', JSON_ARRAY('TPL-E2E'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
 	}
@@ -141,7 +161,7 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	}
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Personnel: e2ePersonnelDirectory{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	handler := httpapi.NewRouter(service, switchIdentity{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	item := "/api/v1/service-items/SI-E2E-001"
@@ -183,18 +203,40 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	t.Log("步骤 7：项目经理确认现场实施完成")
 	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/field-complete", "")
 
-	// ---- 步骤 8：报告阶段推进（project.report.manage）----
-	t.Log("步骤 8：项目经理推进报告阶段（现场完成已自动置 COMPILING）→ REVIEWED → ISSUED")
-	for _, phase := range []string{"REVIEWED", "ISSUED"} {
-		e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", fmt.Sprintf(`{"phase":%q}`, phase))
-	}
+	// ---- 步骤 8：报告阶段按编制、审核、签发职责分离推进 ----
+	t.Log("步骤 8：项目经理进入编制并登记报告文件，质量管理员审核，技术总监签发")
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"COMPILING"}`)
+	e2eStep(t, handler, "project_manager", http.MethodPut, item+"/report-revisions/0/artifact",
+		`{"file_id":"FILE-E2E-001","file_name":"走查报告.pdf","mime":"application/pdf","size":1024,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+	e2eStep(t, handler, "quality_manager", http.MethodPost, item+"/report-status", `{"phase":"REVIEWED"}`)
+	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-status", `{"phase":"ISSUED"}`)
 
 	// ---- 步骤 9：技术总监归档（project.report.archive）----
 	t.Log("步骤 9：技术总监归档报告")
 	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-status", `{"phase":"ARCHIVED"}`)
 
-	// ---- 步骤 10：校验派生状态与进度 ----
-	t.Log("步骤 10：校验派生项目状态与进度")
+	// ---- 步骤 10：已归档报告更正，验证申请/审批和新版本职责链 ----
+	t.Log("步骤 10：项目经理申请报告更正，技术总监审批后完成 R1 编制、审核、签发与归档")
+	correctionBody := e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-corrections", `{"reason":"修正报告中的客户名称"}`)
+	var correction struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(correctionBody), &correction); err != nil || correction.Data.ID == "" {
+		t.Fatalf("解析报告更正申请失败: %v (%s)", err, correctionBody)
+	}
+	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-corrections/"+correction.Data.ID+"/decision",
+		`{"decision":"APPROVED","comment":"同意更正"}`)
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"COMPILING"}`)
+	e2eStep(t, handler, "project_manager", http.MethodPut, item+"/report-revisions/1/artifact",
+		`{"file_id":"FILE-E2E-002","file_name":"走查报告-R1.pdf","mime":"application/pdf","size":2048,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+	e2eStep(t, handler, "quality_manager", http.MethodPost, item+"/report-status", `{"phase":"REVIEWED"}`)
+	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-status", `{"phase":"ISSUED"}`)
+	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-status", `{"phase":"ARCHIVED"}`)
+
+	// ---- 步骤 11：校验派生状态与进度 ----
+	t.Log("步骤 11：校验派生项目状态与进度")
 	body := e2eStep(t, handler, "business_admin", http.MethodGet, project, "")
 	var detail struct {
 		Data struct {
@@ -210,8 +252,8 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	}
 	t.Logf("  派生结果：状态=%s 进度=%d", detail.Data.Status, detail.Data.Progress)
 
-	// ---- 步骤 11：SLA 口径（配置规则后观察状态停留时长）----
-	t.Log("步骤 11：配置 SLA 规则后校验状态停留口径")
+	// ---- 步骤 12：SLA 口径（配置规则后观察状态停留时长）----
+	t.Log("步骤 12：配置 SLA 规则后校验状态停留口径")
 	if err := db.WithContext(ctx).Exec(
 		`INSERT INTO pm_sla (tenant_id, kind, name, status, deadline_hours, remind_hours, enabled, created_at, updated_at, updated_by)
 		 VALUES ('` + e2eTenant + `', 'sla', '走查规则', '实施中', 10, 5, 1, NOW(3), NOW(3), 'seed')`).Error; err != nil {

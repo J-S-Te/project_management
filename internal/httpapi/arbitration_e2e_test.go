@@ -421,7 +421,7 @@ func (identity tenantIdentity) Authenticate(_ context.Context, request *http.Req
 		Roles: []string{role}, Permissions: granted,
 		DataScopes:            []platform.DataScope{{RoleCode: role, ScopeType: "APPLICATION"}},
 		AuthorizationRevision: 1,
-		CatalogVersion:        "5",
+		CatalogVersion:        "6",
 	}, nil
 }
 
