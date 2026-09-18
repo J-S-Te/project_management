@@ -10,6 +10,7 @@ package httpapi_test
 // 需要 PM_TEST_DSN；只在隔离租户内读写，各子测试自行清理。
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"github.com/j-s-te/project-management/internal/platform"
 	"io"
 	"log/slog"
 
@@ -42,6 +44,30 @@ type invEnv struct {
 	handler http.Handler
 }
 
+// invariantPersonnelDirectory mirrors the active platform identities linked by the
+// capability fixtures below. Resource IDs remain project-domain IDs; user IDs are
+// the platform identities used by authorization scope checks.
+type invariantPersonnelDirectory struct{}
+
+func (invariantPersonnelDirectory) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	usersByRole := map[string][]platform.OwnerDirectoryUser{
+		"team_lead": {
+			{UserID: "team_lead", DisplayName: "不变量团队负责人"},
+			{UserID: "team_lead_other", DisplayName: "不变量候补负责人"},
+		},
+		"project_manager": {{UserID: "project_manager", DisplayName: "不变量项目经理"}},
+		"engineer": {
+			{UserID: "engineer", DisplayName: "不变量工程师"},
+			{UserID: "engineer_exp", DisplayName: "历史过期工程师"},
+		},
+	}
+	items := make([]platform.OwnerDirectoryUser, 0)
+	for _, role := range query.RoleCodes {
+		items = append(items, usersByRole[role]...)
+	}
+	return platform.OwnerDirectoryPage{Items: items, Page: query.Page, PageSize: query.PageSize, Total: int64(len(items))}, nil
+}
+
 func newInvEnv(t *testing.T) *invEnv {
 	t.Helper()
 	dsn := os.Getenv("PM_TEST_DSN")
@@ -53,15 +79,25 @@ func newInvEnv(t *testing.T) *invEnv {
 		t.Fatalf("open database: %v", err)
 	}
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Personnel: invariantPersonnelDirectory{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &invEnv{t: t, db: db, handler: httpapi.NewRouter(service, switchIdentityFor(invTenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	env.clean()
+	env.exec(
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, identity_checked_at, updated_at, updated_by)
+		 VALUES ('CAP-INV-LEAD', '` + invTenant + `', 'PERSON', 'LEAD-INV', '不变量团队负责人', 'team_lead', JSON_ARRAY(), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed'),
+		        ('CAP-INV-LEAD-OTHER', '` + invTenant + `', 'PERSON', 'LEAD-OTHER', '不变量候补负责人', 'team_lead_other', JSON_ARRAY(), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed'),
+		        ('CAP-INV-PM', '` + invTenant + `', 'PERSON', 'PM-INV', '不变量项目经理', 'project_manager', JSON_ARRAY(), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed'),
+		        ('CAP-INV-ENGINEER', '` + invTenant + `', 'PERSON', 'E-INV', '不变量工程师', 'engineer', JSON_ARRAY('TPL'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
+	)
 	t.Cleanup(env.clean)
 	return env
 }
 
 func (e *invEnv) clean() {
 	for _, statement := range []string{
+		`DELETE FROM pm_notification_outbox WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
+		`DELETE FROM pm_evidence_file WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
+		`DELETE FROM pm_report_revision WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
 		`DELETE FROM pm_delivery_event WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
 		`DELETE FROM pm_capability WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
 		`DELETE FROM pm_impl_plan WHERE tenant_id IN ('` + invTenant + `','` + invTenantB + `')`,
@@ -111,7 +147,7 @@ func (e *invEnv) projectStatusOf(projectID string) (string, int) {
 
 func (e *invEnv) seedProject(id, status string, services int) string {
 	return `INSERT INTO pm_project (id, tenant_id, name, customer, contract, contract_version, supplement_status, services, status, created_at, updated_at)
-	        VALUES ('` + id + `', '` + invTenant + `', '` + id + `', '客户', 'C-` + id + `', 'v1', 'NONE', ` + itoa(services) + `, '` + status + `', NOW(3), NOW(3))`
+	        VALUES ('` + id + `', '` + invTenant + `', '` + id + `', '示例客户', 'C-` + id + `', 'v1', 'NONE', ` + itoa(services) + `, '` + status + `', NOW(3), NOW(3))`
 }
 
 func (e *invEnv) seedItem(id, projectID, status, reportStatus, extra string) string {
@@ -170,7 +206,7 @@ func TestInvariantI3ReportChainIsMonotonic(t *testing.T) {
 		env.seedItem("SI-INV-REP", "PJ-INV-REP", "现场实施完成", "ARCHIVED", ""),
 	)
 	// 已归档后回推 REVIEWED，必须被拒绝
-	status, body := env.call("project_manager", http.MethodPost, "/api/v1/service-items/SI-INV-REP/report-status", `{"phase":"REVIEWED"}`)
+	status, body := env.call("admin", http.MethodPost, "/api/v1/service-items/SI-INV-REP/report-status", `{"phase":"REVIEWED"}`)
 	t.Logf("  已归档后回退到 REVIEWED -> HTTP %d", status)
 	if status >= 200 && status <= 299 {
 		t.Fatalf("I3 被违反：报告阶段允许回退（HTTP %d %s）", status, body)
@@ -185,7 +221,7 @@ func TestInvariantI4TerminatedIsFinal(t *testing.T) {
 		env.seedProject("PJ-INV-TERM", "已终止", 1),
 		env.seedItem("SI-INV-TERM", "PJ-INV-TERM", "已终止", "NONE", ""),
 	)
-	status, body := env.call("project_manager", http.MethodPost, "/api/v1/service-items/SI-INV-TERM/equipment-return", `{"resource_id":"EQ-INV"}`)
+	status, body := env.call("admin", http.MethodPost, "/api/v1/service-items/SI-INV-TERM/equipment-return", `{"resource_id":"EQ-INV"}`)
 	t.Logf("  已终止服务项归还设备 -> HTTP %d", status)
 	if status >= 200 && status <= 299 {
 		t.Fatalf("I4 被违反：已终止服务项仍可归还设备（HTTP %d %s）", status, body)
@@ -199,13 +235,16 @@ func TestInvariantI5PlanRequiresPassedCapabilityCheck(t *testing.T) {
 	env.exec(
 		env.seedProject("PJ-INV-PLAN", "待分配", 1),
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, project_manager_id, team_lead_id, created_at, updated_at)
-		 VALUES ('SI-INV-PLAN', '`+invTenant+`', 'PJ-INV-PLAN', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'CONFLICT', 'PM-INV', 'LEAD-INV', NOW(3), NOW(3))`,
+		 VALUES ('SI-INV-PLAN', '`+invTenant+`', 'PJ-INV-PLAN', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'CONFLICT', 'project_manager', 'team_lead', NOW(3), NOW(3))`,
 	)
 	status, body := env.call("project_manager", http.MethodPost, "/api/v1/service-items/SI-INV-PLAN/implementation-plan",
 		`{"planned_start":"2026-10-01T09:00:00Z","planned_end":"2026-10-05T18:00:00Z","site_plan":"计划","personnel":[{"resource_type":"PERSON","resource_id":"E1","window_start":"2026-10-01","window_end":"2026-10-05"}]}`)
 	t.Logf("  能力校验未通过时发布计划 -> HTTP %d %s", status, body)
 	if status >= 200 && status <= 299 {
 		t.Fatalf("I5 被违反：能力校验未通过仍可发布实施计划")
+	}
+	if status != http.StatusConflict {
+		t.Fatalf("I5 未触发预期业务冲突，而是 HTTP %d: %s", status, body)
 	}
 }
 
@@ -217,11 +256,14 @@ func TestInvariantI6ExecutionAssignRequiresTeamLead(t *testing.T) {
 		env.seedProject("PJ-INV-LEAD", "待分配", 1),
 		env.seedItem("SI-INV-LEAD", "PJ-INV-LEAD", "待分配", "NONE", ""),
 	)
-	status, body := env.call("team_lead", http.MethodPost, "/api/v1/service-items/SI-INV-LEAD/execution-assignment",
+	status, body := env.call("admin", http.MethodPost, "/api/v1/service-items/SI-INV-LEAD/execution-assignment",
 		`{"project_manager_id":"PM-INV","engineer_ids":["E-INV"],"required_codes":[]}`)
 	t.Logf("  无团队负责人时执行分配 -> HTTP %d %s", status, body)
 	if status >= 200 && status <= 299 {
 		t.Fatalf("I6 被违反：没有团队负责人仍可完成执行分配")
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("I6 未触发预期前置校验，而是 HTTP %d: %s", status, body)
 	}
 }
 
@@ -232,13 +274,16 @@ func TestInvariantI7SpecialMethodRequiresReview(t *testing.T) {
 	env.exec(
 		env.seedProject("PJ-INV-SPEC", "待分配", 1),
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, project_manager_id, team_lead_id, special, tech_review_status, created_at, updated_at)
-		 VALUES ('SI-INV-SPEC', '`+invTenant+`', 'PJ-INV-SPEC', 'S1', 'r', 'PENETRATION', '待分配', 'NONE', 'PASSED', 'PM-INV', 'LEAD-INV', '是', 'PENDING', NOW(3), NOW(3))`,
+		 VALUES ('SI-INV-SPEC', '`+invTenant+`', 'PJ-INV-SPEC', 'S1', 'r', 'PENETRATION', '待分配', 'NONE', 'PASSED', 'project_manager', 'team_lead', '是', 'PENDING', NOW(3), NOW(3))`,
 	)
 	status, body := env.call("project_manager", http.MethodPost, "/api/v1/service-items/SI-INV-SPEC/implementation-plan",
 		`{"planned_start":"2026-10-01T09:00:00Z","planned_end":"2026-10-05T18:00:00Z","site_plan":"计划","penetration_test_plan":"专项","personnel":[{"resource_type":"PERSON","resource_id":"E1","window_start":"2026-10-01","window_end":"2026-10-05"}]}`)
 	t.Logf("  特殊方法未复核即发布计划 -> HTTP %d %s", status, body)
 	if status >= 200 && status <= 299 {
 		t.Fatalf("I7 被违反：特殊方法未经复核仍可发布实施计划")
+	}
+	if status != http.StatusConflict {
+		t.Fatalf("I7 未触发预期业务冲突，而是 HTTP %d: %s", status, body)
 	}
 }
 
@@ -250,13 +295,11 @@ func TestInvariantI8EquipmentSingleOccupancy(t *testing.T) {
 		env.seedProject("PJ-INV-EQ-A", "待分配", 1),
 		env.seedProject("PJ-INV-EQ-B", "待分配", 1),
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, project_manager_id, team_lead_id, created_at, updated_at)
-		 VALUES ('SI-INV-EQ-A', '`+invTenant+`', 'PJ-INV-EQ-A', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'PASSED', 'PM-INV', 'LEAD-INV', NOW(3), NOW(3))`,
+		 VALUES ('SI-INV-EQ-A', '`+invTenant+`', 'PJ-INV-EQ-A', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'PASSED', 'project_manager', 'team_lead', NOW(3), NOW(3))`,
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, project_manager_id, team_lead_id, created_at, updated_at)
-		 VALUES ('SI-INV-EQ-B', '`+invTenant+`', 'PJ-INV-EQ-B', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'PASSED', 'PM-INV', 'LEAD-INV', NOW(3), NOW(3))`,
+		 VALUES ('SI-INV-EQ-B', '`+invTenant+`', 'PJ-INV-EQ-B', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'PASSED', 'project_manager', 'team_lead', NOW(3), NOW(3))`,
 		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
 		 VALUES ('CAP-INV-EQ', '`+invTenant+`', 'EQUIPMENT', 'EQ-INV', '走查设备', JSON_ARRAY('TPL'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-INV-EQP', '`+invTenant+`', 'PERSON', 'E-INV', '走查工程师', JSON_ARRAY('TPL'), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
 	)
 	// 按真实链路：先发布实施计划（创建计划行），再做实施准备
 	plan := func(itemID, start, end string) {
@@ -299,7 +342,7 @@ func TestInvariantI9PersonnelDatesDoNotBlockAssignment(t *testing.T) {
 		env.seedItem("SI-INV-EXP", "PJ-INV-EXP", "待分配", "NONE", ""),
 		// 保留一条历史上已经过期的日期，验证人员派工不再受该日期限制。
 		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, updated_at, updated_by)
-		 VALUES ('CAP-INV-EXP', '`+invTenant+`', 'PERSON', 'E-INV-EXP', '历史过期工程师', 'E-INV-EXP', JSON_ARRAY('TPL-INV'),
+		 VALUES ('CAP-INV-EXP', '`+invTenant+`', 'PERSON', 'E-INV-EXP', '历史过期工程师', 'engineer_exp', JSON_ARRAY('TPL-INV'),
 		         DATE_SUB(NOW(3), INTERVAL 60 DAY), DATE_SUB(NOW(3), INTERVAL 1 DAY), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), 'seed')`,
 	)
 	if status, body := env.call("business_admin", http.MethodPost, "/api/v1/service-items/SI-INV-EXP/team-assignment",
@@ -337,8 +380,8 @@ func TestInvariantI12ServiceCountMatchesItems(t *testing.T) {
 	// 通过拆解调整把服务项替换为 2 条
 	status, body := env.call("business_admin", http.MethodPost, "/api/v1/projects/PJ-INV-CNT/decomposition-adjustments",
 		`{"reason":"走查调整","supplement_contract_id":"SC-INV-1","items":[
-		   {"source_id":"ADJ-1","batch":"B1","site":"场所1","category":"类别1","test_mode":"STANDARD"},
-		   {"source_id":"ADJ-2","batch":"B2","site":"场所2","category":"类别2","test_mode":"STANDARD"}]}`)
+		   {"source_id":"ADJ-1","batch":"B1","site":"场所1","category":"等保测评","test_mode":"STANDARD"},
+		   {"source_id":"ADJ-2","batch":"B2","site":"场所2","category":"渗透测试","test_mode":"PENETRATION"}]}`)
 	if status < 200 || status > 299 {
 		t.Fatalf("拆解调整失败: HTTP %d %s", status, body)
 	}
@@ -347,7 +390,7 @@ func TestInvariantI12ServiceCountMatchesItems(t *testing.T) {
 	if err := env.db.Raw(`SELECT services FROM pm_project WHERE tenant_id=? AND id=?`, invTenant, "PJ-INV-CNT").Scan(&services).Error; err != nil {
 		t.Fatalf("读取 services 失败: %v", err)
 	}
-	if err := env.db.Raw(`SELECT COUNT(*) FROM pm_service_item WHERE tenant_id=? AND project_id=?`, invTenant, "PJ-INV-CNT").Scan(&items).Error; err != nil {
+	if err := env.db.Raw(`SELECT COUNT(*) FROM pm_service_item WHERE tenant_id=? AND project_id=? AND archived_at IS NULL`, invTenant, "PJ-INV-CNT").Scan(&items).Error; err != nil {
 		t.Fatalf("统计服务项失败: %v", err)
 	}
 	t.Logf("  拆解调整后 services=%d，实际服务项=%d", services, items)
@@ -361,7 +404,7 @@ func TestInvariantI12ServiceCountMatchesItems(t *testing.T) {
 func TestInvariantI10DerivedStateNotClientWritable(t *testing.T) {
 	env := newInvEnv(t)
 	status, body := env.call("business_admin", http.MethodPost, "/api/v1/projects",
-		`{"name":"写入试试","customer":"客户","contract":"C-INV-10","contract_id":"C-INV-10","contract_version":"v1","status":"已完成","progress":100,"supplement_status":"REQUIRED"}`)
+		`{"name":"写入试试","contract_id":"approved-1","status":"已完成","progress":100,"supplement_status":"REQUIRED","service_items":[{"source_id":"SVC-1","site":"默认场所"}]}`)
 	t.Logf("  提交带 status=已完成 / progress=100 的创建请求 -> HTTP %d", status)
 	if status < 200 || status > 299 {
 		t.Fatalf("创建项目失败: HTTP %d %s", status, body)

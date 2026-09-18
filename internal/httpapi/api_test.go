@@ -278,6 +278,67 @@ func TestReturnToDecompositionRequiresPermissionReasonAndPendingAllocation(t *te
 	}
 }
 
+func reportCorrectionRouter(repository *repo, userID string, permissions map[string]bool) http.Handler {
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: userID, UserID: userID, DisplayName: userID,
+		Permissions: permissions,
+		DataScopes:  []platform.DataScope{{RoleCode: "project-regression", ScopeType: "APPLICATION"}},
+	}
+	return httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestReportCorrectionAPIEnforcesPermissionsValidationAndSeparateApprover(t *testing.T) {
+	repository := &repo{items: []domain.ServiceItem{{
+		ID: "SI-REPORT-1", ProjectID: "PJ-REPORT-1", Status: "现场实施完成",
+		ReportStatus: "ARCHIVED", ReportRevision: 2, Version: 7,
+	}}}
+	requestPath := "/api/v1/service-items/SI-REPORT-1/report-corrections"
+
+	denied := perform(reportCorrectionRouter(repository, "viewer-1", map[string]bool{"project.read": true}), http.MethodPost, requestPath, `{"reason":"修正客户名称"}`)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("request without permission status=%d body=%s", denied.Code, denied.Body.String())
+	}
+
+	requester := reportCorrectionRouter(repository, "project-manager-1", map[string]bool{
+		"project.report.correction.request": true,
+		"project.report.correction.approve": true,
+	})
+	invalid := perform(requester, http.MethodPost, requestPath, `{}`)
+	if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), "请填写报告更正原因") {
+		t.Fatalf("missing reason status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	created := perform(requester, http.MethodPost, requestPath, `{"reason":"修正客户名称","expected_version":7}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create correction status=%d body=%s", created.Code, created.Body.String())
+	}
+	var body struct {
+		Data struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil || body.Data.ID == "" || body.Data.Status != "PENDING_APPROVAL" {
+		t.Fatalf("create correction response=%s err=%v", created.Body.String(), err)
+	}
+	decisionPath := requestPath + "/" + body.Data.ID + "/decision"
+
+	selfApproval := perform(requester, http.MethodPost, decisionPath, `{"decision":"APPROVED","comment":"同意","expected_version":7}`)
+	if selfApproval.Code != http.StatusForbidden {
+		t.Fatalf("self approval status=%d body=%s", selfApproval.Code, selfApproval.Body.String())
+	}
+
+	approver := reportCorrectionRouter(repository, "technical-director-1", map[string]bool{"project.report.correction.approve": true})
+	approved := perform(approver, http.MethodPost, decisionPath, `{"decision":"APPROVED","comment":"同意更正","expected_version":7}`)
+	if approved.Code != http.StatusOK || !strings.Contains(approved.Body.String(), `"status":"APPROVED"`) {
+		t.Fatalf("approval status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if len(repository.events) != 2 || repository.events[0].Type != application.EventReportCorrectionRequested || repository.events[1].Type != application.EventReportCorrectionApproved {
+		t.Fatalf("events=%+v, want request followed by approval", repository.events)
+	}
+}
+
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")

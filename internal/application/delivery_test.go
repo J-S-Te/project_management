@@ -671,6 +671,150 @@ func (r *assignmentRevokeRepository) ApplyDeliveryEvent(_ context.Context, event
 	return nil
 }
 
+type reportCorrectionRepository struct {
+	capabilityRepository
+	item   domain.ServiceItem
+	events []domain.DeliveryEvent
+}
+
+func (r *reportCorrectionRepository) GetServiceItem(_ context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
+	r.lastFilter = filter
+	if r.item.ID != id {
+		return domain.ServiceItem{}, ErrNotFound
+	}
+	return r.item, nil
+}
+
+func (r *reportCorrectionRepository) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
+	r.events = append(r.events, event)
+	return nil
+}
+
+func (r *reportCorrectionRepository) ListDeliveryEvents(_ context.Context, filter platform.ScopeFilter, projectID string) ([]domain.DeliveryEvent, error) {
+	r.lastFilter = filter
+	if projectID != r.item.ProjectID {
+		return nil, ErrNotFound
+	}
+	return append([]domain.DeliveryEvent(nil), r.events...), nil
+}
+
+func reportCorrectionPrincipal(userID, permission string) platform.Principal {
+	return platform.Principal{
+		TenantID:    "tenant-1",
+		IdentityID:  userID,
+		UserID:      userID,
+		Permissions: map[string]bool{permission: true},
+		DataScopes:  []platform.DataScope{{RoleCode: "project-regression", ScopeType: "APPLICATION"}},
+	}
+}
+
+func TestReportCorrectionEnforcesStateVersionAndTwoPersonApproval(t *testing.T) {
+	repository := &reportCorrectionRepository{item: domain.ServiceItem{
+		ID: "SI-REPORT-1", ProjectID: "PJ-REPORT-1", Status: "现场实施完成",
+		ReportStatus: "ARCHIVED", ReportRevision: 3, Version: 12,
+	}}
+	service := Service{Repo: repository}
+	requester := reportCorrectionPrincipal("project-manager-1", "project.report.correction.request")
+	approver := reportCorrectionPrincipal("technical-director-1", "project.report.correction.approve")
+
+	if _, err := service.RequestReportCorrection(context.Background(), requester, repository.item.ID, domain.ReportCorrectionRequestInput{
+		Reason: "客户名称需要修正", ExpectedVersion: 11,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale correction request error=%v, want ErrConflict", err)
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("stale request persisted %d events", len(repository.events))
+	}
+
+	requestID, err := service.RequestReportCorrection(context.Background(), requester, repository.item.ID, domain.ReportCorrectionRequestInput{
+		Reason: "  客户名称需要修正  ", ExpectedVersion: 12,
+	})
+	if err != nil {
+		t.Fatalf("request report correction: %v", err)
+	}
+	if requestID == "" || len(repository.events) != 1 {
+		t.Fatalf("request id=%q events=%d, want one immutable request event", requestID, len(repository.events))
+	}
+	requestEvent := repository.events[0]
+	if requestEvent.Type != EventReportCorrectionRequested || requestEvent.ActorUserID != requester.UserID {
+		t.Fatalf("request event=%+v", requestEvent)
+	}
+	if got := payloadText(requestEvent.Payload, "reason"); got != "客户名称需要修正" {
+		t.Fatalf("trimmed reason=%q", got)
+	}
+	if got, ok := requestEvent.Payload["old_revision"].(uint64); !ok || got != 3 {
+		t.Fatalf("old revision=%v, want uint64(3)", requestEvent.Payload["old_revision"])
+	}
+	if repository.item.ReportStatus != "ARCHIVED" || repository.item.ReportRevision != 3 {
+		t.Fatalf("request must not invalidate published report: %+v", repository.item)
+	}
+
+	sameActor := reportCorrectionPrincipal(requester.UserID, "project.report.correction.approve")
+	if err := service.DecideReportCorrection(context.Background(), sameActor, repository.item.ID, requestID, domain.ReportCorrectionDecisionInput{
+		Decision: "APPROVED", Comment: "同意", ExpectedVersion: 12,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("same actor approval error=%v, want ErrForbidden", err)
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("same actor approval persisted %d events", len(repository.events))
+	}
+
+	if err := service.DecideReportCorrection(context.Background(), approver, repository.item.ID, requestID, domain.ReportCorrectionDecisionInput{
+		Decision: "approved", Comment: "  同意更正  ", ExpectedVersion: 12,
+	}); err != nil {
+		t.Fatalf("approve report correction: %v", err)
+	}
+	if len(repository.events) != 2 {
+		t.Fatalf("events=%d, want request and approval", len(repository.events))
+	}
+	decisionEvent := repository.events[1]
+	if decisionEvent.Type != EventReportCorrectionApproved || decisionEvent.ActorUserID != approver.UserID {
+		t.Fatalf("decision event=%+v", decisionEvent)
+	}
+	if payloadText(decisionEvent.Payload, "request_id") != requestID ||
+		payloadText(decisionEvent.Payload, "report_correction_requester_id") != requester.UserID ||
+		payloadText(decisionEvent.Payload, "comment") != "同意更正" {
+		t.Fatalf("decision payload=%+v", decisionEvent.Payload)
+	}
+	if oldRevision, ok := decisionEvent.Payload["old_revision"].(uint64); !ok || oldRevision != 3 {
+		t.Fatalf("decision old_revision=%v, want uint64(3)", decisionEvent.Payload["old_revision"])
+	}
+	if expectedVersion, ok := decisionEvent.Payload["expected_version"].(uint64); !ok || expectedVersion != 12 {
+		t.Fatalf("decision expected_version=%v, want uint64(12)", decisionEvent.Payload["expected_version"])
+	}
+}
+
+func TestReportCorrectionRejectsUnauthorizedInvalidAndUnpublishedRequests(t *testing.T) {
+	base := domain.ServiceItem{ID: "SI-REPORT-2", ProjectID: "PJ-REPORT-2", Status: "现场实施完成", ReportStatus: "ISSUED", ReportRevision: 1, Version: 4}
+	requester := reportCorrectionPrincipal("project-manager-1", "project.report.correction.request")
+
+	tests := []struct {
+		name      string
+		item      domain.ServiceItem
+		principal platform.Principal
+		input     domain.ReportCorrectionRequestInput
+		want      error
+	}{
+		{name: "missing permission", item: base, principal: reportCorrectionPrincipal("viewer-1", "project.read"), input: domain.ReportCorrectionRequestInput{Reason: "修正内容"}, want: ErrForbidden},
+		{name: "missing reason", item: base, principal: requester, input: domain.ReportCorrectionRequestInput{}, want: ErrValidation},
+		{name: "field not completed", item: func() domain.ServiceItem { item := base; item.Status = "实施中"; return item }(), principal: requester, input: domain.ReportCorrectionRequestInput{Reason: "修正内容"}, want: ErrPrecondition},
+		{name: "report not published", item: func() domain.ServiceItem { item := base; item.ReportStatus = "REVIEWED"; return item }(), principal: requester, input: domain.ReportCorrectionRequestInput{Reason: "修正内容"}, want: ErrPrecondition},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			repository := &reportCorrectionRepository{item: testCase.item}
+			service := Service{Repo: repository}
+			_, err := service.RequestReportCorrection(context.Background(), testCase.principal, testCase.item.ID, testCase.input)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("error=%v, want %v", err, testCase.want)
+			}
+			if len(repository.events) != 0 {
+				t.Fatalf("invalid request persisted %d events", len(repository.events))
+			}
+		})
+	}
+}
+
 type assignmentValidationRepository struct {
 	assignmentRevokeRepository
 	foundCapabilities []domain.Capability
