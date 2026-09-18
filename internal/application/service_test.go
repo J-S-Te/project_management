@@ -57,10 +57,21 @@ type scopeRepository struct {
 	lastFilter                 platform.ScopeFilter
 	created                    domain.Project
 	existingContractReferences int
+	existingContractIDs        map[string]bool
 }
 
 func (r *scopeRepository) CountExistingContractReferences(context.Context, string, []platform.ApprovedContract) (int, error) {
 	return r.existingContractReferences, nil
+}
+
+func (r *scopeRepository) FilterUnreferencedApprovedContracts(_ context.Context, _ string, references []platform.ApprovedContract) ([]platform.ApprovedContract, error) {
+	available := make([]platform.ApprovedContract, 0, len(references))
+	for _, reference := range references {
+		if !r.existingContractIDs[reference.ID] {
+			available = append(available, reference)
+		}
+	}
+	return available, nil
 }
 
 type serviceProjectRepository struct {
@@ -170,6 +181,19 @@ func TestBusinessAdminListsApprovedContractsThroughBackendIntegration(t *testing
 	}
 	if len(items) != 1 || items[0].ID != "C-1" || !items[0].ApprovalPassed {
 		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestBusinessAdminListApprovedContractsHidesContractsAlreadyLinkedToProjects(t *testing.T) {
+	repository := &serviceProjectRepository{scopeRepository: scopeRepository{existingContractIDs: map[string]bool{"C-1": true}}}
+	service := &Service{Repo: repository, Contracts: approvedContractVerifierStub{}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	items, err := service.ListApprovedContracts(context.Background(), principal, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items=%+v, want contracts already linked to projects hidden", items)
 	}
 }
 

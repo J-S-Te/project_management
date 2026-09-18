@@ -44,6 +44,7 @@ func TestCanStartPreparationAllowsReentryAfterFieldRollback(t *testing.T) {
 func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testing.T) {
 	references := []platform.ApprovedContract{
 		{ID: "C-1", Number: "HT-1", Version: 4},
+		{ID: "C-1", Number: "HT-1", Version: 5},
 		{ID: "C-2", Number: "HT-2", Version: 4},
 		{ID: "C-3", Number: "HT-3", Version: 4},
 		{ID: "C-4", Number: "HT-4", Version: 4},
@@ -59,6 +60,10 @@ func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testin
 
 	if got := countMatchedContractReferences(records, references); got != 2 {
 		t.Fatalf("matched references=%d, want 2", got)
+	}
+	matched := matchedContractReferenceKeys(records, references)
+	if !matched[approvedContractReferenceKey(references[0])] || matched[approvedContractReferenceKey(references[1])] || !matched[approvedContractReferenceKey(references[2])] || matched[approvedContractReferenceKey(references[3])] || matched[approvedContractReferenceKey(references[4])] || matched[approvedContractReferenceKey(references[5])] {
+		t.Fatalf("matched reference keys=%v, want only C-1 v4 and C-2 v4", matched)
 	}
 }
 

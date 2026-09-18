@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/httpapi"
@@ -72,6 +73,23 @@ type repo struct {
 	reservations   []domain.EquipmentReservation
 	dashboard      domain.Dashboard
 	dashboardScope platform.ScopeFilter
+}
+
+func (r *repo) FilterUnreferencedApprovedContracts(_ context.Context, tenantID string, references []platform.ApprovedContract) ([]platform.ApprovedContract, error) {
+	available := make([]platform.ApprovedContract, 0, len(references))
+	for _, reference := range references {
+		used := false
+		for _, project := range r.projects {
+			if project.TenantID == tenantID && (project.ContractID == reference.ID || (project.Contract == reference.Number && project.ContractVersion == fmt.Sprint(reference.Version))) {
+				used = true
+				break
+			}
+		}
+		if !used {
+			available = append(available, reference)
+		}
+	}
+	return available, nil
 }
 
 func (r *repo) FindProjectByContractVersion(_ context.Context, filter platform.ScopeFilter, contract, version string) (domain.Project, error) {
@@ -383,6 +401,21 @@ func TestApprovedContractsUseProjectSessionAndCreationPermission(t *testing.T) {
 	invalid := perform(router(t, map[string]bool{"project.create": true}, nil), http.MethodGet, "/api/v1/approved-contracts?limit=201", "")
 	if invalid.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestApprovedContractsHideContractVersionsAlreadyLinkedToAProject(t *testing.T) {
+	repository := &repo{projects: []domain.Project{{ID: "PJ-1", TenantID: "tenant-1", ContractID: "approved-1", Contract: "HT-1", ContractVersion: "1"}}}
+	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}}
+	principal := platform.Principal{
+		TenantID: "tenant-1", IdentityID: "admin-1", UserID: "admin-1", Roles: []string{"admin"},
+		Permissions: map[string]bool{"project.create": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}},
+	}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(handler, http.MethodGet, "/api/v1/approved-contracts?limit=200", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"data":[]`) {
+		t.Fatalf("status=%d body=%s, want an empty available-contract list", response.Code, response.Body.String())
 	}
 }
 
