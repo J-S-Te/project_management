@@ -15,6 +15,7 @@ import (
 	"github.com/j-s-te/project-management/internal/migration"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/j-s-te/project-management/internal/temporalworker"
+	typesafeclient "github.com/j-s-te/project-management/internal/typesafe"
 	"github.com/j-s-te/project-management/migrations"
 )
 
@@ -126,7 +127,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, Logger: logger}
+	var deviationTriage application.DeviationTriage
+	if cfg.TypeSafeEnabled {
+		deviationTriage = typesafeclient.NewClient(cfg.TypeSafeAPIURL, cfg.TypeSafeAPIKey, cfg.TypeSafeTimeout)
+		logger.Info("TypeSafe deviation triage pilot enabled", "mode", "advisory_only")
+	}
+	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, DeviationTriage: deviationTriage, Logger: logger}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		PendingMigrations: pendingMigrations,
 		ContractIntegration: &httpapi.ContractIntegrationOptions{

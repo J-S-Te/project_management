@@ -194,6 +194,23 @@ func TestRuleConfigurationConstraintMigrationPreservesHistoryAndPreventsActiveDu
 	}
 }
 
+func TestContractIdentityMigrationUsesStableIDForIdempotency(t *testing.T) {
+	body, err := Files.ReadFile("000024_contract_identity_key.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"DROP INDEX uq_pm_project_contract_version",
+		"GENERATED ALWAYS AS (CASE WHEN contract_id <> '' THEN contract_id ELSE contract END) STORED",
+		"ADD UNIQUE KEY uq_pm_project_contract_version (tenant_id, contract_identity_key, contract_version)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("contract identity migration missing %q", required)
+		}
+	}
+}
+
 // 资质/能力编码使用独立的租户目录，并从存量能力档案回填，
 // 避免上线后旧编码因未手工重录而立即失效。
 func TestCapabilityCodeCatalogMigration(t *testing.T) {

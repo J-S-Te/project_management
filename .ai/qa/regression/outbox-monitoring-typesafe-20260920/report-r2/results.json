@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "run_id": "pm-outbox-monitoring-typesafe-20260920-r2",
+  "gate": {
+    "passed": true,
+    "reasons": []
+  },
+  "counts": {
+    "PASS": 8
+  },
+  "coverage": {
+    "total": 5,
+    "unknown": 0,
+    "missing_result_links": 0
+  },
+  "results": [
+    {
+      "case_id": "PM-DB-MIGRATION",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:30.443238+00:00",
+      "finished_at": "2026-09-20T07:58:31.895758+00:00",
+      "duration_ms": 1452,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/migration",
+        "./migrations"
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-DB-MIGRATION/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-DB-MIGRATION/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-ALL-GO",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:31.895798+00:00",
+      "finished_at": "2026-09-20T07:58:38.968113+00:00",
+      "duration_ms": 7072,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-count=1",
+        "./..."
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-ALL-GO/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-ALL-GO/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-RACE",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:38.968128+00:00",
+      "finished_at": "2026-09-20T07:58:48.935456+00:00",
+      "duration_ms": 9967,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-race",
+        "-count=1",
+        "./..."
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-RACE/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-RACE/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-BUILD",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:48.935478+00:00",
+      "finished_at": "2026-09-20T07:58:50.135569+00:00",
+      "duration_ms": 1200,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "build",
+        "./..."
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-BUILD/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-BUILD/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-VET",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:50.135584+00:00",
+      "finished_at": "2026-09-20T07:58:50.397502+00:00",
+      "duration_ms": 261,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "vet",
+        "./..."
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-VET/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-VET/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-DB-INTEGRATION",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:50.397513+00:00",
+      "finished_at": "2026-09-20T07:58:51.002198+00:00",
+      "duration_ms": 604,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/infrastructure/mysql"
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-DB-INTEGRATION/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-DB-INTEGRATION/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-LIFECYCLE-E2E",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:51.002213+00:00",
+      "finished_at": "2026-09-20T07:58:52.358737+00:00",
+      "duration_ms": 1356,
+      "command": [
+        "env",
+        "GIN_MODE=release",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/httpapi"
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-LIFECYCLE-E2E/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-LIFECYCLE-E2E/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    },
+    {
+      "case_id": "PM-TEMPORAL-E2E",
+      "status": "PASS",
+      "applicability": "APPLICABLE",
+      "required": true,
+      "started_at": "2026-09-20T07:58:52.358749+00:00",
+      "finished_at": "2026-09-20T07:58:56.298503+00:00",
+      "duration_ms": 3939,
+      "command": [
+        "env",
+        "GOCACHE=/tmp/pm-outbox-monitoring-go-cache",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/temporalworker",
+        "-run",
+        "LocalTemporal"
+      ],
+      "exit_code": 0,
+      "evidence": [
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-TEMPORAL-E2E/stdout.log",
+        "/Users/yglf/GOPATH/src/Unified_Identity_Authentication_Platform/project_management/.ai/qa/regression/outbox-monitoring-typesafe-20260920/runs/pm-outbox-monitoring-typesafe-20260920-r2/pm-outbox-monitoring-typesafe-20260920-r2/PM-TEMPORAL-E2E/stderr.log"
+      ],
+      "cleanup_status": "NOT_REQUIRED",
+      "flaky": false,
+      "message": "command passed"
+    }
+  ]
+}

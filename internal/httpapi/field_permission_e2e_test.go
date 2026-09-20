@@ -40,6 +40,7 @@ func TestFieldPermissionRoleMultiSelectEndToEnd(t *testing.T) {
 	cleanup := func() {
 		for _, statement := range []string{
 			`DELETE FROM pm_field_permission WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_service_item WHERE tenant_id = '` + tenant + `'`,
 			`DELETE FROM pm_project WHERE tenant_id = '` + tenant + `'`,
 		} {
 			db.WithContext(ctx).Exec(statement)
@@ -51,6 +52,10 @@ func TestFieldPermissionRoleMultiSelectEndToEnd(t *testing.T) {
 	if err := db.WithContext(ctx).Exec(`INSERT INTO pm_project (id, tenant_id, name, customer, contract, contract_version, supplement_status, services, status, created_at, updated_at)
 		VALUES ('PJ-FPERM-001', '` + tenant + `', '字段权限走查项目', '走查客户原名', 'C-FPERM-001', 'v1', 'NONE', 1, '待拆解确认', NOW(3), NOW(3))`).Error; err != nil {
 		t.Fatalf("seed 项目失败: %v", err)
+	}
+	if err := db.WithContext(ctx).Exec(`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, team_lead_id, project_manager_id, engineer_ids, status, report_status, conflict_status, created_at, updated_at)
+		VALUES ('SI-FPERM-001', '` + tenant + `', 'PJ-FPERM-001', 'S1', 'r', 'STANDARD', 'team_lead', 'project_manager', JSON_ARRAY('engineer'), '待确认', 'NONE', 'UNCHECKED', NOW(3), NOW(3))`).Error; err != nil {
+		t.Fatalf("seed 服务项失败: %v", err)
 	}
 
 	repository := store.NewRepository(db)

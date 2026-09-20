@@ -89,6 +89,10 @@ type Config struct {
 	DashboardMachineCallerApp              string
 	DashboardMachineCallerEnv              string
 	DashboardMachineScope                  string
+	TypeSafeEnabled                        bool
+	TypeSafeAPIURL                         string
+	TypeSafeAPIKey                         string
+	TypeSafeTimeout                        time.Duration
 }
 
 func Load() (Config, error) {
@@ -132,6 +136,8 @@ func Load() (Config, error) {
 		DashboardMachineCallerApp:              strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE")),
 		DashboardMachineCallerEnv:              strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE")),
 		DashboardMachineScope:                  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
+		TypeSafeAPIURL:                         strings.TrimSpace(env("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone")),
+		TypeSafeAPIKey:                         os.Getenv("TYPESAFE_API_KEY"),
 	}
 	var err error
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
@@ -163,6 +169,15 @@ func Load() (Config, error) {
 	}
 	if c.SlaScanInterval <= 0 {
 		return c, fmt.Errorf("SLA_SCAN_INTERVAL must be positive")
+	}
+	if c.TypeSafeEnabled, err = strconv.ParseBool(env("TYPESAFE_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("TYPESAFE_ENABLED: %w", err)
+	}
+	if c.TypeSafeTimeout, err = duration("TYPESAFE_TIMEOUT", 8*time.Second); err != nil {
+		return c, err
+	}
+	if c.TypeSafeTimeout <= 0 || c.TypeSafeTimeout > 30*time.Second {
+		return c, fmt.Errorf("TYPESAFE_TIMEOUT must be positive and no greater than 30s")
 	}
 	c.SlaScanTenants = splitList(os.Getenv("SLA_SCAN_TENANTS"))
 	if c.OwnerDirectoryEnabled, err = strconv.ParseBool(env("OWNER_DIRECTORY_ENABLED", "false")); err != nil {
@@ -206,6 +221,15 @@ func (c Config) validate() error {
 	}
 	if strings.TrimSpace(c.MySQLDSN) == "" {
 		return fmt.Errorf("MYSQL_DSN is required")
+	}
+	if c.TypeSafeEnabled {
+		if strings.TrimSpace(c.TypeSafeAPIKey) == "" {
+			return fmt.Errorf("TYPESAFE_API_KEY is required when TYPESAFE_ENABLED=true")
+		}
+		endpoint, err := url.Parse(c.TypeSafeAPIURL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
+			return fmt.Errorf("TYPESAFE_API_URL must be an absolute HTTPS URL")
+		}
 	}
 	if strings.TrimSpace(c.TemporalAddress) == "" || strings.TrimSpace(c.TemporalNamespace) == "" || strings.TrimSpace(c.TemporalTaskQueue) == "" || strings.TrimSpace(c.TemporalWorkerBuildID) == "" || strings.TrimSpace(c.TemporalMetricsAddress) == "" {
 		return fmt.Errorf("Temporal address, namespace, task queue, worker build ID and metrics address are required")

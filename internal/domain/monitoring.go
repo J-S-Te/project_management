@@ -64,3 +64,28 @@ type ProjectMonitoringSnapshot struct {
 	ServerTime        time.Time           `json:"server_time"`
 	SnapshotVersion   string              `json:"snapshot_version"`
 }
+
+// ProjectMonitoringPageData is the repository-to-application projection for one database page.
+// Only the projects on the requested page carry service/SLA/event detail; totals and facets are
+// computed by MySQL from the complete authorization-scoped filtered set.
+type ProjectMonitoringPageData struct {
+	Projects          []Project
+	ServiceItems      []ServiceItem
+	SLACandidates     []SlaOverdueItem
+	Events            []DeliveryEvent
+	StatusCounts      map[string]int
+	Categories        []string
+	Teams             []string
+	ProjectManagerIDs []string
+	Total             int
+	LatestUpdatedAt   time.Time
+}
+
+// DeviationTriageResult is advisory-only model output. It deliberately contains no workflow
+// command or persisted severity so callers cannot mistake the pilot for an authorization or state
+// transition decision.
+type DeviationTriageResult struct {
+	Mode          string             `json:"mode"`
+	Model         string             `json:"model"`
+	Probabilities map[string]float64 `json:"probabilities"`
+}

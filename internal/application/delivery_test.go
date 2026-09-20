@@ -596,10 +596,12 @@ type duplicateContractRepository struct {
 	synced    bool
 	activated []string
 	// duplicate 为 true 时 ActivateContract 撞唯一键（模拟后到请求）。
-	duplicate bool
+	duplicate       bool
+	findContractIDs []string
 }
 
-func (r *duplicateContractRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
+func (r *duplicateContractRepository) FindProjectByContractVersion(_ context.Context, _ platform.ScopeFilter, contractID, _ string) (domain.Project, error) {
+	r.findContractIDs = append(r.findContractIDs, contractID)
 	if r.missOnce {
 		r.missOnce = false
 		return domain.Project{}, ErrNotFound
@@ -660,7 +662,7 @@ func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *
 	service := &Service{Repo: activeRepo}
 	activation := func() domain.ContractActivation {
 		return domain.ContractActivation{
-			ContractID: "CT-001", ContractVersion: "v1.0", Customer: "客户A", EffectiveAt: time.Now().UTC(),
+			ContractID: "CT-001", ContractNumber: "HT-2026-001", ContractVersion: "v1.0", Customer: "客户A", EffectiveAt: time.Now().UTC(),
 			Services: []domain.ContractService{{SourceID: "S1", Site: "北京", Batch: "B1", Category: "渗透测试", TestMode: "PENETRATION"}},
 		}
 	}
@@ -689,15 +691,24 @@ func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *
 	if len(activeRepo.activated) != 1 {
 		t.Fatalf("duplicate activation must not insert another project, got %d inserts", len(activeRepo.activated))
 	}
+	if first.ContractID != "CT-001" || first.Contract != "HT-2026-001" {
+		t.Fatalf("contract identity/display mapping = %+v", first)
+	}
+	for _, contractID := range activeRepo.findContractIDs {
+		if contractID != "CT-001" {
+			t.Fatalf("idempotency lookup used %q, want stable contract id", contractID)
+		}
+	}
 }
 
 // hookRepository 同时充当 Repository 与 DeliveryRepository，记录派生事件并保留规则/超期数据，
 // 供 automations / warning-rules / sla 钩子测试使用。
 type hookRepository struct {
 	capabilityRepository
-	rules   []domain.Rule
-	events  []domain.DeliveryEvent
-	overdue []domain.SlaOverdueItem
+	rules    []domain.Rule
+	events   []domain.DeliveryEvent
+	overdue  []domain.SlaOverdueItem
+	enqueued []domain.NotificationMessage
 }
 
 func (r *hookRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
@@ -710,6 +721,10 @@ func (r *hookRepository) ApplyDeliveryEvent(_ context.Context, event domain.Deli
 func (r *hookRepository) ListSlaOverdue(_ context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
 	r.lastFilter = filter
 	return r.overdue, nil
+}
+func (r *hookRepository) EnqueueNotification(_ context.Context, _ string, message domain.NotificationMessage) (bool, error) {
+	r.enqueued = append(r.enqueued, message)
+	return true, nil
 }
 
 type assignmentRevokeRepository struct {
@@ -1243,13 +1258,12 @@ func (stub *notificationStub) Publish(_ context.Context, event platform.Notifica
 // 自动化规则的 target 是应用角色码：命中后按角色解析出人员并投递站内信，
 // 而不是只写一条没人消费的派生事件。
 func TestAutomationNotificationResolvesMultipleRoleTargets(t *testing.T) {
-	notifications := &notificationStub{}
 	repo := &hookRepository{rules: []domain.Rule{
 		{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"},
 		{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "quality_manager"},
 	}}
 	service := &Service{
-		Repo: repo, Notifications: notifications,
+		Repo: repo,
 		Personnel: roleDirectoryStub{byRole: map[string][]string{
 			"technical_director": {"u-lead", "u-shared"},
 			"quality_manager":    {"u-quality", "u-shared"},
@@ -1259,10 +1273,10 @@ func TestAutomationNotificationResolvesMultipleRoleTargets(t *testing.T) {
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 1 {
-		t.Fatalf("expected one notification, got %+v", notifications.published)
+	if len(repo.enqueued) != 1 {
+		t.Fatalf("expected one durable notification, got %+v", repo.enqueued)
 	}
-	event := notifications.published[0]
+	event := repo.enqueued[0]
 	if len(event.Recipients) != 3 || event.Recipients[0] != "u-lead" || event.Recipients[2] != "u-quality" {
 		t.Fatalf("recipients must combine role directories and de-duplicate shared users: %+v", event.Recipients)
 	}
@@ -1279,15 +1293,15 @@ func TestAutomationNotificationDegradesQuietly(t *testing.T) {
 		service *Service
 	}{
 		{"no notification integration", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}}},
-		{"no directory", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}}},
-		{"role has nobody", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Notifications: &notificationStub{}, Personnel: roleDirectoryStub{}}},
+		{"no directory", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}}},
+		{"role has nobody", &Service{Repo: &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}, Personnel: roleDirectoryStub{}}},
 	} {
 		principal := platform.Principal{TenantID: "t1", UserID: "u1"}
 		if err := testCase.service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{})); err != nil {
 			t.Fatalf("%s: applyEvent failed: %v", testCase.name, err)
 		}
-		if stub, ok := testCase.service.Notifications.(*notificationStub); ok && len(stub.published) != 0 {
-			t.Fatalf("%s: must not publish: %+v", testCase.name, stub.published)
+		if repository, ok := testCase.service.Repo.(*hookRepository); ok && len(repository.enqueued) != 0 {
+			t.Fatalf("%s: must not enqueue: %+v", testCase.name, repository.enqueued)
 		}
 	}
 }
@@ -1308,18 +1322,18 @@ func (stub roleDirectoryStub) List(_ context.Context, query platform.OwnerDirect
 // 指派类事件必须给「被指派人」发站内提醒：提醒要发给需要行动的人，而不是操作者本人。
 // 此前项目系统的通知链路 endpoint 与 scope 双错，任何通知都发不出去，本用例锁定该行为。
 func TestAssignmentNotificationGoesToAssignees(t *testing.T) {
-	notifications := &notificationStub{}
-	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	repo := &hookRepository{}
+	service := &Service{Repo: repo}
 	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
 
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventTeamAssigned,
 		map[string]any{"team_lead_id": "u-lead"})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 1 {
-		t.Fatalf("team assignment must publish one notification, got %+v", notifications.published)
+	if len(repo.events) != 1 || repo.events[0].Notification == nil {
+		t.Fatalf("team assignment must persist one notification with its event, got %+v", repo.events)
 	}
-	first := notifications.published[0]
+	first := *repo.events[0].Notification
 	if first.EventType != EventTeamAssigned || first.Scope != platform.NotificationScopeCrossSystem {
 		t.Fatalf("notification must carry event type and platform scope: %+v", first)
 	}
@@ -1331,15 +1345,15 @@ func TestAssignmentNotificationGoesToAssignees(t *testing.T) {
 	}
 
 	// 执行分配：项目经理与工程师都是被指派人。
-	notifications.published = nil
+	repo.events = nil
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned,
 		map[string]any{"project_manager_id": "u-pm", "engineer_ids": []string{"u-e1", " u-e2 ", ""}})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 1 {
-		t.Fatalf("execution assignment must publish one notification, got %+v", notifications.published)
+	if len(repo.events) != 1 || repo.events[0].Notification == nil {
+		t.Fatalf("execution assignment must persist one notification, got %+v", repo.events)
 	}
-	recipients := notifications.published[0].Recipients
+	recipients := repo.events[0].Notification.Recipients
 	if len(recipients) != 3 || recipients[0] != "u-pm" || recipients[1] != "u-e1" || recipients[2] != "u-e2" {
 		t.Fatalf("recipients must be project manager plus engineers: %+v", recipients)
 	}
@@ -1347,16 +1361,16 @@ func TestAssignmentNotificationGoesToAssignees(t *testing.T) {
 
 // 非指派事件不在此路径发提醒（其余业务节点另行按口径补齐），且未开通集成时静默跳过。
 func TestAssignmentNotificationStaysQuietOtherwise(t *testing.T) {
-	notifications := &notificationStub{}
-	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	repo := &hookRepository{}
+	service := &Service{Repo: repo}
 	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
 
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventFieldRecordSubmitted,
 		map[string]any{"raw_data": "{}"})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 0 {
-		t.Fatalf("non-assignment event must not publish here: %+v", notifications.published)
+	if repo.events[0].Notification != nil {
+		t.Fatalf("non-assignment event must not attach a notification: %+v", repo.events[0])
 	}
 
 	// 指派事件但缺收件人：不发空通知。
@@ -1364,8 +1378,8 @@ func TestAssignmentNotificationStaysQuietOtherwise(t *testing.T) {
 		map[string]any{"team_lead_id": "  "})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 0 {
-		t.Fatalf("assignment without recipients must not publish: %+v", notifications.published)
+	if repo.events[len(repo.events)-1].Notification != nil {
+		t.Fatalf("assignment without recipients must not attach a notification: %+v", repo.events)
 	}
 
 	// 未开通站内信集成：不得 panic，也不影响主事件。
@@ -1418,8 +1432,8 @@ func TestEquipmentUsageConflictsUsesInclusiveDayRange(t *testing.T) {
 
 // 实施计划发布后必须提醒现场实施人员：收件人取自计划的人员清单（只取人员行，设备行不算人）。
 func TestImplementationPlanNotificationNotifiesPersonnel(t *testing.T) {
-	notifications := &notificationStub{}
-	service := &Service{Repo: &hookRepository{}, Notifications: notifications}
+	repo := &hookRepository{}
+	service := &Service{Repo: repo}
 	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
 	payload := map[string]any{
 		"planned_start": "2026-10-01T09:00:00Z",
@@ -1432,10 +1446,10 @@ func TestImplementationPlanNotificationNotifiesPersonnel(t *testing.T) {
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", EventImplementationPlanned, payload)); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
-	if len(notifications.published) != 1 {
-		t.Fatalf("implementation plan must publish one notification, got %+v", notifications.published)
+	if len(repo.events) != 1 || repo.events[0].Notification == nil {
+		t.Fatalf("implementation plan must persist one notification, got %+v", repo.events)
 	}
-	event := notifications.published[0]
+	event := *repo.events[0].Notification
 	if event.EventType != EventImplementationPlanned {
 		t.Fatalf("notification event type = %q", event.EventType)
 	}
@@ -1464,23 +1478,22 @@ func TestComputeSlaItemsReportsUnparsablePlannedEnd(t *testing.T) {
 // 载荷里没有收件人时（实施准备发起/偏差上报/报告推进），必须回到服务项的当前被指派人：
 // 提醒要发给"需要行动的人"，而不是无人可发。
 func TestNotificationFallsBackToItemAssignees(t *testing.T) {
-	notifications := &notificationStub{}
 	repo := &assigneeRepository{item: domain.ServiceItem{
 		TenantID: "t1", ProjectID: "PJ-1", Status: "实施中",
 		TeamLeadID: "u-lead", ProjectManagerID: "u-pm", EngineerIDs: []string{"u-e1", " u-e2 "},
 	}}
-	service := &Service{Repo: repo, Notifications: notifications}
+	service := &Service{Repo: repo}
 	principal := platform.Principal{TenantID: "t1", UserID: "u-actor"}
 
 	for _, eventType := range []string{EventPreparationStarted, EventDeviationReported, EventReportStatusUpdated} {
-		notifications.published = nil
+		repo.events = nil
 		if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", eventType, map[string]any{})); err != nil {
 			t.Fatalf("%s: applyEvent failed: %v", eventType, err)
 		}
-		if len(notifications.published) != 1 {
-			t.Fatalf("%s: 必须发布一条通知，实际 %+v", eventType, notifications.published)
+		if len(repo.events) != 1 || repo.events[0].Notification == nil {
+			t.Fatalf("%s: 必须持久化一条通知，实际 %+v", eventType, repo.events)
 		}
-		recipients := notifications.published[0].Recipients
+		recipients := repo.events[0].Notification.Recipients
 		if len(recipients) != 4 || recipients[0] != "u-lead" || recipients[1] != "u-pm" || recipients[2] != "u-e1" || recipients[3] != "u-e2" {
 			t.Fatalf("%s: 收件人应为服务项被指派人，实际 %+v", eventType, recipients)
 		}
@@ -1513,17 +1526,16 @@ func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
 		},
 		item: domain.ServiceItem{TenantID: "t1", ProjectID: "PJ-1", TeamLeadID: "u-lead", ProjectManagerID: "u-pm"},
 	}
-	notifications := &notificationStub{}
-	service := &Service{Repo: repo, Notifications: notifications}
+	service := &Service{Repo: repo}
 
 	published, err := service.ScanSlaNotifications(context.Background(), "t1", now)
 	if err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
-	if published != 1 || len(notifications.published) != 1 {
-		t.Fatalf("应发布一条超期提醒，实际 published=%d %+v", published, notifications.published)
+	if published != 1 || len(repo.enqueued) != 1 {
+		t.Fatalf("应入队一条超期提醒，实际 published=%d %+v", published, repo.enqueued)
 	}
-	event := notifications.published[0]
+	event := repo.enqueued[0]
 	if len(event.Recipients) != 2 || event.Recipients[0] != "u-lead" || event.Recipients[1] != "u-pm" {
 		t.Fatalf("收件人应为被指派人，实际 %+v", event.Recipients)
 	}
@@ -1537,11 +1549,6 @@ func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
 		t.Fatalf("必须使用平台白名单 scope，实际 %q", event.Scope)
 	}
 
-	// 未开通通知集成时不得报错，也不得因缺少集成而影响其它逻辑。
-	withoutIntegration := &Service{Repo: repo}
-	if count, err := withoutIntegration.ScanSlaNotifications(context.Background(), "t1", now); err != nil || count != 0 {
-		t.Fatalf("未开通集成时应静默跳过: count=%d err=%v", count, err)
-	}
 	// 空租户直接跳过。
 	if count, _ := service.ScanSlaNotifications(context.Background(), "  ", now); count != 0 {
 		t.Fatalf("空租户不应扫描")

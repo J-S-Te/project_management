@@ -52,7 +52,19 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{
+		Repo:      repository,
+		Contracts: approvedContractVerifier{},
+		Personnel: staticRolePersonnelDirectory{
+			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
+			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
+			"engineer": {
+				{UserID: "ENG-OK", DisplayName: "合格工程师"},
+				{UserID: "ENG-BAD", DisplayName: "缺证工程师"},
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// ---- ① 默认分组规则：未配置时返回原型默认值 ----
@@ -298,6 +310,7 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 	cleanup := func() {
 		for _, statement := range []string{
 			`DELETE FROM pm_capability WHERE tenant_id = '` + tenant + `'`,
+			`DELETE FROM pm_capability_code WHERE tenant_id = '` + tenant + `'`,
 			`DELETE FROM pm_service_item WHERE tenant_id = '` + tenant + `'`,
 			`DELETE FROM pm_project WHERE tenant_id = '` + tenant + `'`,
 			`DELETE FROM pm_delivery_event WHERE tenant_id = '` + tenant + `'`,
@@ -311,7 +324,18 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{
+		Repo: repository,
+		Personnel: staticRolePersonnelDirectory{
+			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
+			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
+			"engineer": {
+				{UserID: "ENG-OK", DisplayName: "合格工程师"},
+				{UserID: "ENG-BAD", DisplayName: "缺证工程师"},
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// 缺规则处理按默认（待人工确认），但默认进入状态设为待分配，便于直接进入分配环节。
@@ -319,6 +343,13 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 		`{"dimension_primary":"batch","dimension_secondary":"category","default_status":"待分配","generate_requirement_summary":true,"missing_rule_action":"HUMAN_CONFIRM","scope_change_detection":false,"enabled":true}`)
 	if status != http.StatusOK {
 		t.Fatalf("保存默认分组规则失败: HTTP %d %s", status, body)
+	}
+	for _, code := range []string{"DJCP", "ISO27001"} {
+		status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/rules",
+			fmt.Sprintf(`{"kind":"capability-codes","name":"%s","scope":"%s","check_type":"PERSON","enabled":true}`, code, code))
+		if status != http.StatusCreated {
+			t.Fatalf("保存人员资质编码 %s 失败: HTTP %d %s", code, status, body)
+		}
 	}
 	// 给等保测评配置必检能力码（覆盖初始域里留空的那条）。
 	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories",
@@ -375,13 +406,15 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 
 	// 两名工程师：一人具备 DJCP + ISO27001，一人只有 OTHER。
 	now := "2026-09-14 00:00:00"
-	for _, seed := range []struct{ id, name, codesJSON string }{
-		{"ENG-OK", "合格工程师", `["DJCP","ISO27001"]`},
-		{"ENG-BAD", "缺证工程师", `["OTHER"]`},
+	for _, seed := range []struct{ id, userID, name, codesJSON string }{
+		{"PM-SPLIT-LEAD", "team_lead", "团队负责人", `[]`},
+		{"PM-SPLIT-PM", "project_manager", "项目经理", `[]`},
+		{"ENG-OK", "ENG-OK", "合格工程师", `["DJCP","ISO27001"]`},
+		{"ENG-BAD", "ENG-BAD", "缺证工程师", `["OTHER"]`},
 	} {
-		statement := `INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-			VALUES ('CAP-` + seed.id + `', '` + tenant + `', 'PERSON', '` + seed.id + `', '` + seed.name + `', JSON_ARRAY(` +
-			strings.Trim(seed.codesJSON, "[]") + `), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', NOW(3), 'seed')`
+		statement := `INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, identity_checked_at, updated_at, updated_by)
+			VALUES ('CAP-` + seed.id + `', '` + tenant + `', 'PERSON', '` + seed.id + `', '` + seed.name + `', '` + seed.userID + `', JSON_ARRAY(` +
+			strings.Trim(seed.codesJSON, "[]") + `), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed')`
 		if err := db.WithContext(ctx).Exec(statement).Error; err != nil {
 			t.Fatalf("seed 能力失败: %v", err)
 		}
@@ -422,6 +455,13 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 	}
 
 	// 批量导入：合法行写入、非法行跳过并给出行号原因。
+	for _, code := range []string{"A1", "A2"} {
+		status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/rules",
+			fmt.Sprintf(`{"kind":"capability-codes","name":"%s","scope":"%s","check_type":"PERSON","enabled":true}`, code, code))
+		if status != http.StatusCreated {
+			t.Fatalf("保存导入用人员资质编码 %s 失败: HTTP %d %s", code, status, body)
+		}
+	}
 	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories/import",
 		`{"items":[{"category":"导入类别A","system_standard":"ISO 27001","required_codes":"A1，A2","special_method":"MARKABLE","enabled":true},{"category":"","special_method":"NO","enabled":true},{"category":"导入类别B","special_method":"不存在的取值","enabled":true}]}`)
 	if status != http.StatusOK {

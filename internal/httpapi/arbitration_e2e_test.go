@@ -36,6 +36,20 @@ type arbEnv struct {
 	handler http.Handler
 }
 
+// staticRolePersonnelDirectory represents the platform-side effective role
+// assignments used by database E2E fixtures. Capability rows alone must not
+// make an arbitrary identifier assignable: both the platform role directory
+// and an active project capability are required.
+type staticRolePersonnelDirectory map[string][]platform.OwnerDirectoryUser
+
+func (d staticRolePersonnelDirectory) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {
+	items := make([]platform.OwnerDirectoryUser, 0)
+	for _, role := range query.RoleCodes {
+		items = append(items, d[role]...)
+	}
+	return platform.OwnerDirectoryPage{Items: items, Page: query.Page, PageSize: query.PageSize, Total: int64(len(items))}, nil
+}
+
 func newArbEnv(t *testing.T) *arbEnv {
 	t.Helper()
 	dsn := os.Getenv("PM_TEST_DSN")
@@ -47,7 +61,15 @@ func newArbEnv(t *testing.T) *arbEnv {
 		t.Fatalf("open database: %v", err)
 	}
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service := &application.Service{
+		Repo: repository,
+		Personnel: staticRolePersonnelDirectory{
+			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
+			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
+			"engineer":        {{UserID: "engineer", DisplayName: "到期日工程师"}},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 	env := &arbEnv{t: t, db: db, handler: httpapi.NewRouter(service, switchIdentityFor(arbTenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	env.clean()
 	t.Cleanup(env.clean)
@@ -339,9 +361,12 @@ func TestArbitrationPMDate01ExpiryDayNowAssignable(t *testing.T) {
 		`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, created_at, updated_at)
 		 VALUES ('SI-ARB-DATE', '`+arbTenant+`', 'PJ-ARB-DATE', 'S1', 'r', 'STANDARD', '待分配', 'NONE', 'PASSED', NOW(3), NOW(3))`,
 		// 有效期至「今天 00:00」——即到期日当天
-		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, capability_codes, valid_from, valid_until, status, usage_scope, updated_at, updated_by)
-		 VALUES ('CAP-ARB-DATE', '`+arbTenant+`', 'PERSON', 'PM-ARB-ENG', '到期日工程师', JSON_ARRAY('TPL-ARB'),
-		         DATE_SUB(NOW(3), INTERVAL 30 DAY), DATE_FORMAT(NOW(3), '%Y-%m-%d 00:00:00'), 'ACTIVE', 'ANY', NOW(3), 'seed')`,
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, identity_checked_at, updated_at, updated_by)
+		 VALUES ('CAP-ARB-DATE', '`+arbTenant+`', 'PERSON', 'PM-ARB-ENG', '到期日工程师', 'engineer', JSON_ARRAY('TPL-ARB'),
+		         DATE_SUB(NOW(3), INTERVAL 30 DAY), DATE_FORMAT(NOW(3), '%Y-%m-%d 00:00:00'), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
+		`INSERT INTO pm_capability (id, tenant_id, resource_type, resource_id, resource_name, user_id, capability_codes, valid_from, valid_until, status, usage_scope, identity_status, identity_checked_at, updated_at, updated_by) VALUES
+		 ('CAP-ARB-LEAD', '`+arbTenant+`', 'PERSON', 'PM-ARB-LEAD', '团队负责人', 'team_lead', JSON_ARRAY(), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed'),
+		 ('CAP-ARB-PM', '`+arbTenant+`', 'PERSON', 'PM-ARB-PM', '项目经理', 'project_manager', JSON_ARRAY(), DATE_SUB(NOW(3), INTERVAL 1 DAY), DATE_ADD(NOW(3), INTERVAL 1 YEAR), 'ACTIVE', 'ANY', 'ACTIVE', NOW(3), NOW(3), 'seed')`,
 	)
 	// 先分配团队负责人：EventExecutionTeamAssigned 的前置不变量要求 TeamLeadID 非空。
 	if status, body := env.call("business_admin", http.MethodPost, "/api/v1/service-items/SI-ARB-DATE/team-assignment",

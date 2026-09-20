@@ -1,0 +1,214 @@
+{
+  "generated_at": "2026-09-20T07:49:27.775Z",
+  "runs": 3,
+  "sample_count": 8,
+  "historical_count": 0,
+  "metrics": {
+    "safety_risk": {
+      "count": 8,
+      "brier": 0.03180833333333334,
+      "accuracy_at_0_5": 1,
+      "max_repeat_spread": 0.010000000000000009
+    },
+    "compliance_risk": {
+      "count": 8,
+      "brier": 0.03394305555555555,
+      "accuracy_at_0_5": 1,
+      "max_repeat_spread": 0.06000000000000005
+    },
+    "delivery_blocked": {
+      "count": 8,
+      "brier": 0.06498333333333334,
+      "accuracy_at_0_5": 0.875,
+      "max_repeat_spread": 0.02999999999999997
+    },
+    "severity_understated": {
+      "count": 8,
+      "brier": 0.13875694444444447,
+      "accuracy_at_0_5": 0.875,
+      "max_repeat_spread": 0.040000000000000036
+    }
+  },
+  "calibration": {
+    "status": "NOT_CALIBRATED",
+    "reason": "Only 0 labeled historical cases are present; monitoring ranking must remain disconnected."
+  },
+  "samples": [
+    {
+      "id": "synthetic-001",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": true,
+        "delivery_blocked": true,
+        "severity_understated": true
+      },
+      "probabilities": {
+        "safety_risk": 0.4066666666666667,
+        "compliance_risk": 0.8966666666666666,
+        "delivery_blocked": 0.85,
+        "severity_understated": 0.3833333333333333
+      },
+      "spread": {
+        "safety_risk": 0.009999999999999953,
+        "compliance_risk": 0.010000000000000009,
+        "delivery_blocked": 0.020000000000000018,
+        "severity_understated": 0.010000000000000009
+      }
+    },
+    {
+      "id": "synthetic-002",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": false,
+        "delivery_blocked": false,
+        "severity_understated": false
+      },
+      "probabilities": {
+        "safety_risk": 0.02,
+        "compliance_risk": 0.04,
+        "delivery_blocked": 0.04,
+        "severity_understated": 0.12
+      },
+      "spread": {
+        "safety_risk": 0,
+        "compliance_risk": 0,
+        "delivery_blocked": 0,
+        "severity_understated": 0
+      }
+    },
+    {
+      "id": "synthetic-003",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": true,
+        "delivery_blocked": true,
+        "severity_understated": true
+      },
+      "probabilities": {
+        "safety_risk": 0.09000000000000001,
+        "compliance_risk": 0.7533333333333333,
+        "delivery_blocked": 0.8966666666666666,
+        "severity_understated": 0.65
+      },
+      "spread": {
+        "safety_risk": 0,
+        "compliance_risk": 0.06000000000000005,
+        "delivery_blocked": 0.020000000000000018,
+        "severity_understated": 0.040000000000000036
+      }
+    },
+    {
+      "id": "synthetic-004",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": false,
+        "delivery_blocked": false,
+        "severity_understated": false
+      },
+      "probabilities": {
+        "safety_risk": 0.03,
+        "compliance_risk": 0.14333333333333334,
+        "delivery_blocked": 0.13,
+        "severity_understated": 0.19333333333333336
+      },
+      "spread": {
+        "safety_risk": 0,
+        "compliance_risk": 0.009999999999999981,
+        "delivery_blocked": 0,
+        "severity_understated": 0.010000000000000009
+      }
+    },
+    {
+      "id": "synthetic-005",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": true,
+        "compliance_risk": false,
+        "delivery_blocked": true,
+        "severity_understated": false
+      },
+      "probabilities": {
+        "safety_risk": 0.9666666666666667,
+        "compliance_risk": 0.31666666666666665,
+        "delivery_blocked": 0.9700000000000001,
+        "severity_understated": 0.44333333333333336
+      },
+      "spread": {
+        "safety_risk": 0.010000000000000009,
+        "compliance_risk": 0.040000000000000036,
+        "delivery_blocked": 0,
+        "severity_understated": 0.010000000000000009
+      }
+    },
+    {
+      "id": "synthetic-006",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": true,
+        "delivery_blocked": true,
+        "severity_understated": false
+      },
+      "probabilities": {
+        "safety_risk": 0.22666666666666668,
+        "compliance_risk": 0.9,
+        "delivery_blocked": 0.7866666666666667,
+        "severity_understated": 0.43
+      },
+      "spread": {
+        "safety_risk": 0.010000000000000009,
+        "compliance_risk": 0,
+        "delivery_blocked": 0.010000000000000009,
+        "severity_understated": 0.020000000000000018
+      }
+    },
+    {
+      "id": "synthetic-007",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": false,
+        "delivery_blocked": false,
+        "severity_understated": false
+      },
+      "probabilities": {
+        "safety_risk": 0.04,
+        "compliance_risk": 0.10000000000000002,
+        "delivery_blocked": 0.06,
+        "severity_understated": 0.15666666666666665
+      },
+      "spread": {
+        "safety_risk": 0,
+        "compliance_risk": 0,
+        "delivery_blocked": 0,
+        "severity_understated": 0.020000000000000018
+      }
+    },
+    {
+      "id": "synthetic-008",
+      "source": "synthetic",
+      "labels": {
+        "safety_risk": false,
+        "compliance_risk": true,
+        "delivery_blocked": true,
+        "severity_understated": true
+      },
+      "probabilities": {
+        "safety_risk": 0.16,
+        "compliance_risk": 0.7600000000000001,
+        "delivery_blocked": 0.35333333333333333,
+        "severity_understated": 0.6133333333333333
+      },
+      "spread": {
+        "safety_risk": 0,
+        "compliance_risk": 0.020000000000000018,
+        "delivery_blocked": 0.02999999999999997,
+        "severity_understated": 0.010000000000000009
+      }
+    }
+  ]
+}
