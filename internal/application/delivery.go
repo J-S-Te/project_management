@@ -1149,9 +1149,6 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.plan", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
-	if strings.TrimSpace(input.TravelRequestID) == "" {
-		return ErrValidation
-	}
 	repo, err := s.deliveryRepo()
 	if err != nil {
 		return err
@@ -1159,6 +1156,17 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	// 设备清单在实施准备阶段确定：以计划的计划起止为占用区间边界，占用重叠直接拒绝，
 	// 避免同一台设备被两个服务项在同一时间段内同时占用。
 	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	var projectEvents []domain.DeliveryEvent
+	if strings.EqualFold(strings.TrimSpace(input.Travel.Mode), domain.TravelModeExisting) {
+		projectEvents, err = repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
+		if err != nil {
+			return err
+		}
+	}
+	travel, err := normalizeTravelArrangement(input, item, projectEvents)
 	if err != nil {
 		return err
 	}
@@ -1170,7 +1178,89 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{"travel_request_id": input.TravelRequestID, "notes": input.Notes, "equipment": equipment}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{
+		"travel_request_id": travel.RequestID,
+		"travel":            travel,
+		"notes":             strings.TrimSpace(input.Notes),
+		"equipment":         equipment,
+	}))
+}
+
+// normalizeTravelArrangement 把旧版裸编号和新版结构化行程统一成可审计快照。
+// 新建行程编号必须由服务端生成；关联已有行程必须引用当前项目真实存在的准备事件。
+func normalizeTravelArrangement(input domain.PreparationInput, item domain.ServiceItem, projectEvents []domain.DeliveryEvent) (domain.TravelArrangementInput, error) {
+	travel := input.Travel
+	travel.Mode = strings.ToUpper(strings.TrimSpace(travel.Mode))
+	travel.ReferenceEventID = strings.TrimSpace(travel.ReferenceEventID)
+	travel.RequestID = strings.TrimSpace(travel.RequestID)
+	travel.NoTravelReason = strings.TrimSpace(travel.NoTravelReason)
+	travel.Origin = strings.TrimSpace(travel.Origin)
+	travel.Destination = strings.TrimSpace(travel.Destination)
+	travel.DepartureDate = strings.TrimSpace(travel.DepartureDate)
+	travel.ReturnDate = strings.TrimSpace(travel.ReturnDate)
+	travel.Transport = strings.TrimSpace(travel.Transport)
+	travel.AccommodationNeed = strings.TrimSpace(travel.AccommodationNeed)
+	travel.TravelerIDs = normalizePersonnelIDs(travel.TravelerIDs)
+
+	// 滚动升级期间允许旧客户端继续发送 travel_request_id；它只作为历史兼容快照，
+	// 新版 UI 不再暴露这个可自由输入的字段。
+	if travel.Mode == "" && strings.TrimSpace(input.TravelRequestID) != "" {
+		travel.Mode = domain.TravelModeExisting
+		travel.RequestID = strings.TrimSpace(input.TravelRequestID)
+		return travel, nil
+	}
+
+	switch travel.Mode {
+	case domain.TravelModeNoTravel:
+		if travel.NoTravelReason == "" {
+			return domain.TravelArrangementInput{}, ValidationError("无需行程时必须填写原因")
+		}
+		return domain.TravelArrangementInput{Mode: travel.Mode, NoTravelReason: travel.NoTravelReason}, nil
+	case domain.TravelModeExisting:
+		if travel.ReferenceEventID == "" {
+			return domain.TravelArrangementInput{}, ValidationError("请选择已有行程")
+		}
+		for _, event := range projectEvents {
+			if event.ID != travel.ReferenceEventID || event.ProjectID != item.ProjectID || event.Type != EventPreparationStarted {
+				continue
+			}
+			requestID := payloadText(event.Payload, "travel_request_id")
+			if requestID == "" {
+				return domain.TravelArrangementInput{}, ValidationError("所选记录不包含有效行程")
+			}
+			return domain.TravelArrangementInput{Mode: travel.Mode, ReferenceEventID: event.ID, RequestID: requestID}, nil
+		}
+		return domain.TravelArrangementInput{}, ValidationError("所选行程不存在或不属于当前项目")
+	case domain.TravelModeNew:
+		if travel.Origin == "" || travel.Destination == "" {
+			return domain.TravelArrangementInput{}, ValidationError("请填写出发地和目的地")
+		}
+		departure, departureErr := time.Parse("2006-01-02", travel.DepartureDate)
+		returnDate, returnErr := time.Parse("2006-01-02", travel.ReturnDate)
+		if departureErr != nil || returnErr != nil || returnDate.Before(departure) {
+			return domain.TravelArrangementInput{}, ValidationError("行程日期不完整或返回日期早于出发日期")
+		}
+		if len(travel.TravelerIDs) == 0 {
+			return domain.TravelArrangementInput{}, ValidationError("请至少选择一名出行人员")
+		}
+		assigned := map[string]struct{}{}
+		for _, id := range append([]string{item.TeamLeadID, item.ProjectManagerID}, item.EngineerIDs...) {
+			if id = strings.TrimSpace(id); id != "" {
+				assigned[id] = struct{}{}
+			}
+		}
+		for _, id := range travel.TravelerIDs {
+			if _, ok := assigned[id]; !ok {
+				return domain.TravelArrangementInput{}, ValidationError("出行人员必须来自当前服务项已分配人员")
+			}
+		}
+		travel.RequestID = "TRIP-" + time.Now().UTC().Format("20060102") + "-" + strings.ToUpper(ulid.Make().String()[20:])
+		travel.ReferenceEventID = ""
+		travel.NoTravelReason = ""
+		return travel, nil
+	default:
+		return domain.TravelArrangementInput{}, ValidationError("请选择有效的行程安排方式")
+	}
 }
 
 // RevokeImplementationPlan 仅在尚未开始实施准备时允许撤销计划；责任分配和能力结论仍保留，
@@ -1541,11 +1631,13 @@ func planWindowOf(item domain.ServiceItem) (time.Time, time.Time, error) {
 	return start, end, nil
 }
 
-// resolvePreparationEquipment 解析实施准备提交的设备清单：设备必须命中有效能力档案，
-// 使用时段落在计划内且被检定有效期覆盖，并且在该时段内没有被其他服务项占用。
+// resolvePreparationEquipment 解析实施准备提交的可选设备清单。无需设备的服务项可以留空；
+// 一旦选择设备，设备必须命中有效能力档案，使用时段落在计划内且被检定有效期覆盖，
+// 并且在该时段内没有被其他服务项占用。
 func (s *Service) resolvePreparationEquipment(ctx context.Context, repo DeliveryRepository, tenantID, serviceItemID string, inputs []domain.PlanResourceInput, planStart, planEnd time.Time) ([]domain.PlanResource, error) {
 	if len(inputs) == 0 {
-		return nil, ValidationError("请至少选择一台实施设备")
+		// 返回非 nil 空切片，使事件快照明确写入 []，避免重新发起实施准备时沿用旧设备清单。
+		return []domain.PlanResource{}, nil
 	}
 	known, err := repo.ListCapabilities(ctx, tenantID, "")
 	if err != nil {
