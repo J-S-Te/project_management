@@ -162,12 +162,12 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.PUT("/sites", require("project.resource.manage"), h.upsertSite)
 	api.DELETE("/sites/:site_code", require("project.resource.manage"), h.deleteSite)
 	api.GET("/rules", require("project.read"), h.listRules)
-	api.POST("/rules", require("project_rule.manage"), h.createRule)
-	api.PATCH("/rules/:id", require("project_rule.manage"), h.updateRule)
-	api.PUT("/rules/:id", require("project_rule.manage"), h.updateConfigRule)
-	// 删除与新建、编辑同权：路由层按 kind 的两种权限并集粗放行（字段级权限由
-	// project.field_permission.manage 把关），具体 kind 的判定在应用层 DeleteRule。
-	api.DELETE("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage"), h.deleteRule)
+	api.POST("/rules", requireAny("project_rule.manage", "project.field_permission.manage", "project.capability_code.manage"), h.createRule)
+	api.PATCH("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage", "project.capability_code.manage"), h.updateRule)
+	api.PUT("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage", "project.capability_code.manage"), h.updateConfigRule)
+	// 删除与新建、编辑同权：路由层按三类规则权限并集粗放行，
+	// 具体 kind 的最小权限判定在应用层执行。
+	api.DELETE("/rules/:id", requireAny("project_rule.manage", "project.field_permission.manage", "project.capability_code.manage"), h.deleteRule)
 	// 合同拆解规则配置 v2（原型 PG-CFG-01）：默认分组规则 / 检测类别域 / 覆盖规则。
 	// 读以 project.read 为基线（页面要展示当前配置），写统一由 project_rule.manage 把关。
 	api.GET("/split-policy", require("project.read"), h.getSplitPolicy)
@@ -489,11 +489,11 @@ func navigationSections(roles []string) []string {
 		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports"},
+		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla"},
 		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
-		// 设备管理员只进入「资源分配」分组中的设备/资质维护，不暴露执行总览和项目管理。
+		// 设备管理员维护设备与共用的资质/能力编码目录，不暴露其它规则配置。
 		// equipment 放在首位，使其成为该角色的默认工作区。
-		"device_admin": {"equipment", "qualifications"},
+		"device_admin": {"equipment", "qualifications", "capability-codes"},
 		// 质量管理员只进入「现场实施」分组：跟踪实施、评审异常、评估标准变更并审核报告。
 		// 项目列表和系统配置不属于该岗位工作台。
 		"quality_manager": {"implementation", "exceptions", "standards", "reports"},

@@ -608,6 +608,16 @@ func TestDeleteRuleRejectsUnknownAndUnauthorized(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("字段级权限删除 status=%d body=%s", response.Code, response.Body.String())
 	}
+	// 设备管理员的独立编码权限只允许操作 capability-codes。
+	limited, _ := ruleRouter(t, map[string]bool{"project.capability_code.manage": true}, nil)
+	response = perform(limited, http.MethodPost, "/api/v1/rules", `{"kind":"capability-codes","name":"设备编码","scope":"EQ-SCAN","check_type":"EQUIPMENT","enabled":true}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("编码管理员新建 capability-codes status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = perform(limited, http.MethodPost, "/api/v1/rules", `{"kind":"sla","name":"SLA","status":"待实施","deadline_hours":24,"remind_hours":2,"enabled":true}`)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("编码管理员不得新建 SLA status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 // 权限矩阵与栏目可见性必须对齐，三类缺口都会变成线上问题：
@@ -619,7 +629,7 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 	modules := map[string][]string{
 		"split-rules": {"project_rule.manage"}, "warning-rules": {"project_rule.manage"},
 		"automations": {"project_rule.manage"}, "sla": {"project_rule.manage"},
-		"standards": {"project_rule.manage"}, "capability-codes": {"project_rule.manage"}, "permissions": {"project.field_permission.manage"},
+		"standards": {"project_rule.manage"}, "capability-codes": {"project_rule.manage", "project.capability_code.manage"}, "permissions": {"project.field_permission.manage"},
 		"qualifications": {"project.resource.manage"},
 		"decomposition":  {"service_item.confirm", "project.decomposition.manage"},
 		"planning":       {"project.implementation.plan"},
@@ -641,14 +651,14 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 		"methods": true,
 	}
 	rolePermissions := map[string][]string{
-		"admin":                {"project_rule.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
-		"system_admin":         {"project_rule.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"admin":                {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"system_admin":         {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
 		"business_admin":       {"service_item.confirm", "project.decomposition.manage", "project.team.assign", "project.resource.read"},
 		"team_lead":            {"project.execution.assign", "project.deviation.review", "project.resource.read"},
-		"technical_director":   {"project.special_method.review", "project.report.archive", "project.deviation.review", "project.resource.read"},
+		"technical_director":   {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.special_method.review", "project.report.archive", "project.deviation.review", "project.resource.read"},
 		"project_manager":      {"project.implementation.plan", "project.report.manage", "project.field.complete", "project.resource.read"},
 		"quality_manager":      {"project_rule.manage", "project.report.review", "project.resource.read"},
-		"device_admin":         {"project.device.manage", "project.device.read", "project.resource.manage", "project.resource.read"},
+		"device_admin":         {"project.device.manage", "project.device.read", "project.capability_code.manage", "project.resource.read"},
 		"engineer":             {"project.field.execute", "project.deviation.report"},
 		"penetration_engineer": {"project.field.execute", "project.deviation.report"},
 	}
@@ -803,7 +813,7 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 	}
 	// 设备管理员只进入资源分配分组，并默认进入设备能力页。
 	deviceAdmin := navigationBodyForRole(t, "device_admin")
-	for _, section := range []string{"equipment", "qualifications"} {
+	for _, section := range []string{"equipment", "qualifications", "capability-codes"} {
 		if !strings.Contains(deviceAdmin, `"`+section+`"`) {
 			t.Fatalf("device_admin must see %q: %s", section, deviceAdmin)
 		}
@@ -815,6 +825,18 @@ func TestAdministratorNavigationCoversEveryWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(deviceAdmin, `"default_section":"equipment"`) {
 		t.Fatalf("device_admin navigation = %s", deviceAdmin)
+	}
+	for _, section := range []string{"warning-rules", "automations", "permissions", "sla", "split-rules"} {
+		if strings.Contains(deviceAdmin, `"`+section+`"`) {
+			t.Fatalf("device_admin must not see unrelated configuration %q: %s", section, deviceAdmin)
+		}
+	}
+
+	technicalDirector := navigationBodyForRole(t, "technical_director")
+	for _, section := range []string{"capability-codes", "warning-rules", "automations", "permissions", "sla"} {
+		if !strings.Contains(technicalDirector, `"`+section+`"`) {
+			t.Fatalf("technical_director must see rule configuration %q: %s", section, technicalDirector)
+		}
 	}
 
 	// 质量管理员只看到现场实施分组，不进入总览、项目、资源和系统配置。

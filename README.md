@@ -114,7 +114,7 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/{id}/deviations` | 停止任务并上报偏离 |
 | POST | `/api/v1/deviations/{id}/review` | 团队负责人或技术总监决定放行、终止或重测 |
 | POST | `/api/v1/projects/{id}/field-complete` | 项目经理汇总确认现场实施完成 |
-| GET/PUT | `/api/v1/capabilities` | 查询或维护人员资质、设备能力；有效期仅用于设备检定 |
+| GET/PUT | `/api/v1/capabilities` | 查询人员资质与设备能力投影；PUT 只维护人员资质，设备新建、更新、停用和删除统一使用 `/api/v1/equipment` |
 | GET | `/api/v1/delivery-events` | 查询完整交付过程留痕 |
 
 ### 外部系统边界

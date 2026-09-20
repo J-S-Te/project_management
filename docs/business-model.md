@@ -157,12 +157,13 @@ stateDiagram-v2
 | 报告归档 | `project.report.archive` | 技术总监、质量管理员 |
 | 特殊方法复核 | `project.special_method.review` | 技术总监 |
 | 拆解调整 | `project.decomposition.manage` | 业务管理员 |
-| 资质与能力维护 | `project.resource.manage` | 质量管理员、设备管理员、项目系统管理员 |
+| 人员资质维护 | `project.resource.manage` | 质量管理员、项目系统管理员 |
 | 设备维护 | `project.device.manage` | 设备管理员 |
-| 规则与配置 | `project_rule.manage` | 质量管理员 |
-| 字段级脱敏 | `project.field_permission.manage` | 项目系统管理员 |
+| 资质 / 能力编码配置 | `project.capability_code.manage` | 设备管理员、技术总监、项目系统管理员 |
+| 规则与配置 | `project_rule.manage` | 技术总监、质量管理员、项目系统管理员 |
+| 字段级脱敏 | `project.field_permission.manage` | 技术总监、项目系统管理员 |
 
-> **2026-09-16 工作台可见性口径**：设备管理员只看到“资源分配”分组中的设备能力和资质能力入口；质量管理员只看到“现场实施”分组。隐藏导航不替代接口鉴权，服务端权限仍是最终边界。
+> **2026-09-20 工作台可见性口径**：设备管理员看到设备能力、资质能力只读投影和规则配置中心的“资质 / 能力编码”；技术总监看到完整规则配置中心；质量管理员只看到“现场实施”分组。隐藏导航不替代接口鉴权，服务端权限仍是最终边界。
 
 **当前角色集合**：项目系统管理员、平台系统管理员、业务管理员、团队负责人、技术总监、项目经理、实施工程师、渗透测试工程师、质量管理员、设备管理员。
 

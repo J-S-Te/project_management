@@ -474,27 +474,26 @@ func TestDeleteEquipmentProtectsActiveReservations(t *testing.T) {
 	})
 }
 
-// 资质与能力管理与 CSV 导入同样不能清掉设备的使用范围。
-func TestCapabilityUpsertAndImportPreserveUsageScope(t *testing.T) {
+// 通用资质入口只维护人员；设备新建、修改和删除必须统一走设备能力入口。
+func TestQualificationUpsertAndImportRejectEquipment(t *testing.T) {
 	repo := &capabilityRepository{capabilities: []domain.Capability{
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, Status: "ACTIVE", UsageScope: domain.EquipmentUsageCompanyOnly},
 	}}
 	service := &Service{Repo: repo}
 	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
 
-	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备改名", Codes: []string{"c1"}}); err != nil {
+	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备改名", Codes: []string{"c1"}}); !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), "设备能力") {
+		t.Fatalf("通用资质入口应拒绝设备，error=%v", err)
+	}
+	result, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
-		t.Fatalf("capability upsert must keep the stored usage scope, got %q", got)
+	if result.Imported != 0 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "设备能力") {
+		t.Fatalf("设备 CSV 应被逐行拒绝，result=%+v", result)
 	}
-
-	repo.saved = nil
-	if _, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if got := repo.saved[len(repo.saved)-1].UsageScope; got != domain.EquipmentUsageCompanyOnly {
-		t.Fatalf("csv import must keep the stored usage scope, got %q", got)
+	if len(repo.saved) != 0 {
+		t.Fatalf("通用资质入口不得写入设备：%+v", repo.saved)
 	}
 }
 

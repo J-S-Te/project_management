@@ -187,24 +187,21 @@ func TestCapabilityWritesRequireEnabledCatalogButPreserveHistoricalCodes(t *test
 	})
 }
 
-func TestCapabilityUpsertAndImportApplySameCatalogValidation(t *testing.T) {
-	rules := []domain.Rule{{Kind: capabilityCodeRuleKind, Scope: "EQ-A", CheckType: "EQUIPMENT", Enabled: true}}
-	repo := &capabilityRepository{rules: rules}
+func TestQualificationUpsertAndImportCannotBypassEquipmentBoundary(t *testing.T) {
+	repo := &capabilityRepository{rules: []domain.Rule{{Kind: capabilityCodeRuleKind, Scope: "EQ-A", CheckType: "EQUIPMENT", Enabled: true}}}
 	service := &Service{Repo: repo}
 	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "quality_manager", ScopeType: "APPLICATION"})
 
-	saved, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "equipment", ResourceID: "EQ-1", ResourceName: "扫描器", Codes: []string{" eq-a "}})
-	if err != nil || len(saved.Codes) != 1 || saved.Codes[0] != "EQ-A" {
-		t.Fatalf("saved=%+v err=%v", saved, err)
+	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "equipment", ResourceID: "EQ-1", ResourceName: "扫描器", Codes: []string{" eq-a "}}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("设备不应通过人员资质写入，err=%v", err)
 	}
 	result, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{
-		{ResourceType: "EQUIPMENT", ResourceID: "EQ-2", ResourceName: "有效", Codes: []string{"EQ-A"}},
-		{ResourceType: "EQUIPMENT", ResourceID: "EQ-3", ResourceName: "无效", Codes: []string{"EQ-X"}},
+		{ResourceType: "EQUIPMENT", ResourceID: "EQ-2", ResourceName: "设备", Codes: []string{"EQ-A"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Imported != 1 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "EQ-X") {
+	if result.Imported != 0 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "设备能力") {
 		t.Fatalf("result=%+v", result)
 	}
 }

@@ -29,7 +29,7 @@ import (
 
 const e2eTenant = "PM-E2E-TENANT"
 
-// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 6）。
+// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 7）。
 // 不得自行发明权限，否则走查结果不代表真实角色能力。
 var e2eRolePermissions = map[string][]string{
 	"business_admin": {"project.read", "project.create", "service_item.confirm", "project.decomposition.manage", "project.resource.read", "project.team.assign", "project.team.revoke"},
@@ -38,11 +38,11 @@ var e2eRolePermissions = map[string][]string{
 		"project.implementation.revoke", "project.rollback.request", "project.report.correction.request",
 		"project.field.complete", "project.report.prepare"},
 	"engineer":           {"project.read", "project.field.execute", "project.deviation.report"},
-	"technical_director": {"project.read", "project.resource.read", "project.rollback.approve", "project.report.correction.approve", "project.deviation.review", "project.special_method.review", "project.report.issue", "project.report.archive"},
+	"technical_director": {"project.read", "project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.read", "project.rollback.approve", "project.report.correction.approve", "project.deviation.review", "project.special_method.review", "project.report.issue", "project.report.archive"},
 	"quality_manager":    {"project.read", "project_rule.manage", "project.resource.read", "project.resource.manage", "project.report.review"},
 	// admin 持有全部权限：规则配置里「字段级权限」走 project.field_permission.manage，
 	// 只有 admin/system_admin 同时具备，用它覆盖六种规则类型。
-	"admin": {"project.read", "project.create", "service_item.confirm", "project_rule.manage", "project.contract.import", "project.decomposition.manage", "project.resource.read", "project.resource.manage", "project.device.read", "project.device.manage", "project.team.assign", "project.team.revoke", "project.execution.assign", "project.execution.revoke", "project.implementation.plan", "project.implementation.revoke", "project.rollback.request", "project.rollback.approve", "project.field.execute", "project.deviation.report", "project.deviation.review", "project.special_method.review", "project.field.complete", "project.report.manage", "project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive", "project.report.correction.request", "project.report.correction.approve", "project.field_permission.manage"},
+	"admin": {"project.read", "project.create", "service_item.confirm", "project_rule.manage", "project.capability_code.manage", "project.contract.import", "project.decomposition.manage", "project.resource.read", "project.resource.manage", "project.device.read", "project.device.manage", "project.team.assign", "project.team.revoke", "project.execution.assign", "project.execution.revoke", "project.implementation.plan", "project.implementation.revoke", "project.rollback.request", "project.rollback.approve", "project.field.execute", "project.deviation.report", "project.deviation.review", "project.special_method.review", "project.field.complete", "project.report.manage", "project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive", "project.report.correction.request", "project.report.correction.approve", "project.field_permission.manage"},
 }
 
 // switchIdentity 按请求头 X-E2E-Role 返回对应角色的 Principal，用于在一个路由实例上
@@ -81,7 +81,7 @@ func (switchIdentity) Authenticate(_ context.Context, request *http.Request) (pl
 		Roles: []string{role}, Permissions: granted,
 		DataScopes:            []platform.DataScope{{RoleCode: role, ScopeType: "APPLICATION"}},
 		AuthorizationRevision: 1,
-		CatalogVersion:        "6",
+		CatalogVersion:        "7",
 	}, nil
 }
 

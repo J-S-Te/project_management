@@ -1854,6 +1854,9 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, e
 	}
 	normalizeCapability(&item)
+	if item.ResourceType != "PERSON" {
+		return item, ValidationError("设备能力请在「设备能力」中新建或维护")
+	}
 	item.TenantID = p.TenantID
 	existing, err := repo.ListCapabilities(ctx, p.TenantID, item.ResourceType)
 	if err != nil {
@@ -1861,17 +1864,13 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	}
 	// 人员资质必须绑定基础平台当前可见的在职人员。资源名称是平台目录的显示名，
 	// 不能信任浏览器提交的任意文本，以免出现“资质档案姓名”和身份主体不一致。
-	if item.ResourceType == "PERSON" {
-		person, err := s.resolveCapabilityPerson(ctx, item.UserID)
-		if err != nil {
-			return item, err
-		}
-		item.UserID = person.UserID
-		item.ResourceName = person.DisplayName
-		item.IdentityStatus = domain.IdentityStatusActive
-	} else {
-		item.UserID = ""
+	person, err := s.resolveCapabilityPerson(ctx, item.UserID)
+	if err != nil {
+		return item, err
 	}
+	item.UserID = person.UserID
+	item.ResourceName = person.DisplayName
+	item.IdentityStatus = domain.IdentityStatusActive
 	if strings.TrimSpace(item.ResourceID) == "" {
 		assignResourceID(existing, &item)
 	}
@@ -1886,11 +1885,7 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 		return item, err
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
-	// 使用范围只对设备有意义：调用方没有提交时必须沿用该设备的既有设置，
-	// 否则从"资质与能力管理"改一个名称就会把「仅在公司使用」静默改回可借出。
-	if item.ResourceType == "EQUIPMENT" && strings.TrimSpace(item.UsageScope) == "" {
-		item.UsageScope = existingUsageScope(existing, item.ResourceID)
-	}
+	item.UsageScope = ""
 	saved, err := repo.UpsertCapability(ctx, item, p.UserID)
 	if err != nil {
 		return saved, err
@@ -1922,7 +1917,8 @@ func (s *Service) resolveCapabilityPerson(ctx context.Context, userID string) (p
 	return platform.OwnerDirectoryUser{}, ErrValidation
 }
 
-// ImportCapabilities 批量写入能力记录（人员资质或设备能力）。逐行校验并独立写入，
+// ImportCapabilities 批量写入人员资质记录。设备生命周期只能通过设备能力接口维护。
+// 逐行校验并独立写入，
 // 单行失败只累计跳过原因，不影响其余行，避免一条脏数据阻塞整批导入。
 func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, rows []domain.Capability) (CapabilityImportResult, error) {
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
@@ -1945,6 +1941,11 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 	for i := range rows {
 		line := fmt.Sprintf("数据行 %d", i+1)
 		normalizeCapability(&rows[i])
+		if rows[i].ResourceType != "PERSON" {
+			result.Skipped++
+			result.Errors = append(result.Errors, line+": 只能导入人员资质；设备请在「设备能力」中新建或维护")
+			continue
+		}
 		assignResourceID(known, &rows[i])
 		if err := validateCapability(rows[i]); err != nil {
 			result.Skipped++
@@ -1958,8 +1959,7 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 		}
 		rows[i].TenantID = p.TenantID
 		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
-		// CSV 不携带使用范围；导入既有设备时必须保留原设置，不能被批量改回可借出。
-		rows[i].UsageScope = firstNonEmpty(rows[i].UsageScope, existingUsageScope(known, rows[i].ResourceID))
+		rows[i].UsageScope = ""
 		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
 			result.Skipped++
 			result.Errors = append(result.Errors, line+": "+err.Error())
