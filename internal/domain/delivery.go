@@ -4,7 +4,10 @@ import "time"
 
 // ContractActivation is the idempotent contract-to-project handoff owned by the contract system.
 type ContractActivation struct {
-	ContractID      string `json:"contract_id"`
+	ContractID string `json:"contract_id"`
+	// ContractNumber 是面向用户展示的权威合同编号。滚动发布期间旧合同系统未携带时，
+	// 项目管理以 ContractID 回退展示，但幂等键始终使用稳定的 ContractID + ContractVersion。
+	ContractNumber  string `json:"contract_number,omitempty"`
 	ContractVersion string `json:"contract_version"`
 	ContractName    string `json:"contract_name"`
 	Customer        string `json:"customer"`

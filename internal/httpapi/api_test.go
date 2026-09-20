@@ -94,7 +94,7 @@ func (r *repo) FilterUnreferencedApprovedContracts(_ context.Context, tenantID s
 
 func (r *repo) FindProjectByContractVersion(_ context.Context, filter platform.ScopeFilter, contract, version string) (domain.Project, error) {
 	for _, p := range r.projects {
-		if p.TenantID == filter.TenantID && p.Contract == contract && p.ContractVersion == version {
+		if p.TenantID == filter.TenantID && (p.ContractID == contract || p.Contract == contract) && p.ContractVersion == version {
 			return p, nil
 		}
 	}
@@ -922,6 +922,35 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	}
 }
 
+func TestContractActivationPersistsAuthoritativeContractNumber(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "contract_management", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := `{"contract_id":"01J-STABLE-ID","contract_number":"HT-2026-0099","contract_version":"v3","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+
+	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.projects) != 1 {
+		t.Fatalf("projects=%+v", repository.projects)
+	}
+	project := repository.projects[0]
+	if project.ContractID != "01J-STABLE-ID" || project.Contract != "HT-2026-0099" || project.ContractVersion != "v3" {
+		t.Fatalf("contract identity/display mapping=%+v", project)
+	}
+	if len(repository.events) != 1 || repository.events[0].Payload["contract_id"] != "01J-STABLE-ID" || repository.events[0].Payload["contract_number"] != "HT-2026-0099" {
+		t.Fatalf("events=%+v", repository.events)
+	}
+
+	// 同一稳定 ID + 版本重放必须命中既有项目，不受展示编号不同的影响。
+	replayed := strings.Replace(body, `"contract_number":"HT-2026-0099"`, `"contract_number":"HT-CLIENT-STALE"`, 1)
+	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", replayed)
+	if response.Code != http.StatusCreated || len(repository.projects) != 1 {
+		t.Fatalf("replay status=%d projects=%+v body=%s", response.Code, repository.projects, response.Body.String())
+	}
+}
+
 func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}
@@ -957,6 +986,47 @@ func TestContractIntegrationRejectsMissingRoutingHeaders(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestContractIntegrationListsOnlyEnabledDetectionCategoriesWithoutDeliveryHeader(t *testing.T) {
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/contracts/detection-categories", nil)
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Items []domain.DetectionCategory `json:"items"`
+			Total int                        `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Total == 0 || len(envelope.Data.Items) != envelope.Data.Total {
+		t.Fatalf("unexpected categories: %+v", envelope.Data)
+	}
+	for _, item := range envelope.Data.Items {
+		if !item.Enabled {
+			t.Fatalf("disabled category leaked: %+v", item)
+		}
+	}
+}
+
+func TestContractIntegrationDetectionCategoriesRequiresMachineToken(t *testing.T) {
+	handler := httpapi.NewRouter(&application.Service{Repo: &repo{}}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/internal/v1/contracts/detection-categories", nil))
+	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

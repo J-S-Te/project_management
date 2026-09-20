@@ -26,7 +26,9 @@ func isDuplicateKey(err error) bool {
 
 func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter platform.ScopeFilter, contractID, version string) (domain.Project, error) {
 	var record projectRecord
-	err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("contract = ? AND contract_version = ?", contractID, version).First(&record).Error
+	// 当前数据以稳定 contract_id 幂等；迁移前的历史行可能只把同一个值写在
+	// contract 展示列，因此保留 contract 回退以支持滚动发布和存量数据。
+	err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("(contract_id = ? OR contract = ?) AND contract_version = ?", contractID, contractID, version).First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}

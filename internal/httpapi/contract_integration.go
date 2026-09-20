@@ -41,13 +41,15 @@ func (h *Handler) authenticateContractIntegration(options ContractIntegrationOpt
 			return
 		}
 		tenantID := identity.TenantID
+		// 投递编号用于写入幂等与审计，只在合同激活写请求中强制要求；
+		// 目录读取使用同一机器身份，但不伪造一条“投递”。
 		deliveryID := strings.TrimSpace(c.GetHeader("X-Contract-Delivery-ID"))
-		if deliveryID == "" {
+		if c.Request.Method != http.MethodGet && deliveryID == "" {
 			writeError(c, http.StatusBadRequest, "PM_INTEGRATION_HEADERS_REQUIRED", "缺少合同系统投递编号")
 			c.Abort()
 			return
 		}
-		c.Set("principal", platform.Principal{TenantID: tenantID, IdentityID: "contract_management", UserID: "contract_management", DisplayName: "合同管理系统", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}})
+		c.Set("principal", platform.Principal{TenantID: tenantID, IdentityID: "contract_management", UserID: "contract_management", DisplayName: "合同管理系统", Permissions: map[string]bool{"project.contract.import": true, "project.read": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}})
 		c.Next()
 	}
 }

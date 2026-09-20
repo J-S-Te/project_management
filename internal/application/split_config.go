@@ -88,9 +88,9 @@ func (s *Service) ListDetectionCategories(ctx context.Context, p platform.Princi
 	if err := requireApplicationAuthorization(p, "project.read"); err != nil {
 		return nil, err
 	}
-	repo, err := s.splitConfigRepo()
-	if err != nil {
-		return nil, err
+	repo, ok := s.Repo.(detectionCategoryReader)
+	if !ok {
+		return nil, ErrNotFound
 	}
 	return repo.ListDetectionCategories(ctx, p.TenantID)
 }

@@ -83,6 +83,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		internal := router.Group("/internal/v1")
 		internal.Use(h.authenticateContractIntegration(*integration), h.auditWrites())
 		internal.POST("/contracts/activate", h.activateContract)
+		internal.GET("/contracts/detection-categories", h.listContractDetectionCategories)
 	}
 	if integration := routerOptions.DashboardIntegration; integration != nil && integration.Enabled {
 		daInternal := router.Group("/internal/v1")
@@ -1061,6 +1062,7 @@ func (h *Handler) reportDeviation(c *gin.Context) {
 	}
 	writeData(c, http.StatusCreated, map[string]string{"id": id, "status": "PENDING"})
 }
+
 func (h *Handler) reviewDeviation(c *gin.Context) {
 	var input domain.DeviationReviewInput
 	if !decode(c, &input) {
@@ -1348,6 +1350,23 @@ func (h *Handler) listDetectionCategories(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
+// listContractDetectionCategories 仅向通过机器身份认证的合同系统提供当前启用项。
+// 禁用项属于项目管理配置历史，不得继续出现在新合同的服务项选择中。
+func (h *Handler) listContractDetectionCategories(c *gin.Context) {
+	items, err := h.service.ListDetectionCategories(c.Request.Context(), principal(c))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	enabled := make([]domain.DetectionCategory, 0, len(items))
+	for _, item := range items {
+		if item.Enabled {
+			enabled = append(enabled, item)
+		}
+	}
+	writeData(c, http.StatusOK, map[string]any{"items": enabled, "total": len(enabled)})
 }
 
 func (h *Handler) saveDetectionCategory(c *gin.Context) {

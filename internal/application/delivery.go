@@ -225,7 +225,8 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if !filter.AllowAll && !filter.AllowSelf && ownerOrgID == "" {
 		return domain.Project{}, ErrForbidden
 	}
-	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: strings.TrimSpace(input.ContractID), ContractID: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
+	contractNumber := firstNonEmpty(strings.TrimSpace(input.ContractNumber), strings.TrimSpace(input.ContractID))
+	project := domain.Project{TenantID: p.TenantID, OwnerOrgID: ownerOrgID, OwnerIdentityID: ownerIdentityID, ID: projectID(now), Name: firstNonEmpty(input.ContractName, contractNumber, input.ContractID), Customer: strings.TrimSpace(input.Customer), CustomerID: strings.TrimSpace(input.CustomerID), Contract: contractNumber, ContractID: strings.TrimSpace(input.ContractID), ContractVersion: strings.TrimSpace(input.ContractVersion), Status: "待拆解确认", Team: "未分配", Manager: "—", SupplementStatus: "NONE", CreatedAt: now, UpdatedAt: now}
 	// 分组与初始状态由配置决定（原型 PG-CFG-01）：先解析本次生效方案（覆盖规则优先），
 	// 再按方案的分组维度生成服务项，并按检测类别域补齐体系要求与特殊方法口径。
 	// 「未命中分组规则」不再自动放行——原型拆解流程规定：未命中 → 标记待人工确认并通知业务管理员。
@@ -264,12 +265,12 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
 	}
 	project.Services = len(items)
-	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
+	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.ContractID, "contract_number": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
 	if err := repo.ActivateContract(ctx, project, items, event); err != nil {
 		if errors.Is(err, ErrDuplicateContract) {
 			// 竞态窗口：find 阶段两请求都未命中，先到者已建好项目，后到者撞唯一键。
 			// 回读已存在项目并同步盖章状态，按幂等成功返回，不再抛 500。
-			existing, findErr := repo.FindProjectByContractVersion(ctx, filter, project.Contract, project.ContractVersion)
+			existing, findErr := repo.FindProjectByContractVersion(ctx, filter, project.ContractID, project.ContractVersion)
 			if findErr != nil {
 				return domain.Project{}, findErr
 			}
@@ -287,14 +288,14 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 // notifyMissingSplitRule 在检测类别不在检测类别域内、或分组规则无法确定时，
 // 按原型「分组规则缺失时」的默认口径通知业务管理员：标记待人工确认并提醒核对。
 func (s *Service) notifyMissingSplitRule(ctx context.Context, p platform.Principal, project domain.Project, categories []string) {
-	if s.Notifications == nil || s.Personnel == nil || len(categories) == 0 {
+	if s.Personnel == nil || len(categories) == 0 {
 		return
 	}
 	recipients := s.roleRecipients(ctx, p.TenantID, "business_admin")
 	if len(recipients) == 0 {
 		return
 	}
-	notification := platform.NotificationEvent{
+	notification := domain.NotificationMessage{
 		EventID:   ulid.Make().String(),
 		EventType: "SPLIT_RULE_MISSING",
 		// 必须是平台白名单取值，写错会让整条通知被判 400。
@@ -310,9 +311,21 @@ func (s *Service) notifyMissingSplitRule(ctx context.Context, p platform.Princip
 		OccurredAt:     time.Now().UTC(),
 		IdempotencyKey: project.ID + "-split-rule-missing",
 	}
-	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
-		s.Logger.Warn("publish split rule missing notification failed", "project_id", project.ID, "error", err)
+	if _, err := s.enqueueBusinessNotification(ctx, p.TenantID, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("enqueue split rule missing notification failed", "project_id", project.ID, "error", err)
 	}
+}
+
+// enqueueBusinessNotification is the only producer path for notifications that are not attached to
+// the same delivery-event transaction. Keeping this boundary explicit prevents a future feature from
+// silently reintroducing a synchronous platform call and losing the notification after a transient
+// network failure.
+func (s *Service) enqueueBusinessNotification(ctx context.Context, tenantID string, message domain.NotificationMessage) (bool, error) {
+	outbox, ok := s.Repo.(NotificationOutboxEnqueuer)
+	if !ok {
+		return false, errors.New("notification outbox enqueuer unavailable")
+	}
+	return outbox.EnqueueNotification(ctx, strings.TrimSpace(tenantID), message)
 }
 
 // roleRecipients 按应用角色码解析站内信收件人；目录不可用或该角色下无人时返回空。
@@ -342,7 +355,8 @@ func (s *Service) roleRecipients(ctx context.Context, tenantID, roleCode string)
 
 // syncExistingContract 对已经存在的合同版本做幂等收尾：同步盖章状态并返回既有项目。
 func syncExistingContract(ctx context.Context, repo DeliveryRepository, p platform.Principal, existing domain.Project, stampedUploaded bool) (domain.Project, error) {
-	event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": stampedUploaded})
+	contractID := firstNonEmpty(existing.ContractID, existing.Contract)
+	event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": contractID, "contract_number": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": stampedUploaded})
 	if err := repo.SyncContractStampStatus(ctx, existing, stampedUploaded, event); err != nil {
 		return domain.Project{}, err
 	}
@@ -452,8 +466,11 @@ func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project 
 // 跨天仍会重新提醒（超期是持续状态，每天都值得提醒一次）。
 func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now time.Time) (int, error) {
 	outbox, hasOutbox := s.Repo.(NotificationOutboxEnqueuer)
-	if (s.Notifications == nil && !hasOutbox) || strings.TrimSpace(tenantID) == "" {
+	if strings.TrimSpace(tenantID) == "" {
 		return 0, nil
+	}
+	if !hasOutbox {
+		return 0, errors.New("notification outbox enqueuer unavailable")
 	}
 	filter := platform.ScopeFilter{TenantID: strings.TrimSpace(tenantID), AllowAll: true}
 	repo, ok := s.Repo.(DeliveryRepository)
@@ -480,7 +497,7 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 			continue
 		}
 		title, content := slaNotificationText(item)
-		notification := platform.NotificationEvent{
+		notification := domain.NotificationMessage{
 			EventID:        ulid.Make().String(),
 			EventType:      "SLA_" + item.Kind,
 			Scope:          platform.NotificationScopeCrossSystem,
@@ -493,23 +510,13 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 			OccurredAt:     now.UTC(),
 			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
 		}
-		if hasOutbox {
-			queued, queueErr := outbox.EnqueueNotification(ctx, filter.TenantID, domain.NotificationMessage{EventID: notification.EventID, EventType: notification.EventType, Scope: notification.Scope, Priority: notification.Priority, Title: notification.Title, Content: notification.Content, ReferenceType: notification.ReferenceType, ReferenceID: notification.ReferenceID, Recipients: notification.Recipients, OccurredAt: notification.OccurredAt, IdempotencyKey: notification.IdempotencyKey})
-			if queueErr != nil {
-				return published, queueErr
-			}
-			if queued {
-				published++
-			}
-			continue
+		queued, queueErr := outbox.EnqueueNotification(ctx, filter.TenantID, notification)
+		if queueErr != nil {
+			return published, queueErr
 		}
-		if err := s.Notifications.Publish(ctx, notification); err != nil {
-			if s.Logger != nil {
-				s.Logger.Warn("publish sla notification failed", "service_item_id", item.ID, "kind", item.Kind, "error", err)
-			}
-			continue
+		if queued {
+			published++
 		}
-		published++
 	}
 	return published, nil
 }
@@ -2395,12 +2402,6 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
 		return err
 	}
-	// Lightweight/in-memory repositories used by embedders may not provide the durable outbox.
-	// Preserve their existing synchronous behavior; the production MySQL repository always uses
-	// the transactionally persisted path and is dispatched by sla-notifier.
-	if _, durable := s.Repo.(NotificationOutboxRepository); !durable {
-		s.notifyAssigned(ctx, event)
-	}
 	s.fireAutomations(ctx, event)
 	return nil
 }
@@ -2506,48 +2507,6 @@ func (s *Service) itemAssignees(ctx context.Context, tenantID, itemID string) []
 type assignmentNotification struct {
 	Title   string
 	Content string
-}
-
-// notifyAssigned 在事件成功落库后，向**被指派人**投递站内提醒。
-//
-// 集中在这里而不是散落到各个业务方法：所有业务节点都经过 applyEvent，通知规则只需维护一处。
-// 收件人取"需要行动的人"（被指派人），而不是操作者本人——这正是提醒的意义。
-// 通知是派生副作用：失败不回滚已落库的事件，但必须留下可诊断的警告，不能静默吞掉。
-func (s *Service) notifyAssigned(ctx context.Context, event domain.DeliveryEvent) {
-	if s.Notifications == nil || strings.TrimSpace(event.ServiceItemID) == "" {
-		return
-	}
-	spec, ok := assignmentNotificationFor(event.Type)
-	if !ok {
-		return
-	}
-	recipients := assignmentRecipients(event)
-	if len(recipients) == 0 {
-		// 载荷里没有收件人时回到服务项的当前被指派人：通知是系统侧的派生副作用，
-		// 只按租户边界读取（调用者已经通过各自的操作鉴权），不叠加用户授权。
-		recipients = s.itemAssignees(ctx, event.TenantID, event.ServiceItemID)
-	}
-	if len(recipients) == 0 {
-		return
-	}
-	notification := platform.NotificationEvent{
-		EventID:   ulid.Make().String(),
-		EventType: event.Type,
-		// 必须是平台白名单取值；写错会让整条通知被判 400。
-		Scope:          platform.NotificationScopeCrossSystem,
-		Priority:       "NORMAL",
-		Title:          spec.Title,
-		Content:        spec.Content,
-		ReferenceType:  "service_item",
-		ReferenceID:    event.ServiceItemID,
-		Recipients:     recipients,
-		OccurredAt:     time.Now().UTC(),
-		IdempotencyKey: event.ID + "-assigned",
-	}
-	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
-		s.Logger.Warn("publish assignment notification failed",
-			"event_id", event.ID, "event_type", event.Type, "error", err)
-	}
 }
 
 // assignmentNotificationFor 给出指派类事件的提醒文案；非指派事件返回 false。
@@ -2698,7 +2657,7 @@ func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEven
 // 避免"配了目标却没人收到"。未开通站内信集成、目录不可用或该角色下无人时静默跳过：
 // 通知是派生副作用，绝不能影响已提交的主事件。
 func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.DeliveryEvent, targets []string) {
-	if s.Notifications == nil || s.Personnel == nil || len(targets) == 0 {
+	if s.Personnel == nil || len(targets) == 0 {
 		return
 	}
 	recipients := make([]string, 0, len(targets))
@@ -2730,7 +2689,7 @@ func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.Deli
 	if len(recipients) == 0 {
 		return
 	}
-	notification := platform.NotificationEvent{
+	notification := domain.NotificationMessage{
 		EventID:   ulid.Make().String(),
 		EventType: EventAutomationTriggered,
 		// 必须用平台白名单取值：此前写死 "application"，平台只接受 CROSS_SYSTEM|PLATFORM，
@@ -2746,8 +2705,8 @@ func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.Deli
 		// 同一源事件只投递一次，平台按幂等键去重。
 		IdempotencyKey: event.ID + "-automation-notification",
 	}
-	if err := s.Notifications.Publish(ctx, notification); err != nil && s.Logger != nil {
-		s.Logger.Warn("publish automation notification failed", "event_id", event.ID, "error", err)
+	if _, err := s.enqueueBusinessNotification(ctx, event.TenantID, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("enqueue automation notification failed", "event_id", event.ID, "error", err)
 	}
 }
 

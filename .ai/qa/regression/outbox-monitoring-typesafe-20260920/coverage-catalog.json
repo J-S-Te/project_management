@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "scope": "项目管理业务通知 Outbox、监控数据库分页、合同标识迁移、TypeSafe 只读偏差分诊及数据库/Temporal 回归",
+  "items": [
+    {"item_id":"migration.contract-identity","category":"database","source":["migrations/000024_contract_identity_key.sql"],"applicability":"APPLICABLE","required":true,"case_ids":["PM-DB-MIGRATION"]},
+    {"item_id":"notifications.outbox","category":"business-flow","source":["internal/application/delivery.go"],"applicability":"APPLICABLE","required":true,"case_ids":["PM-ALL-GO","PM-RACE","PM-DB-INTEGRATION","PM-LIFECYCLE-E2E"]},
+    {"item_id":"monitoring.database-page","category":"api-database","source":["internal/infrastructure/mysql/monitoring.go"],"applicability":"APPLICABLE","required":true,"case_ids":["PM-DB-INTEGRATION","PM-LIFECYCLE-E2E"]},
+    {"item_id":"workflow.temporal","category":"integration","source":["internal/temporalworker"],"applicability":"APPLICABLE","required":true,"case_ids":["PM-TEMPORAL-E2E"]},
+    {"item_id":"typesafe.read-only-triage","category":"ai-evaluation","source":["internal/typesafe",".ai/qa/typesafe-deviation-triage/eval/report.json"],"applicability":"APPLICABLE","required":true,"case_ids":["PM-ALL-GO","PM-RACE","PM-BUILD","PM-VET"]}
+  ]
+}

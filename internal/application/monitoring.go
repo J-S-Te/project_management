@@ -13,6 +13,10 @@ import (
 
 const defaultMonitoringPageSize = 20
 
+type ProjectMonitoringRepository interface {
+	LoadProjectMonitoringPage(context.Context, platform.ScopeFilter, domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error)
+}
+
 // MonitorProjects returns one authorization-consistent monitoring snapshot. Projects, service
 // items, SLA decisions and events all pass through their existing scoped and field-masked read
 // paths; the browser never rebuilds the tenant/role boundary from a general project list.
@@ -29,6 +33,17 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}
 	if query.DueFrom != "" && query.DueTo != "" && query.DueFrom > query.DueTo {
 		return domain.ProjectMonitoringSnapshot{}, ValidationError("计划完成起始日期不能晚于结束日期")
+	}
+	page, pageSize := query.Page, query.PageSize
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = defaultMonitoringPageSize
+	}
+	query.Page, query.PageSize = page, pageSize
+	if repository, ok := s.Repo.(ProjectMonitoringRepository); ok {
+		return s.monitorProjectsFromDatabasePage(ctx, p, repository, query)
 	}
 	projects, err := s.ListProjects(ctx, p, query.Keyword, "")
 	if err != nil {
@@ -91,13 +106,6 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].UpdatedAt.After(rows[j].UpdatedAt) })
 
-	page, pageSize := query.Page, query.PageSize
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = defaultMonitoringPageSize
-	}
 	total := len(rows)
 	start := (page - 1) * pageSize
 	if start > total {
@@ -128,6 +136,64 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 		Categories: sortedKeys(categoryFacets), Teams: sortedKeys(teamFacets), ProjectManagerIDs: sortedKeys(managerFacets),
 		Total: total, Page: page, PageSize: pageSize, ServerTime: now,
 		SnapshotVersion: fmt.Sprintf("%d-%d", latestVersionTime.UnixNano(), total),
+	}, nil
+}
+
+func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platform.Principal, repository ProjectMonitoringRepository, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	data, err := repository.LoadProjectMonitoringPage(ctx, filter, query)
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	projects, items, err := s.applyFieldPermissions(ctx, p, data.Projects, data.ServiceItems)
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	rules, err := s.Repo.ListRules(ctx, p.TenantID, "sla")
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	slaItems, skipped := computeSlaItems(data.SLACandidates, rules, time.Now().UTC())
+	if skipped > 0 && s.Logger != nil {
+		s.Logger.Warn("monitoring skipped items with unparsable planned_end", "tenant_id", p.TenantID, "skipped", skipped)
+	}
+	slaItems, err = s.applyFieldPermissionsToSlaItems(ctx, p, slaItems)
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	itemsByProject := map[string][]domain.ServiceItem{}
+	for _, item := range items {
+		itemsByProject[item.ProjectID] = append(itemsByProject[item.ProjectID], item)
+	}
+	slaByProject := map[string][]domain.SlaOverdueItem{}
+	for _, item := range slaItems {
+		slaByProject[item.ProjectID] = append(slaByProject[item.ProjectID], item)
+	}
+	latestEventByProject := map[string]domain.DeliveryEvent{}
+	for _, event := range data.Events {
+		if _, exists := latestEventByProject[event.ProjectID]; !exists {
+			latestEventByProject[event.ProjectID] = event
+		}
+	}
+	rows := make([]domain.MonitoringProject, 0, len(projects))
+	for _, project := range projects {
+		rows = append(rows, buildMonitoringProject(project, itemsByProject[project.ID], slaByProject[project.ID], latestEventByProject))
+	}
+	recentEvents := data.Events
+	if len(recentEvents) > 20 {
+		recentEvents = recentEvents[:20]
+	}
+	if recentEvents == nil {
+		recentEvents = []domain.DeliveryEvent{}
+	}
+	return domain.ProjectMonitoringSnapshot{
+		Items: rows, RecentEvents: recentEvents, StatusCounts: data.StatusCounts,
+		Categories: data.Categories, Teams: data.Teams, ProjectManagerIDs: data.ProjectManagerIDs,
+		Total: data.Total, Page: query.Page, PageSize: query.PageSize, ServerTime: time.Now().UTC(),
+		SnapshotVersion: fmt.Sprintf("%d-%d", data.LatestUpdatedAt.UnixNano(), data.Total),
 	}, nil
 }
 
