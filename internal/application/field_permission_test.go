@@ -225,17 +225,20 @@ func TestWarningThresholdParsesConfiguredText(t *testing.T) {
 
 // 字段级脱敏是安全策略，必须与运营参数分开授权：只持有 project_rule.manage 的角色
 // 不得修改脱敏配置，而规则按 kind 选表，因此按 kind 判定权限是可靠的。
-func TestRuleKindPermissionSeparatesFieldMasking(t *testing.T) {
-	if got := ruleKindPermission("permissions"); got != "project.field_permission.manage" {
+func TestRuleKindPermissionsSeparateFieldMaskingAndCapabilityCodes(t *testing.T) {
+	if got := strings.Join(ruleKindPermissions("permissions"), ","); got != "project.field_permission.manage" {
 		t.Fatalf("字段级脱敏应要求独立权限，got %q", got)
 	}
 	for _, kind := range []string{"split-rules", "warning-rules", "automations", "sla", "standards", ""} {
-		if got := ruleKindPermission(kind); got != "project_rule.manage" {
+		if got := strings.Join(ruleKindPermissions(kind), ","); got != "project_rule.manage" {
 			t.Fatalf("%s 仍应由 project_rule.manage 管理，got %q", kind, got)
 		}
 	}
+	if got := strings.Join(ruleKindPermissions("capability-codes"), ","); got != "project.capability_code.manage,project_rule.manage" {
+		t.Fatalf("资质/能力编码应支持设备管理员独立权限，got %q", got)
+	}
 	// 大写/空白不应绕过判定。
-	if got := ruleKindPermission(" Permissions "); got != "project.field_permission.manage" {
+	if got := strings.Join(ruleKindPermissions(" Permissions "), ","); got != "project.field_permission.manage" {
 		t.Fatalf("规范化后仍须命中脱敏权限，got %q", got)
 	}
 }

@@ -461,16 +461,22 @@ func (s *Service) ListRules(ctx context.Context, p platform.Principal, kind stri
 	return s.Repo.ListRules(ctx, p.TenantID, kind)
 }
 
-// ruleKindPermission 返回管理某一类配置所需的权限码。
+// ruleKindPermissions 返回管理某一类配置可使用的权限码。
 // 多类配置共用 domain.Rule 结构、按 kind 分表存储，但职责并不相同：
 // 字段级脱敏是安全策略，与拆解/预警/自动化/SLA/标准等运营参数必须分开授权，
 // 否则"能配 SLA 的人就能改脱敏"。规则按客户端声明的 kind 选择数据表，
 // 因此以 kind 判定权限是可靠的：不声明 permissions 就碰不到脱敏表。
-func ruleKindPermission(kind string) string {
-	if strings.EqualFold(strings.TrimSpace(kind), "permissions") {
-		return "project.field_permission.manage"
+// 资质/能力编码允许设备管理员使用独立最小权限；原有项目规则管理者
+// 仍然可管理该目录，保持管理员与技术总监的完整规则配置能力。
+func ruleKindPermissions(kind string) []string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "permissions":
+		return []string{"project.field_permission.manage"}
+	case capabilityCodeRuleKind:
+		return []string{"project.capability_code.manage", "project_rule.manage"}
+	default:
+		return []string{"project_rule.manage"}
 	}
-	return "project_rule.manage"
 }
 
 func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input domain.Project) (domain.Project, error) {
@@ -753,7 +759,7 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 	if input.Kind == "" {
 		input.Kind = "split-rules"
 	}
-	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
+	if err := requireAnyApplicationAuthorization(p, ruleKindPermissions(input.Kind)...); err != nil {
 		return input, err
 	}
 	if err := s.normalizeAndValidateRule(ctx, p, &input, 0, false); err != nil {
@@ -769,7 +775,7 @@ func (s *Service) CreateRule(ctx context.Context, p platform.Principal, input do
 func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64, input domain.Rule) (domain.Rule, error) {
 	input.Kind = strings.TrimSpace(input.Kind)
 	input.ID = id
-	if err := requireApplicationAuthorization(p, ruleKindPermission(input.Kind)); err != nil {
+	if err := requireAnyApplicationAuthorization(p, ruleKindPermissions(input.Kind)...); err != nil {
 		return domain.Rule{}, err
 	}
 	if err := s.normalizeAndValidateRule(ctx, p, &input, id, true); err != nil {
@@ -783,7 +789,7 @@ func (s *Service) UpdateRule(ctx context.Context, p platform.Principal, id int64
 
 func (s *Service) SetRuleEnabled(ctx context.Context, p platform.Principal, kind string, id int64, enabled bool) (domain.Rule, error) {
 	kind = strings.TrimSpace(kind)
-	if err := requireApplicationAuthorization(p, ruleKindPermission(kind)); err != nil {
+	if err := requireAnyApplicationAuthorization(p, ruleKindPermissions(kind)...); err != nil {
 		return domain.Rule{}, err
 	}
 	if enabled {
@@ -824,7 +830,7 @@ func (s *Service) DeleteRule(ctx context.Context, p platform.Principal, kind str
 	if kind == "" {
 		return domain.Rule{}, ValidationError("规则类型不能为空")
 	}
-	if err := requireApplicationAuthorization(p, ruleKindPermission(kind)); err != nil {
+	if err := requireAnyApplicationAuthorization(p, ruleKindPermissions(kind)...); err != nil {
 		return domain.Rule{}, err
 	}
 	if id <= 0 {
@@ -886,6 +892,18 @@ func requireApplicationAuthorization(p platform.Principal, permission string) er
 		return ErrForbidden
 	}
 	return nil
+}
+
+func requireAnyApplicationAuthorization(p platform.Principal, permissions ...string) error {
+	if !p.HasFullDataScope() {
+		return ErrForbidden
+	}
+	for _, permission := range permissions {
+		if p.Has(permission) {
+			return nil
+		}
+	}
+	return ErrForbidden
 }
 
 // requireDirectoryRead 授权只读目录接口（人员目录、设备、能力码）。这些接口只提供操作台

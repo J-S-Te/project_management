@@ -416,6 +416,13 @@ func TestDeleteRuleFollowsKindPermission(t *testing.T) {
 	if _, err := service.DeleteRule(context.Background(), fieldPermissionManager, "permissions", 7); err != nil {
 		t.Fatalf("字段级权限的删除: %v", err)
 	}
+	capabilityCodeManager := principalWith("project.capability_code.manage", tenantScope)
+	if _, err := service.DeleteRule(context.Background(), capabilityCodeManager, "capability-codes", 8); errors.Is(err, ErrForbidden) {
+		t.Fatalf("资质/能力编码的独立删除权限被拒绝: %v", err)
+	}
+	if _, err := service.DeleteRule(context.Background(), capabilityCodeManager, "sla", 8); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("编码管理权限不应扩展到 SLA，实际 error=%v", err)
+	}
 	// kind 决定目标表，缺省「全部类型」只适用于查询：删除必须显式给出类型。
 	if _, err := service.DeleteRule(context.Background(), ruleManager, "  ", 1); !errors.Is(err, ErrValidation) {
 		t.Fatalf("缺少 kind 应拒绝，实际 error=%v", err)
