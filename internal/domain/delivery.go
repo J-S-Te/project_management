@@ -282,11 +282,35 @@ type ReportArtifactInput struct {
 	SHA256   string `json:"sha256"`
 }
 
+const (
+	TravelModeNoTravel = "NO_TRAVEL"
+	TravelModeExisting = "EXISTING"
+	TravelModeNew      = "NEW"
+)
+
+// TravelArrangementInput 使用业务可读信息描述行程。ReferenceEventID 只用于关联本项目中
+// 已登记的行程，避免让用户重新识别或抄写内部编号；NEW 模式的编号由服务端生成。
+type TravelArrangementInput struct {
+	Mode              string   `json:"mode"`
+	ReferenceEventID  string   `json:"reference_event_id,omitempty"`
+	RequestID         string   `json:"request_id,omitempty"`
+	NoTravelReason    string   `json:"no_travel_reason,omitempty"`
+	Origin            string   `json:"origin,omitempty"`
+	Destination       string   `json:"destination,omitempty"`
+	DepartureDate     string   `json:"departure_date,omitempty"`
+	ReturnDate        string   `json:"return_date,omitempty"`
+	Transport         string   `json:"transport,omitempty"`
+	AccommodationNeed string   `json:"accommodation_need,omitempty"`
+	TravelerIDs       []string `json:"traveler_ids,omitempty"`
+}
+
 // PreparationInput 是实施准备提交的内容。设备申领不再是自由文本：设备清单
 // （Equipment）本身就说明申领了哪些设备、在什么时段使用，因此不再单列申领单号。
 type PreparationInput struct {
-	TravelRequestID string `json:"travel_request_id"`
-	Notes           string `json:"notes"`
+	// TravelRequestID 仅为旧客户端滚动兼容；新客户端必须提交 Travel。
+	TravelRequestID string                 `json:"travel_request_id,omitempty"`
+	Travel          TravelArrangementInput `json:"travel"`
+	Notes           string                 `json:"notes"`
 	// ExpectedVersion 语义同 TeamAssignmentInput：不匹配即 409 冲突。
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 	// Equipment 是实施准备确定的设备清单；每行带使用时段，服务端按占用区间硬拦重叠。

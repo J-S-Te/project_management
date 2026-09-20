@@ -1519,7 +1519,7 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 		t.Fatalf("conflicting preparation must not record an event: %+v", repository.events)
 	}
 
-	free := `{"travel_request_id":"TRIP-1","equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-002","window_start":"2026-09-16","window_end":"2026-09-18"}]}`
+	free := `{"travel":{"mode":"NEW","origin":"杭州","destination":"上海","departure_date":"2026-09-16","return_date":"2026-09-18","transport":"高铁","traveler_ids":["pm-1"]},"equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-002","window_start":"2026-09-16","window_end":"2026-09-18"}]}`
 	response = perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", free)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -1530,6 +1530,32 @@ func TestPreparationRecordsEquipmentAndBlocksOverlappingReservation(t *testing.T
 	equipment, ok := repository.events[0].Payload["equipment"].([]domain.PlanResource)
 	if !ok || len(equipment) != 1 || equipment[0].ResourceName != "BurpSuite 终端" || equipment[0].WindowStart != "2026-09-16" {
 		t.Fatalf("equipment=%#v", repository.events[0].Payload["equipment"])
+	}
+	travel, ok := repository.events[0].Payload["travel"].(domain.TravelArrangementInput)
+	if !ok || travel.Mode != domain.TravelModeNew || travel.Origin != "杭州" || !strings.HasPrefix(travel.RequestID, "TRIP-") {
+		t.Fatalf("travel=%#v", repository.events[0].Payload["travel"])
+	}
+}
+
+func TestPreparationAcceptsProjectWithoutEquipment(t *testing.T) {
+	repository := &repo{items: []domain.ServiceItem{{
+		ID: "SI-1", Status: "待实施", ProjectManagerID: "pm-1", ConflictStatus: "PASSED",
+		PlannedStart: "2026-09-15T02:00:00Z", PlannedEnd: "2026-09-20T02:00:00Z",
+	}}}
+	service := &application.Service{Repo: repository}
+	principal := platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"project_manager"}, Permissions: map[string]bool{"project.read": true, "project.implementation.plan": true}, DataScopes: []platform.DataScope{{RoleCode: "project_manager", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}
+	handler := httpapi.NewRouter(service, identity{p: principal}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	response := perform(handler, http.MethodPost, "/api/v1/service-items/SI-1/preparation", `{"travel":{"mode":"NO_TRAVEL","no_travel_reason":"远程实施"},"equipment":[]}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%+v", repository.events)
+	}
+	equipment, ok := repository.events[0].Payload["equipment"].([]domain.PlanResource)
+	if !ok || equipment == nil || len(equipment) != 0 {
+		t.Fatalf("equipment=%#v, want non-nil empty snapshot", repository.events[0].Payload["equipment"])
 	}
 }
 

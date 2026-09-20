@@ -68,6 +68,59 @@ func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) 
 	})
 }
 
+func TestNormalizeTravelArrangementUsesBusinessModesInsteadOfFreeTextIDs(t *testing.T) {
+	item := domain.ServiceItem{
+		ID: "SI-1", ProjectID: "PJ-1", TeamLeadID: "lead-1", ProjectManagerID: "pm-1", EngineerIDs: []string{"eng-1"},
+	}
+
+	noTravel, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{
+		Mode: domain.TravelModeNoTravel, NoTravelReason: "客户现场位于本市，当日往返",
+	}}, item, nil)
+	if err != nil || noTravel.Mode != domain.TravelModeNoTravel || noTravel.NoTravelReason == "" || noTravel.RequestID != "" {
+		t.Fatalf("no-travel normalization = %+v, err = %v", noTravel, err)
+	}
+	if _, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{Mode: domain.TravelModeNoTravel}}, item, nil); !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing no-travel reason error = %v, want validation", err)
+	}
+
+	events := []domain.DeliveryEvent{{
+		ID: "EV-TRIP", ProjectID: "PJ-1", Type: EventPreparationStarted,
+		Payload: map[string]any{"travel_request_id": "TRIP-20260920-ABC123"},
+	}}
+	existing, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{
+		Mode: domain.TravelModeExisting, ReferenceEventID: "EV-TRIP", RequestID: "browser-must-not-win",
+	}}, item, events)
+	if err != nil || existing.RequestID != "TRIP-20260920-ABC123" || existing.ReferenceEventID != "EV-TRIP" {
+		t.Fatalf("existing normalization = %+v, err = %v", existing, err)
+	}
+	if _, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{
+		Mode: domain.TravelModeExisting, ReferenceEventID: "EV-OTHER",
+	}}, item, events); !errors.Is(err, ErrValidation) {
+		t.Fatalf("foreign existing travel error = %v, want validation", err)
+	}
+
+	created, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{
+		Mode: domain.TravelModeNew, Origin: "杭州", Destination: "上海",
+		DepartureDate: "2026-09-25", ReturnDate: "2026-09-27", TravelerIDs: []string{"pm-1", "eng-1", "pm-1"},
+	}}, item, nil)
+	if err != nil || !strings.HasPrefix(created.RequestID, "TRIP-") || len(created.TravelerIDs) != 2 {
+		t.Fatalf("new travel normalization = %+v, err = %v", created, err)
+	}
+	if _, err := normalizeTravelArrangement(domain.PreparationInput{Travel: domain.TravelArrangementInput{
+		Mode: domain.TravelModeNew, Origin: "杭州", Destination: "上海",
+		DepartureDate: "2026-09-25", ReturnDate: "2026-09-24", TravelerIDs: []string{"outsider"},
+	}}, item, nil); !errors.Is(err, ErrValidation) {
+		t.Fatalf("invalid new travel error = %v, want validation", err)
+	}
+}
+
+func TestNormalizeTravelArrangementKeepsLegacyClientCompatible(t *testing.T) {
+	travel, err := normalizeTravelArrangement(domain.PreparationInput{TravelRequestID: " TRIP-LEGACY-1 "}, domain.ServiceItem{}, nil)
+	if err != nil || travel.Mode != domain.TravelModeExisting || travel.RequestID != "TRIP-LEGACY-1" {
+		t.Fatalf("legacy normalization = %+v, err = %v", travel, err)
+	}
+}
+
 func TestValidatePenetrationComplianceRequiresFullAuthorizationSet(t *testing.T) {
 	valid := domain.ImplementationPlanInput{
 		PenetrationTestPlan: "扫描与漏洞验证步骤",
@@ -289,7 +342,7 @@ func TestResolvePreparationEquipmentRejectsOverlappingReservation(t *testing.T) 
 	}
 }
 
-// 实施准备的设备清单同样要求：至少一台设备、命中有效档案、检定有效期覆盖使用时段。
+// 实施准备允许无需设备；一旦选择设备，仍要求命中有效档案且检定有效期覆盖使用时段。
 func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T) {
 	repo := &capabilityRepository{capabilities: []domain.Capability{
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "超期设备", Status: "ACTIVE", ValidUntil: time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)},
@@ -306,7 +359,6 @@ func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T)
 		rows     []domain.PlanResourceInput
 		expected string
 	}{
-		{"空清单", nil, "请至少选择一台实施设备"},
 		{"人员不属于准备阶段", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-001"}}, "资源类型与当前阶段不匹配"},
 		{"停用设备", []domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-002"}}, "不在有效的能力档案中"},
 		{"检定有效期不覆盖", []domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001"}}, "不覆盖使用时段截止日"},
@@ -319,6 +371,14 @@ func TestResolvePreparationEquipmentValidatesCatalogAndCalibration(t *testing.T)
 				t.Fatalf("error=%v, want contains %q", err, tc.expected)
 			}
 		})
+	}
+
+	rows, err := service.resolvePreparationEquipment(context.Background(), repo, "tenant-1", "SI-SELF", nil, start, end)
+	if err != nil {
+		t.Fatalf("empty equipment list must be accepted: %v", err)
+	}
+	if rows == nil || len(rows) != 0 {
+		t.Fatalf("empty equipment list = %#v, want non-nil empty snapshot", rows)
 	}
 }
 
