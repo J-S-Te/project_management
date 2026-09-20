@@ -1,5 +1,8 @@
 import fs from "node:fs/promises";
 
+// Developer/QA harness only. This script is intentionally outside the Go application and must not
+// be imported by runtime code, exposed as an HTTP route, or run with live business deviation data.
+
 const fixturePath = process.argv[2] || new URL("./fixtures.jsonl", import.meta.url).pathname;
 const runs = Math.max(1, Math.min(5, Number(process.env.TYPESAFE_EVAL_RUNS || 3)));
 const apiKey = String(process.env.TYPESAFE_API_KEY || "").trim();

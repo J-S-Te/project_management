@@ -35,9 +35,6 @@ var (
 	// ErrContractUnavailable 表示项目子系统无法通过机器身份读取合同审批结果。
 	// 它与浏览器会话无关，应以 503 暴露为可重试的子系统依赖故障。
 	ErrContractUnavailable = errors.New("approved contract service is unavailable")
-	// ErrTriageUnavailable 表示只读偏差分诊试点未启用或上游暂不可用。它绝不能
-	// 阻止正式偏差上报，也不会被降级成一个伪造的低风险结果。
-	ErrTriageUnavailable = errors.New("deviation triage service is unavailable")
 	// ErrPrecondition 表示请求本身合法，但服务项尚未满足该操作的前置状态，
 	// 例如未完成执行指派、能力校验未通过、特殊方法未复核。它与 ErrValidation
 	// 必须区分：前者要告诉用户"先去哪一步"，后者才提示"检查输入"。
@@ -120,38 +117,12 @@ type Service struct {
 	Personnel platform.OwnerDirectory
 	// Notifications 是基础平台统一站内信 outbox；未开通该集成时为 nil，
 	// 自动化规则仍会写入派生事件，只是不额外投递站内信。
-	Notifications   platform.NotificationPublisher
-	Contracts       platform.ApprovedContractVerifier
-	EvidenceFiles   platform.EvidenceFileGateway
-	DeviationTriage DeviationTriage
+	Notifications platform.NotificationPublisher
+	Contracts     platform.ApprovedContractVerifier
+	EvidenceFiles platform.EvidenceFileGateway
 	// Logger 可选。派生事件（自动化/预警）是主事件提交后的 best-effort 副作用：
 	// 写入失败不会回滚主流程，但必须留下可观测痕迹，否则"配置触发了但没落库"无人知晓。
 	Logger *slog.Logger
-}
-
-type DeviationTriage interface {
-	TriageDeviation(context.Context, domain.DeviationInput) (domain.DeviationTriageResult, error)
-}
-
-func (s *Service) TriageDeviation(ctx context.Context, p platform.Principal, input domain.DeviationInput) (domain.DeviationTriageResult, error) {
-	if !p.Has("project.deviation.report") {
-		return domain.DeviationTriageResult{}, ErrForbidden
-	}
-	input.Description = strings.TrimSpace(input.Description)
-	if input.Description == "" || len(input.Description) > 4000 {
-		return domain.DeviationTriageResult{}, ValidationError("偏差描述不能为空且不能超过 4000 个字符")
-	}
-	if s.DeviationTriage == nil {
-		return domain.DeviationTriageResult{}, ErrTriageUnavailable
-	}
-	result, err := s.DeviationTriage.TriageDeviation(ctx, input)
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Warn("deviation triage failed", "error", err)
-		}
-		return domain.DeviationTriageResult{}, ErrTriageUnavailable
-	}
-	return result, nil
 }
 
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {

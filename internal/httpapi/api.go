@@ -144,7 +144,6 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/report-corrections", require("project.report.correction.request"), h.requestReportCorrection)
 	api.POST("/service-items/:id/report-corrections/:request_id/decision", require("project.report.correction.approve"), h.decideReportCorrection)
 	api.POST("/service-items/:id/field-records", require("project.field.execute"), h.submitFieldRecord)
-	api.POST("/deviations/triage", require("project.deviation.report"), h.triageDeviation)
 	api.POST("/service-items/:id/deviations", require("project.deviation.report"), h.reportDeviation)
 	api.POST("/deviations/:id/review", require("project.deviation.review"), h.reviewDeviation)
 	api.GET("/capabilities", requireAny("project.read", "project.resource.read"), h.listCapabilities)
@@ -1064,18 +1063,6 @@ func (h *Handler) reportDeviation(c *gin.Context) {
 	writeData(c, http.StatusCreated, map[string]string{"id": id, "status": "PENDING"})
 }
 
-func (h *Handler) triageDeviation(c *gin.Context) {
-	var input domain.DeviationInput
-	if !decode(c, &input) {
-		return
-	}
-	result, err := h.service.TriageDeviation(c.Request.Context(), principal(c), input)
-	if err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	writeData(c, http.StatusOK, result)
-}
 func (h *Handler) reviewDeviation(c *gin.Context) {
 	var input domain.DeviationReviewInput
 	if !decode(c, &input) {
@@ -1523,8 +1510,6 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusServiceUnavailable, "PM_PERSONNEL_UNAVAILABLE", "基础平台人员目录尚未配置或暂不可用")
 	case errors.Is(err, application.ErrContractUnavailable):
 		writeError(c, http.StatusServiceUnavailable, "PM_CONTRACT_UNAVAILABLE", "已审批合同服务暂不可用，请稍后重试")
-	case errors.Is(err, application.ErrTriageUnavailable):
-		writeError(c, http.StatusServiceUnavailable, "PM_DEVIATION_TRIAGE_UNAVAILABLE", "智能分诊试点暂不可用；不影响正常上报偏差")
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}

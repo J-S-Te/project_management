@@ -75,35 +75,6 @@ func TestLoadAcceptsValidPlatformIntegrationConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresSecureCompleteTypeSafePilotConfiguration(t *testing.T) {
-	setValidEnvironment(t)
-	t.Setenv("TYPESAFE_ENABLED", "true")
-	t.Setenv("TYPESAFE_API_KEY", "")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TYPESAFE_API_KEY") {
-		t.Fatalf("missing key error = %v", err)
-	}
-
-	setValidEnvironment(t)
-	t.Setenv("TYPESAFE_ENABLED", "true")
-	t.Setenv("TYPESAFE_API_KEY", "test-key")
-	t.Setenv("TYPESAFE_API_URL", "http://typesafe.example.test/v1/systemone")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "absolute HTTPS") {
-		t.Fatalf("insecure endpoint error = %v", err)
-	}
-
-	setValidEnvironment(t)
-	t.Setenv("TYPESAFE_ENABLED", "true")
-	t.Setenv("TYPESAFE_API_KEY", "test-key")
-	t.Setenv("TYPESAFE_API_URL", "https://typesafe.example.test/v1/systemone")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.TypeSafeEnabled || cfg.TypeSafeAPIKey != "test-key" {
-		t.Fatal("TypeSafe pilot configuration was not loaded")
-	}
-}
-
 func TestLoadRejectsInvalidTemporalWorkerVersioningPolicy(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("TEMPORAL_WORKER_VERSIONING_POLICY", "LATEST")

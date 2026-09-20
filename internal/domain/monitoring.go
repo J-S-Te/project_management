@@ -80,12 +80,3 @@ type ProjectMonitoringPageData struct {
 	Total             int
 	LatestUpdatedAt   time.Time
 }
-
-// DeviationTriageResult is advisory-only model output. It deliberately contains no workflow
-// command or persisted severity so callers cannot mistake the pilot for an authorization or state
-// transition decision.
-type DeviationTriageResult struct {
-	Mode          string             `json:"mode"`
-	Model         string             `json:"model"`
-	Probabilities map[string]float64 `json:"probabilities"`
-}
