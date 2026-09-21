@@ -48,11 +48,11 @@ func main() {
 	}
 	var contractBearer platform.ClientCredentialsTokenVerifier
 	if cfg.ContractIntegrationEnabled {
-		contractBearer, err = platform.NewKeycloakClientCredentialsTokenVerifier(startupCtx, platform.KeycloakClientCredentialsVerifierOptions{
-			Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL,
-			ClientID: cfg.ContractIntegrationClientID, Audience: cfg.ContractIntegrationAudience,
-			TenantID: cfg.OIDCTenantID, CallerApplicationCode: "contract_management", CallerEnvironmentCode: cfg.PlatformEnvironmentCode,
-			Timeout: cfg.OIDCAuthorizationTimeout,
+		contractBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
+			Issuer: cfg.ContractIntegrationIssuer, Audience: cfg.ContractIntegrationAudience, PublicKeyPath: cfg.ContractIntegrationPublicKeyPath,
+			ClientID: cfg.ContractIntegrationClientID, TenantID: cfg.OIDCTenantID,
+			CallerApplicationCode: cfg.ContractIntegrationCallerApp, CallerEnvironmentCode: cfg.ContractIntegrationCallerEnv,
+			RequiredScope: cfg.ContractIntegrationScope,
 		})
 		if err != nil {
 			logger.Error("initialize contract integration bearer verifier", "error", err)

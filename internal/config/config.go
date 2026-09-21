@@ -69,6 +69,11 @@ type Config struct {
 	ContractIntegrationRequireBearer       bool
 	ContractIntegrationClientID            string
 	ContractIntegrationAudience            string
+	ContractIntegrationIssuer              string
+	ContractIntegrationPublicKeyPath       string
+	ContractIntegrationCallerApp           string
+	ContractIntegrationCallerEnv           string
+	ContractIntegrationScope               string
 	ContractApprovalValidationEnabled      bool
 	ContractApprovalValidationURL          string
 	ContractApprovalValidationClientID     string
@@ -116,6 +121,11 @@ func Load() (Config, error) {
 		PlatformNotificationScope:              strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
 		ContractIntegrationClientID:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
 		ContractIntegrationAudience:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
+		ContractIntegrationIssuer:              env("CONTRACT_INTEGRATION_ISSUER", "basic-platform"),
+		ContractIntegrationPublicKeyPath:       env("CONTRACT_INTEGRATION_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem"),
+		ContractIntegrationCallerApp:           env("CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE", "contract_management"),
+		ContractIntegrationCallerEnv:           env("CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE", strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE"))),
+		ContractIntegrationScope:               env("CONTRACT_INTEGRATION_REQUIRED_SCOPE", "project.contract.import"),
 		ContractApprovalValidationURL:          strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_URL")),
 		ContractApprovalValidationClientID:     strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_ID")),
 		ContractApprovalValidationClientSecret: os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_SECRET"),
@@ -301,7 +311,13 @@ func (c Config) validate() error {
 		if !c.ContractIntegrationEnabled {
 			return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER requires CONTRACT_INTEGRATION_ENABLED")
 		}
-		for name, value := range map[string]string{"CONTRACT_INTEGRATION_CLIENT_ID": c.ContractIntegrationClientID, "CONTRACT_INTEGRATION_AUDIENCE": c.ContractIntegrationAudience} {
+		for name, value := range map[string]string{
+			"CONTRACT_INTEGRATION_CLIENT_ID": c.ContractIntegrationClientID, "CONTRACT_INTEGRATION_AUDIENCE": c.ContractIntegrationAudience,
+			"CONTRACT_INTEGRATION_ISSUER": c.ContractIntegrationIssuer, "CONTRACT_INTEGRATION_PUBLIC_KEY_PATH": c.ContractIntegrationPublicKeyPath,
+			"CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE": c.ContractIntegrationCallerApp,
+			"CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE": c.ContractIntegrationCallerEnv,
+			"CONTRACT_INTEGRATION_REQUIRED_SCOPE":          c.ContractIntegrationScope,
+		} {
 			if strings.TrimSpace(value) == "" || placeholder(value) {
 				return fmt.Errorf("%s is required when bearer authentication is enabled", name)
 			}

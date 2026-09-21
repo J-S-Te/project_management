@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -138,7 +139,20 @@ func (h *Handler) importCapabilities(c *gin.Context) {
 		return
 	}
 	defer opened.Close()
-	reader := csv.NewReader(opened)
+	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
+	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	if h.service.EvidenceFiles == nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "统一文件网关暂不可用，导入未执行")
+		return
+	}
+	if _, err = h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "CAPABILITY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "文件校验暂不可用，导入未执行")
+		return
+	}
+	reader := csv.NewReader(bytes.NewReader(content))
 	reader.FieldsPerRecord = -1
 	records, err := reader.ReadAll()
 	if err != nil {
@@ -154,6 +168,57 @@ func (h *Handler) importCapabilities(c *gin.Context) {
 	result.Errors = append(parseErrors, result.Errors...)
 	result.Skipped += len(parseErrors)
 	writeData(c, http.StatusOK, result)
+}
+
+func (h *Handler) importEquipment(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil || file.Size > maximumCapabilityImportBytes {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	opened, err := file.Open()
+	if err != nil {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	defer opened.Close()
+	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
+	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	if h.service.EvidenceFiles == nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "统一文件网关暂不可用，导入未执行")
+		return
+	}
+	if _, err = h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "CAPABILITY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "文件校验暂不可用，导入未执行")
+		return
+	}
+	reader := csv.NewReader(bytes.NewReader(content))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	rows, parseErrors := capabilitiesFromImportCSV(records)
+	imported, skipped := 0, len(parseErrors)
+	errorsFound := append([]string(nil), parseErrors...)
+	for index, row := range rows {
+		if strings.ToUpper(strings.TrimSpace(row.ResourceType)) != "EQUIPMENT" {
+			skipped++
+			errorsFound = append(errorsFound, fmt.Sprintf("第 %d 行：设备导入仅接受 EQUIPMENT", index+2))
+			continue
+		}
+		if _, saveErr := h.service.UpsertEquipment(c.Request.Context(), principal(c), row); saveErr != nil {
+			skipped++
+			errorsFound = append(errorsFound, fmt.Sprintf("第 %d 行：设备数据无效、能力编码不可用或设备正在被占用", index+2))
+			continue
+		}
+		imported++
+	}
+	writeData(c, http.StatusOK, map[string]any{"imported": imported, "skipped": skipped, "errors": errorsFound})
 }
 
 func (h *Handler) exportCapabilities(c *gin.Context) {
