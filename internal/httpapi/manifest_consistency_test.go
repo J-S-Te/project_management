@@ -71,3 +71,36 @@ func TestPermissionManifestCoversEveryRoutePermission(t *testing.T) {
 		t.Fatalf("路由要求但清单未声明的权限码：%v", missing)
 	}
 }
+
+func TestFieldExecutionPermissionBelongsToProjectManagerNotEngineers(t *testing.T) {
+	var manifest struct {
+		CatalogVersion string `json:"catalog_version"`
+		Roles          []struct {
+			Code        string   `json:"code"`
+			Permissions []string `json:"permissions"`
+		} `json:"roles"`
+	}
+	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
+		t.Fatalf("decode permission manifest: %v", err)
+	}
+	if manifest.CatalogVersion != "8" {
+		t.Fatalf("catalog_version=%q, want 8 for field workflow permission migration", manifest.CatalogVersion)
+	}
+
+	roles := make(map[string]map[string]bool, len(manifest.Roles))
+	for _, role := range manifest.Roles {
+		permissions := make(map[string]bool, len(role.Permissions))
+		for _, permission := range role.Permissions {
+			permissions[permission] = true
+		}
+		roles[role.Code] = permissions
+	}
+	if !roles["project_manager"]["project.field.execute"] {
+		t.Fatal("project_manager must own project.field.execute")
+	}
+	for role := range roles {
+		if role != "project_manager" && roles[role]["project.field.execute"] {
+			t.Fatalf("%s must not own project.field.execute; only project_manager may start field execution or submit records", role)
+		}
+	}
+}

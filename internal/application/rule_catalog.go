@@ -22,6 +22,7 @@ var automationTriggerCatalog = []RuleOption{
 	{EventImplementationPlanRevoked, "实施计划已撤销", "项目退回计划制定阶段"},
 	{EventPreparationStarted, "实施准备已发起", "设备和准备材料已登记"},
 	{EventPreparationRevoked, "实施准备已撤销", "项目退回实施准备阶段"},
+	{EventFieldStarted, "现场测评已开始", "项目经理确认从实施准备进入现场实施"},
 	{EventFieldRecordSubmitted, "现场记录已提交", "现场原始记录和证据已提交"},
 	{EventDeviationReported, "现场偏离已上报", "现场实施出现偏离或异常"},
 	{EventDeviationReviewed, "现场偏离已评审", "偏离处置完成评审"},

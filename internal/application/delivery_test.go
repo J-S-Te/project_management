@@ -782,6 +782,63 @@ func reportCorrectionPrincipal(userID, permission string) platform.Principal {
 	}
 }
 
+func TestFieldExecutionRequiresExplicitStartBeforeRecords(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{
+		ID: "SI-FIELD-1", ProjectID: "PJ-FIELD-1", Status: "实施准备中", Version: 7,
+	}}
+	service := Service{Repo: repository}
+	manager := reportCorrectionPrincipal("project-manager-1", "project.field.execute")
+
+	err := service.SubmitFieldRecord(context.Background(), manager, repository.item.ID, domain.FieldRecordInput{
+		RawData: "现场测评记录", Environment: "客户现场", ExpectedVersion: 7,
+	})
+	if !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("record before explicit start error=%v, want ErrPrecondition", err)
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("record before start persisted %d events", len(repository.events))
+	}
+
+	if err := service.StartFieldExecution(context.Background(), manager, repository.item.ID, domain.FieldStartInput{ExpectedVersion: 7}); err != nil {
+		t.Fatalf("start field execution: %v", err)
+	}
+	if len(repository.events) != 1 || repository.events[0].Type != EventFieldStarted {
+		t.Fatalf("start events=%+v, want one %s", repository.events, EventFieldStarted)
+	}
+
+	// 仓储在真实事务中会推进状态和版本；单元桩同步该结果后验证记录仅落事件，
+	// 不再承担“实施准备中 -> 实施中”的隐式状态迁移。
+	repository.item.Status = "实施中"
+	repository.item.Version = 8
+	if err := service.SubmitFieldRecord(context.Background(), manager, repository.item.ID, domain.FieldRecordInput{
+		RawData: "现场测评记录", Environment: "客户现场", ExpectedVersion: 8,
+	}); err != nil {
+		t.Fatalf("submit field record after start: %v", err)
+	}
+	if len(repository.events) != 2 || repository.events[1].Type != EventFieldRecordSubmitted {
+		t.Fatalf("record events=%+v, want %s after %s", repository.events, EventFieldRecordSubmitted, EventFieldStarted)
+	}
+}
+
+func TestFieldExecutionStartRejectsWrongStateAndStaleVersion(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{
+		ID: "SI-FIELD-2", ProjectID: "PJ-FIELD-2", Status: "实施准备中", Version: 4,
+	}}
+	service := Service{Repo: repository}
+	manager := reportCorrectionPrincipal("project-manager-1", "project.field.execute")
+
+	if err := service.StartFieldExecution(context.Background(), manager, repository.item.ID, domain.FieldStartInput{ExpectedVersion: 3}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale start error=%v, want ErrConflict", err)
+	}
+	repository.item.Status = "实施中"
+	if err := service.StartFieldExecution(context.Background(), manager, repository.item.ID, domain.FieldStartInput{ExpectedVersion: 4}); !errors.Is(err, ErrPrecondition) {
+		t.Fatalf("duplicate start error=%v, want ErrPrecondition", err)
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("rejected starts persisted %d events", len(repository.events))
+	}
+}
+
 func TestReportCorrectionEnforcesStateVersionAndTwoPersonApproval(t *testing.T) {
 	repository := &reportCorrectionRepository{item: domain.ServiceItem{
 		ID: "SI-REPORT-1", ProjectID: "PJ-REPORT-1", Status: "现场实施完成",

@@ -229,6 +229,14 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 			if err := applyItemEvent(tx, &item, event); err != nil {
 				return err
 			}
+			if event.Type == application.EventExecutionTeamAssigned {
+				if err := tx.Where("tenant_id=? AND id=?", item.TenantID, item.ID).Take(&item).Error; err != nil {
+					return err
+				}
+				if err := ensureEmbeddedPenetrationPackage(tx, &item, event.ActorUserID, event.ID+"-penetration-package", event.CreatedAt); err != nil {
+					return err
+				}
+			}
 		}
 		if event.ProjectID != "" {
 			var project projectRecord
@@ -367,6 +375,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if next != current+1 {
 			return application.ErrValidation
 		}
+		if err := validatePenetrationReportGate(tx, item, phase); err != nil {
+			return err
+		}
 		revision, err := lockReportRevision(tx, item)
 		if err != nil {
 			return err
@@ -458,14 +469,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["report_issued_by"] = ""
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
-	case application.EventFieldRecordSubmitted:
-		// 现场记录（原始数据 / 环境条件）是进入"实施中"的真实动作。
-		// 原先由坐标签到承担这个状态推进，但那份坐标没有任何证明力，已删除；
-		// 这里沿用同一转移，避免服务项停在"实施准备中"再也走不动。
-		if item.Status != "待实施" && item.Status != "实施准备中" && item.Status != "实施中" {
+	case application.EventFieldStarted:
+		if item.Status != "实施准备中" {
 			return application.ErrValidation
 		}
 		updates["status"] = "实施中"
+	case application.EventFieldRecordSubmitted:
+		// 开始现场测评是独立动作；记录只能追加到已经进入实施中的服务项。
+		if item.Status != "实施中" {
+			return application.ErrValidation
+		}
 		if err := persistEvidenceFiles(tx, item, event, "FIELD"); err != nil {
 			return err
 		}
@@ -473,6 +486,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		// 按服务项确认现场完成：先做完的项不必等项目里最后一个动作"顺带"完成。
 		if item.Status != "实施中" {
 			return application.ErrValidation
+		}
+		if err := validatePenetrationFieldCompletionGate(tx, item); err != nil {
+			return err
 		}
 		updates["status"] = "现场实施完成"
 		updates["report_status"] = "NONE"
@@ -1032,7 +1048,7 @@ func reportPhaseRank(phase string) int {
 func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) error {
 	var count int64
 	if err := tx.Model(&reportRevisionRecord{}).
-		Where("tenant_id=? AND service_item_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
+		Where("tenant_id=? AND subject_type='SERVICE_ITEM' AND subject_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
 		Count(&count).Error; err != nil {
 		return err
 	}
@@ -1044,21 +1060,21 @@ func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) e
 		status = "NONE"
 	}
 	return tx.Create(&reportRevisionRecord{
-		TenantID: item.TenantID, ServiceItemID: item.ID, Revision: item.ReportRevision,
+		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision,
 		Status: status, ValidityStatus: "ACTIVE", CreatedAt: now, UpdatedAt: now,
 	}).Error
 }
 
 func (r *Repository) ListReportRevisions(ctx context.Context, tenantID, itemID string) ([]domain.ReportRevision, error) {
 	var rows []reportRevisionRecord
-	if err := r.db.WithContext(ctx).Where("tenant_id=? AND service_item_id=?", tenantID, itemID).
+	if err := r.db.WithContext(ctx).Where("tenant_id=? AND subject_type='SERVICE_ITEM' AND subject_id=?", tenantID, itemID).
 		Order("revision DESC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	items := make([]domain.ReportRevision, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, domain.ReportRevision{
-			ID: row.ID, ServiceItemID: row.ServiceItemID, Revision: row.Revision,
+			ID: row.ID, ServiceItemID: row.ServiceItemID, SubjectType: row.SubjectType, SubjectID: row.SubjectID, Revision: row.Revision,
 			Status: row.Status, ValidityStatus: row.ValidityStatus,
 			CorrectionRequestID: row.CorrectionRequestID, CorrectionReason: row.CorrectionReason,
 			FileID: row.FileID, FileName: row.FileName, FileMIME: row.FileMIME,
@@ -1086,7 +1102,7 @@ func (r *Repository) RegisterReportArtifact(ctx context.Context, tenantID, itemI
 		if err := ensureReportRevision(tx, &item, now); err != nil {
 			return err
 		}
-		result := tx.Model(&reportRevisionRecord{}).Where("tenant_id=? AND service_item_id=? AND revision=? AND validity_status='ACTIVE'", tenantID, itemID, revision).
+		result := tx.Model(&reportRevisionRecord{}).Where("tenant_id=? AND subject_type='SERVICE_ITEM' AND subject_id=? AND revision=? AND validity_status='ACTIVE'", tenantID, itemID, revision).
 			Updates(map[string]any{"file_id": input.FileID, "file_name": input.FileName, "file_mime": input.MIME, "file_size": input.Size, "file_sha256": input.SHA256, "updated_at": now})
 		if result.Error != nil {
 			return result.Error
@@ -1138,7 +1154,7 @@ func lockReportRevision(tx *gorm.DB, item *serviceItemRecord) (reportRevisionRec
 	}
 	var revision reportRevisionRecord
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("tenant_id=? AND service_item_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
+		Where("tenant_id=? AND subject_type='SERVICE_ITEM' AND subject_id=? AND revision=?", item.TenantID, item.ID, item.ReportRevision).
 		Take(&revision).Error
 	return revision, err
 }
@@ -1202,7 +1218,7 @@ func invalidateAndCreateReportRevision(tx *gorm.DB, item *serviceItemRecord, eve
 		return application.ErrConflict
 	}
 	return tx.Create(&reportRevisionRecord{
-		TenantID: item.TenantID, ServiceItemID: item.ID, Revision: item.ReportRevision + 1,
+		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision + 1,
 		Status: "NONE", ValidityStatus: "ACTIVE", CorrectionRequestID: stringValue(event.Payload, "request_id"),
 		CorrectionReason: stringValue(event.Payload, "reason"), CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
 	}).Error

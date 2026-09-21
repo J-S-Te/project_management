@@ -90,6 +90,8 @@ type reportRevisionRecord struct {
 	ID                  uint64 `gorm:"primaryKey;autoIncrement"`
 	TenantID            string `gorm:"size:64;not null"`
 	ServiceItemID       string `gorm:"size:32;not null"`
+	SubjectType         string `gorm:"size:32;not null"`
+	SubjectID           string `gorm:"size:32;not null"`
 	Revision            uint64 `gorm:"not null"`
 	Status              string `gorm:"size:32;not null"`
 	ValidityStatus      string `gorm:"size:16;not null"`
@@ -115,6 +117,53 @@ type reportRevisionRecord struct {
 }
 
 func (reportRevisionRecord) TableName() string { return "pm_report_revision" }
+
+type penetrationWorkPackageRecord struct {
+	ID                   string `gorm:"primaryKey;size:32"`
+	TenantID             string `gorm:"size:64;not null"`
+	ProjectID            string `gorm:"size:32;not null"`
+	ParentServiceItemID  string `gorm:"size:32;not null"`
+	DecisionStatus       string `gorm:"size:16;not null"`
+	CustomerContact      string `gorm:"size:128;not null"`
+	CommunicatedAt       *time.Time
+	CommunicationSummary string `gorm:"size:2000;not null"`
+	DecisionChangeReason string `gorm:"size:1000;not null"`
+	PlannedStart         *time.Time
+	PlannedEnd           *time.Time
+	EngineerIDs          []byte `gorm:"type:json"`
+	AuthDocNo            string `gorm:"size:128;not null"`
+	AuthStart            *time.Time
+	AuthEnd              *time.Time
+	AuthScope            string `gorm:"type:text;not null"`
+	TestScope            string `gorm:"type:text;not null"`
+	TestWindow           string `gorm:"size:128;not null"`
+	EmergencyContact     string `gorm:"size:128;not null"`
+	RollbackPlan         string `gorm:"type:text;not null"`
+	ExecutionStatus      string `gorm:"size:16;not null"`
+	ReportStatus         string `gorm:"size:16;not null"`
+	ReportRevision       uint64 `gorm:"not null"`
+	Version              uint64 `gorm:"not null"`
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	UpdatedBy            string `gorm:"size:64;not null"`
+}
+
+func (penetrationWorkPackageRecord) TableName() string { return "pm_penetration_work_package" }
+
+type penetrationWorkPackageEventRecord struct {
+	ID             string `gorm:"primaryKey;size:32"`
+	TenantID       string `gorm:"size:64;not null"`
+	WorkPackageID  string `gorm:"size:32;not null"`
+	EventType      string `gorm:"size:64;not null"`
+	ActorUserID    string `gorm:"size:64;not null"`
+	IdempotencyKey string `gorm:"size:128;not null"`
+	Payload        []byte `gorm:"type:json;not null"`
+	CreatedAt      time.Time
+}
+
+func (penetrationWorkPackageEventRecord) TableName() string {
+	return "pm_penetration_work_package_event"
+}
 
 type evidenceFileRecord struct {
 	ID            uint64 `gorm:"primaryKey;autoIncrement"`

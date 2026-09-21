@@ -56,7 +56,7 @@ func TestReportCorrectionAgainstRealDatabase(t *testing.T) {
 		t.Fatalf("seed service item: %v", err)
 	}
 	if err := db.WithContext(ctx).Create(&reportRevisionRecord{
-		TenantID: reportCorrectionIntegrationTenant, ServiceItemID: "SI-REG-REPORT-1", Revision: 0,
+		TenantID: reportCorrectionIntegrationTenant, ServiceItemID: "SI-REG-REPORT-1", SubjectType: "SERVICE_ITEM", SubjectID: "SI-REG-REPORT-1", Revision: 0,
 		Status: "ARCHIVED", ValidityStatus: "ACTIVE", FileID: "FILE-R0", FileName: "R0.pdf",
 		FileMIME: "application/pdf", FileSize: 128, FileSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		PreparedBy: "project-manager-1", ReviewedBy: "quality-manager-1", IssuedBy: "technical-director-0",

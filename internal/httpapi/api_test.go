@@ -651,16 +651,16 @@ func TestRoleNavigationAlignsWithPermissionMatrix(t *testing.T) {
 		"methods": true,
 	}
 	rolePermissions := map[string][]string{
-		"admin":                {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
-		"system_admin":         {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.execute", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"admin":                {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
+		"system_admin":         {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.manage", "service_item.confirm", "project.decomposition.manage", "project.implementation.plan", "project.special_method.review", "project.report.manage", "project.report.archive", "project.team.assign", "project.execution.assign", "project.field.complete", "project.device.manage", "project.resource.read", "project.device.read", "project.deviation.report", "project.deviation.review"},
 		"business_admin":       {"service_item.confirm", "project.decomposition.manage", "project.team.assign", "project.resource.read"},
 		"team_lead":            {"project.execution.assign", "project.deviation.review", "project.resource.read"},
 		"technical_director":   {"project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.special_method.review", "project.report.archive", "project.deviation.review", "project.resource.read"},
-		"project_manager":      {"project.implementation.plan", "project.report.manage", "project.field.complete", "project.resource.read"},
+		"project_manager":      {"project.implementation.plan", "project.field.execute", "project.report.manage", "project.field.complete", "project.resource.read"},
 		"quality_manager":      {"project_rule.manage", "project.report.review", "project.resource.read"},
 		"device_admin":         {"project.device.manage", "project.device.read", "project.capability_code.manage", "project.resource.read"},
-		"engineer":             {"project.field.execute", "project.deviation.report"},
-		"penetration_engineer": {"project.field.execute", "project.deviation.report"},
+		"engineer":             {"project.deviation.report"},
+		"penetration_engineer": {"project.deviation.report"},
 	}
 	visible := map[string]map[string]bool{}
 	for role := range rolePermissions {

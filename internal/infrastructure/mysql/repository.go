@@ -132,6 +132,7 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 		return nil, err
 	}
 	plans := map[string]domain.ImplementationPlan{}
+	penetrationPackages := map[string]domain.PenetrationWorkPackage{}
 	if len(records) > 0 {
 		ids := make([]string, 0, len(records))
 		for _, record := range records {
@@ -145,12 +146,22 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 			plan := implPlanFromRecord(row)
 			plans[row.ServiceItemID] = plan
 		}
+		var packageRows []penetrationWorkPackageRecord
+		if err := r.db.WithContext(ctx).Where("tenant_id=? AND parent_service_item_id IN ?", filter.TenantID, ids).Find(&packageRows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range packageRows {
+			penetrationPackages[row.ParentServiceItemID] = penetrationWorkPackageFromRecord(row)
+		}
 	}
 	items := make([]domain.ServiceItem, 0, len(records))
 	for _, record := range records {
 		item := serviceFromRecord(record)
 		if plan, ok := plans[record.ID]; ok {
 			item.ImplementationPlan = &plan
+		}
+		if workPackage, ok := penetrationPackages[record.ID]; ok {
+			item.PenetrationWorkPackage = &workPackage
 		}
 		items = append(items, item)
 	}
@@ -162,8 +173,21 @@ func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFi
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ServiceItem{}, application.ErrNotFound
 	}
-	return serviceFromRecord(record), err
+	if err != nil {
+		return domain.ServiceItem{}, err
+	}
+	item := serviceFromRecord(record)
+	var workPackage penetrationWorkPackageRecord
+	packageErr := r.db.WithContext(ctx).Where("tenant_id=? AND parent_service_item_id=?", filter.TenantID, id).Take(&workPackage).Error
+	if packageErr == nil {
+		item.PenetrationWorkPackage = pointerTo(penetrationWorkPackageFromRecord(workPackage))
+	} else if !errors.Is(packageErr, gorm.ErrRecordNotFound) {
+		return domain.ServiceItem{}, packageErr
+	}
+	return item, nil
 }
+
+func pointerTo[T any](value T) *T { return &value }
 
 func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.ScopeFilter, ids []string, actor string) ([]domain.ServiceItem, error) {
 	tenant := filter.TenantID

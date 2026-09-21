@@ -148,6 +148,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/implementation-plan/revoke", require("project.implementation.revoke"), h.revokeImplementationPlan)
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
 	api.POST("/service-items/:id/preparation/revoke", require("project.implementation.revoke"), h.revokePreparation)
+	api.POST("/service-items/:id/field-start", require("project.field.execute"), h.startFieldExecution)
 	api.POST("/service-items/:id/rollback-requests", require("project.rollback.request"), h.requestRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/withdraw", require("project.rollback.request"), h.withdrawRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/decision", require("project.rollback.approve"), h.decideRollback)
@@ -1166,6 +1167,18 @@ func (h *Handler) submitFieldRecord(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusCreated, map[string]string{"status": "RECORDED"})
+}
+
+func (h *Handler) startFieldExecution(c *gin.Context) {
+	var input domain.FieldStartInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.StartFieldExecution(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": "实施中"})
 }
 func (h *Handler) reportDeviation(c *gin.Context) {
 	var input domain.DeviationInput
