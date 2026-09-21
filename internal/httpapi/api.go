@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -118,6 +120,14 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
 	api.POST("/service-items/:id/field-complete", require("project.field.complete"), h.completeServiceItemField)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
+	api.GET("/service-items/:id/penetration-work-package", require("project.read"), h.getPenetrationWorkPackage)
+	api.POST("/service-items/:id/penetration-work-package", require("project.implementation.plan"), h.ensurePenetrationWorkPackage)
+	api.PUT("/service-items/:id/penetration-work-package/decision", require("project.implementation.plan"), h.savePenetrationDecision)
+	api.PUT("/service-items/:id/penetration-work-package/plan", require("project.implementation.plan"), h.savePenetrationPlan)
+	api.POST("/service-items/:id/penetration-work-package/execution", requireAny("project.field.execute", "project.implementation.plan"), h.advancePenetrationExecution)
+	api.GET("/service-items/:id/penetration-work-package/report-revisions", require("project.read"), h.listPenetrationReportRevisions)
+	api.PUT("/service-items/:id/penetration-work-package/report-artifact", require("project.report.prepare"), h.registerPenetrationReportArtifact)
+	api.POST("/service-items/:id/penetration-work-package/report-status", requireAny("project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive"), h.advancePenetrationReport)
 	api.GET("/service-items/:id/report-revisions", require("project.read"), h.listReportRevisions)
 	api.POST("/service-items/:id/evidence", requireAny("project.field.execute", "project.deviation.report", "project.report.prepare"), h.uploadEvidence)
 	api.PUT("/service-items/:id/report-revisions/:revision/artifact", require("project.report.prepare"), h.registerReportArtifact)
@@ -156,6 +166,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/service-items/:id/equipment-reservations", requireAny("project.implementation.plan", "project.read"), h.listEquipmentReservations)
 	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
+	api.POST("/equipment/import", require("project.device.manage"), h.importEquipment)
 	api.DELETE("/equipment/:resource_id", require("project.device.manage"), h.deleteEquipment)
 	// 站点台账：站点是项目/服务项的公共主数据，读以 project.read 为基线，
 	// 写沿用资源主数据权限 project.resource.manage。
@@ -701,6 +712,112 @@ func (h *Handler) listReportRevisions(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, items)
+}
+
+func idempotencyKey(c *gin.Context) string {
+	return strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+}
+
+func (h *Handler) getPenetrationWorkPackage(c *gin.Context) {
+	item, err := h.service.GetPenetrationWorkPackage(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) ensurePenetrationWorkPackage(c *gin.Context) {
+	var input domain.EnsurePenetrationWorkPackageInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.EnsurePenetrationWorkPackage(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) savePenetrationDecision(c *gin.Context) {
+	var input domain.PenetrationDecisionInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.SavePenetrationDecision(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) savePenetrationPlan(c *gin.Context) {
+	var input domain.PenetrationPlanInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.SavePenetrationPlan(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) advancePenetrationExecution(c *gin.Context) {
+	var input domain.PenetrationExecutionInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.AdvancePenetrationExecution(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) listPenetrationReportRevisions(c *gin.Context) {
+	items, err := h.service.ListPenetrationReportRevisions(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
+func (h *Handler) registerPenetrationReportArtifact(c *gin.Context) {
+	var input domain.PenetrationReportArtifactInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.RegisterPenetrationReportArtifact(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
+}
+
+func (h *Handler) advancePenetrationReport(c *gin.Context) {
+	var input domain.PenetrationReportStatusInput
+	if !decode(c, &input) {
+		return
+	}
+	input.IdempotencyKey = idempotencyKey(c)
+	item, err := h.service.AdvancePenetrationReport(c.Request.Context(), principal(c), c.Param("id"), input)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, item)
 }
 
 func (h *Handler) registerReportArtifact(c *gin.Context) {
@@ -1384,17 +1501,42 @@ func (h *Handler) saveDetectionCategory(c *gin.Context) {
 
 // importDetectionCategories 批量导入检测类别域（页面的「导入」入口）。
 func (h *Handler) importDetectionCategories(c *gin.Context) {
-	var input struct {
-		Items []domain.DetectionCategory `json:"items"`
-	}
-	if !decode(c, &input) {
+	file, err := c.FormFile("file")
+	if err != nil || file.Size <= 0 || file.Size > maximumCapabilityImportBytes {
+		writeServiceError(c, application.ErrValidation)
 		return
 	}
-	result, err := h.service.ImportDetectionCategories(c.Request.Context(), principal(c), input.Items)
+	opened, err := file.Open()
+	if err != nil {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	defer opened.Close()
+	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
+	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	if h.service.EvidenceFiles == nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "统一文件网关暂不可用，导入未执行")
+		return
+	}
+	if _, err = h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "DETECTION_CATEGORY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "文件校验暂不可用，导入未执行")
+		return
+	}
+	items, parseErrs := detectionCategoriesFromCSV(content)
+	if len(items) == 0 {
+		writeServiceError(c, application.ErrValidation)
+		return
+	}
+	result, err := h.service.ImportDetectionCategories(c.Request.Context(), principal(c), items)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
+	result.Errors = append(parseErrs, result.Errors...)
+	result.Skipped += len(parseErrs)
 	writeData(c, http.StatusOK, result)
 }
 

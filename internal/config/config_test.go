@@ -113,7 +113,7 @@ func TestLoadRejectsInvalidSessionCookieName(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresKeycloakMachineCallerContractWhenBearerIsEnabled(t *testing.T) {
+func TestLoadRequiresPlatformMachineCallerContractWhenBearerIsEnabled(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("CONTRACT_INTEGRATION_ENABLED", "true")
 	t.Setenv("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")
@@ -139,6 +139,16 @@ func TestLoadRequiresKeycloakMachineCallerContractWhenBearerIsEnabled(t *testing
 	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "contract_management-integration")
 	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "project_management-internal")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRE_BEARER must be true") {
+		t.Fatalf("error = %v", err)
+	}
+
+	setValidEnvironment(t)
+	t.Setenv("CONTRACT_INTEGRATION_ENABLED", "true")
+	t.Setenv("CONTRACT_INTEGRATION_REQUIRE_BEARER", "true")
+	t.Setenv("CONTRACT_INTEGRATION_CLIENT_ID", "contract_management-dev-project-integration")
+	t.Setenv("CONTRACT_INTEGRATION_AUDIENCE", "basic-platform-application")
+	t.Setenv("CONTRACT_INTEGRATION_REQUIRED_SCOPE", "PENDING_ONBOARDING")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CONTRACT_INTEGRATION_REQUIRED_SCOPE") {
 		t.Fatalf("error = %v", err)
 	}
 }
