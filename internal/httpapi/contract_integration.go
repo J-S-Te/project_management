@@ -30,7 +30,7 @@ func (h *Handler) authenticateContractIntegration(options ContractIntegrationOpt
 		const bearerPrefix = "Bearer "
 		authorization := strings.TrimSpace(c.GetHeader("Authorization"))
 		if !strings.HasPrefix(authorization, bearerPrefix) || strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)) == "" {
-			writeError(c, http.StatusUnauthorized, "PM_INTEGRATION_BEARER_REQUIRED", "合同系统投递必须携带 Keycloak 机器访问令牌")
+			writeError(c, http.StatusUnauthorized, "PM_INTEGRATION_BEARER_REQUIRED", "合同系统投递必须携带基础平台机器访问令牌")
 			c.Abort()
 			return
 		}

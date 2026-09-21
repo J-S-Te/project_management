@@ -237,3 +237,29 @@ func TestCapabilityCodeCatalogMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedPenetrationWorkPackageMigrationSeparatesSubjectAndIdempotency(t *testing.T) {
+	body, err := Files.ReadFile("000025_penetration_work_package.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"CREATE TABLE pm_penetration_work_package",
+		"UNIQUE KEY uq_pm_penetration_parent (tenant_id, parent_service_item_id)",
+		"CREATE TABLE pm_penetration_work_package_event",
+		"UNIQUE KEY uq_pm_penetration_event_idempotency (tenant_id, idempotency_key)",
+		"decision_status IN ('PENDING','REQUIRED','NOT_REQUIRED')",
+		"subject_type VARCHAR(32) NOT NULL DEFAULT 'SERVICE_ITEM'",
+		"UPDATE pm_report_revision SET subject_id = service_item_id",
+		"uq_pm_report_revision_subject (tenant_id, subject_type, subject_id, revision)",
+		"'PENETRATION_WORK_PACKAGE'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("embedded penetration migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "ALTER TABLE pm_service_item ADD") {
+		t.Fatal("embedded penetration must not be represented by expanding the service-item count")
+	}
+}

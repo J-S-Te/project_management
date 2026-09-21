@@ -73,6 +73,10 @@ type ServiceItem struct {
 	ReportIssuedBy     string              `json:"report_issued_by,omitempty"`
 	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
+	// PenetrationWorkPackage is an embedded delivery work package. It is exposed with
+	// the parent item for a consistent cross-role projection, but is never counted as
+	// an independent contract service item.
+	PenetrationWorkPackage *PenetrationWorkPackage `json:"penetration_work_package,omitempty"`
 
 	// Version 是服务项状态版本：每次状态变更自增。读取方据此识别自己拿到的是不是最新一版，
 	// 写入方可带上期望版本做条件更新（不匹配即 409 冲突），避免"后者静默覆盖前者"。
@@ -84,6 +88,8 @@ type ServiceItem struct {
 type ReportRevision struct {
 	ID                  uint64 `json:"id"`
 	ServiceItemID       string `json:"service_item_id"`
+	SubjectType         string `json:"subject_type"`
+	SubjectID           string `json:"subject_id"`
 	Revision            uint64 `json:"revision"`
 	Status              string `json:"status"`
 	ValidityStatus      string `json:"validity_status"`

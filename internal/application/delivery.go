@@ -29,6 +29,7 @@ const (
 	EventImplementationPlanRevoked  = "IMPLEMENTATION_PLAN_REVOKED"
 	EventPreparationStarted         = "PREPARATION_STARTED"
 	EventPreparationRevoked         = "PREPARATION_REVOKED"
+	EventFieldStarted               = "FIELD_STARTED"
 	EventFieldRecordSubmitted       = "FIELD_RECORD_SUBMITTED"
 	EventRollbackRequested          = "ROLLBACK_REQUESTED"
 	EventRollbackApproved           = "ROLLBACK_APPROVED"
@@ -1741,6 +1742,17 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
 		return ErrValidation
 	}
+	filter, err := authorizeProjectScope(p, "project.field.execute")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "实施中" {
+		return PreconditionError("仅可在进入实施中后提交现场记录")
+	}
 	if len(input.EvidenceURLs) > 0 {
 		return ValidationError("现场证据必须通过统一文件网关上传")
 	}
@@ -1749,7 +1761,30 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 			return err
 		}
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldRecordSubmitted, map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_files": input.EvidenceFiles}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldRecordSubmitted, map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_files": input.EvidenceFiles, "expected_version": input.ExpectedVersion}))
+}
+
+// StartFieldExecution 是“实施准备中”到“实施中”的显式业务动作。现场记录不再隐式推进
+// 状态，避免用户尚未确认开始测评时，仅因保存一条记录就进入实施阶段。
+func (s *Service) StartFieldExecution(ctx context.Context, p platform.Principal, itemID string, input domain.FieldStartInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.field.execute", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
+	filter, err := authorizeProjectScope(p, "project.field.execute")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Status != "实施准备中" {
+		return PreconditionError("仅可从实施准备中进入实施中")
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldStarted, map[string]any{"expected_version": input.ExpectedVersion}))
 }
 
 func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, itemID string, input domain.DeviationInput) (string, error) {

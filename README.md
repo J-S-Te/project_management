@@ -109,11 +109,16 @@ OIDC Client Secret、数据库口令和机器客户端 Secret 只能通过运行
 | POST | `/api/v1/service-items/{id}/preparation` | 登记行程预定与设备清单（`equipment`）；设备使用时段与其他服务项重叠时拒绝保存 |
 | GET | `/api/v1/service-items/{id}/equipment-reservations` | 查询计划窗口内被其他服务项占用的设备，供实施准备的选择器置灰已占用设备 |
 | POST | `/api/v1/service-items/{id}/equipment-return` | 归还设备：写回归还时间，释放占用并让设备回到「在公司」 |
-| POST | `/api/v1/service-items/{id}/check-in` | 记录带时间戳的 GPS 签到 |
-| POST | `/api/v1/service-items/{id}/field-records` | 提交原始数据、环境条件和证据文件引用 |
+| POST | `/api/v1/service-items/{id}/field-start` | 项目经理确认准备完成并显式进入实施中 |
+| POST | `/api/v1/service-items/{id}/field-records` | 项目经理在实施中提交原始数据、环境条件和证据文件引用 |
 | POST | `/api/v1/service-items/{id}/deviations` | 停止任务并上报偏离 |
 | POST | `/api/v1/deviations/{id}/review` | 团队负责人或技术总监决定放行、终止或重测 |
-| POST | `/api/v1/projects/{id}/field-complete` | 项目经理汇总确认现场实施完成 |
+| POST | `/api/v1/service-items/{id}/field-complete` | 项目经理点击“现场测评结束”，单个服务项进入报告编制 |
+| GET / POST | `/api/v1/service-items/{id}/penetration-work-package` | 读取或按需建立等保服务项内嵌渗透测试专项（不新增服务项） |
+| PUT | `/api/v1/service-items/{id}/penetration-work-package/decision` | 登记或变更客户沟通后的开展结论；需要专项版本和幂等键 |
+| PUT | `/api/v1/service-items/{id}/penetration-work-package/plan` | 保存专项计划、授权边界和具备能力的工程师 |
+| POST | `/api/v1/service-items/{id}/penetration-work-package/execution` | 开始、完成或受控取消专项执行 |
+| PUT / POST | `/api/v1/service-items/{id}/penetration-work-package/report-artifact`、`report-status` | 登记独立专项报告并按编制、审核、签发、归档推进 |
 | GET/PUT | `/api/v1/capabilities` | 查询人员资质与设备能力投影；PUT 只维护人员资质，设备新建、更新、停用和删除统一使用 `/api/v1/equipment` |
 | GET | `/api/v1/delivery-events` | 查询完整交付过程留痕 |
 

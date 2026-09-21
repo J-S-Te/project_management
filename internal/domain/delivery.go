@@ -332,6 +332,11 @@ type FieldRecordInput struct {
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
+type FieldStartInput struct {
+	// ExpectedVersion 防止项目经理基于过期页面重复开始现场测评。
+	ExpectedVersion uint64 `json:"expected_version,omitempty"`
+}
+
 type DeviationInput struct {
 	Description   string                `json:"description"`
 	Severity      string                `json:"severity"`

@@ -41,6 +41,40 @@ func TestCanStartPreparationAllowsReentryAfterFieldRollback(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPenetrationParentLifecycleGates(t *testing.T) {
+	fieldCases := []struct {
+		name string
+		row  *penetrationWorkPackageRecord
+		pass bool
+	}{
+		{name: "missing package blocks", pass: false},
+		{name: "pending decision blocks", row: &penetrationWorkPackageRecord{DecisionStatus: "PENDING", ExecutionStatus: "NOT_STARTED"}, pass: false},
+		{name: "not required passes", row: &penetrationWorkPackageRecord{DecisionStatus: "NOT_REQUIRED", ExecutionStatus: "CANCELLED"}, pass: true},
+		{name: "required incomplete blocks", row: &penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ExecutionStatus: "IN_PROGRESS"}, pass: false},
+		{name: "required complete passes", row: &penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ExecutionStatus: "COMPLETED"}, pass: true},
+	}
+	for _, test := range fieldCases {
+		t.Run(test.name, func(t *testing.T) {
+			if passed := penetrationFieldCompletionGate(test.row) == nil; passed != test.pass {
+				t.Fatalf("field gate passed=%v, want %v", passed, test.pass)
+			}
+		})
+	}
+
+	if err := penetrationReportGate(&penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ReportStatus: "APPROVED"}, "ISSUED"); err == nil {
+		t.Fatal("parent report issue must wait for embedded report issue")
+	}
+	if err := penetrationReportGate(&penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ReportStatus: "ISSUED"}, "ISSUED"); err != nil {
+		t.Fatalf("issued embedded report should allow parent issue: %v", err)
+	}
+	if err := penetrationReportGate(&penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ReportStatus: "ISSUED"}, "ARCHIVED"); err == nil {
+		t.Fatal("parent archive must wait for embedded report archive")
+	}
+	if err := penetrationReportGate(&penetrationWorkPackageRecord{DecisionStatus: "REQUIRED", ReportStatus: "ARCHIVED"}, "ARCHIVED"); err != nil {
+		t.Fatalf("archived embedded report should allow parent archive: %v", err)
+	}
+}
+
 func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testing.T) {
 	references := []platform.ApprovedContract{
 		{ID: "C-1", Number: "HT-1", Version: 4},

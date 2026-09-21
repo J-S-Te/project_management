@@ -40,14 +40,13 @@ stateDiagram-v2
     待分配 --> 待分配: 分配团队负责人 / 分配项目经理与工程师
     待分配 --> 待实施: 发布实施计划（须能力校验通过）
     待实施 --> 实施准备中: 发起实施准备（设备清单可选）
-    待实施 --> 实施中: 提交现场记录
-    实施准备中 --> 实施中: 提交现场记录
-    实施中 --> 实施中: 继续提交现场记录
+    实施准备中 --> 实施中: 项目经理点击进入实施中
+    实施中 --> 实施中: 项目经理提交现场记录
     实施中 --> 异常处理中: 上报偏离
     异常处理中 --> 实施中: 评审=放行(RELEASE)
     异常处理中 --> 待实施: 评审=重测(RETEST)
     异常处理中 --> 已终止: 评审=终止(TERMINATE)
-    实施中 --> 现场实施完成: 确认现场实施完成（同时 report_status=COMPILING）
+    实施中 --> 现场实施完成: 项目经理点击现场测评结束（同时 report_status=COMPILING）
     现场实施完成 --> 现场实施完成: 报告阶段推进（REVIEWED/ISSUED/ARCHIVED）
     已终止 --> [*]
 ```
@@ -67,7 +66,8 @@ stateDiagram-v2
 | `ROLLBACK_APPROVED` | 申请存在且未被审批；技术总监或系统管理员批准 | 现场→**实施准备中**；报告→**实施中** | 现场/报告原始事件保留；报告返工仅允许未签发、未归档阶段 |
 | `IMPLEMENTATION_PLANNED` | status = 待分配；`project_manager_id` 非空；`conflict_status = PASSED`；若是特殊方法则 `tech_review_status = APPROVED`；渗透测试须填专项计划 | **待实施** | 写入计划起止、实施计划、人员清单 |
 | `PREPARATION_STARTED` | status = 待实施；设备清单可为空，非空时必须有效；行程安排为“无需出差（有原因）/关联本项目已有行程/新建行程申请”之一 | **实施准备中** | 写入设备清单（可为空，非空时含使用时段）和结构化行程快照；新建行程编号由服务端生成，旧版裸编号仅滚动兼容 |
-| `FIELD_RECORD_SUBMITTED` | status ∈ {待实施, 实施准备中, 实施中} | **实施中** | 现场记录 |
+| `FIELD_STARTED` | status = 实施准备中；需 `project.field.execute` | **实施中** | 记录项目经理确认开始现场测评的边界 |
+| `FIELD_RECORD_SUBMITTED` | status = 实施中；需 `project.field.execute` | 不变（实施中） | 追加现场记录 |
 | `FIELD_COMPLETED` | status = 实施中 | **现场实施完成** | **`report_status` 自动置 COMPILING** |
 | `DEVIATION_REPORTED` | status = 实施中 | **异常处理中** | 偏离记录 |
 | `DEVIATION_REVIEWED` | status = 异常处理中；决定 ∈ {放行, 重测, 终止} | 放行→**实施中**；重测→**待实施**；终止→**已终止** | 评审意见 |
@@ -149,10 +149,10 @@ stateDiagram-v2
 | 申请现场/报告回退 | `project.rollback.request` | 项目经理、团队负责人（系统管理员可代办） |
 | 审批现场/报告回退 | `project.rollback.approve` | 技术总监、系统管理员 |
 | 发布实施计划 / 发起实施准备 | `project.implementation.plan` | 项目经理 |
-| 提交现场记录 | `project.field.execute` | 工程师、渗透测试工程师 |
+| 进入实施中 / 提交现场记录 | `project.field.execute` | 仅项目经理 |
 | 上报偏离 | `project.deviation.report` | 工程师、渗透测试工程师 |
 | 评审偏离 | `project.deviation.review` | 团队负责人、技术总监 |
-| 确认现场实施完成 | `project.field.complete` | 项目经理 |
+| 现场测评结束 | `project.field.complete` | 项目经理（系统管理员可代办） |
 | 报告编制/审核/签发 | `project.report.manage` | 项目经理、质量管理员 |
 | 报告归档 | `project.report.archive` | 技术总监、质量管理员 |
 | 特殊方法复核 | `project.special_method.review` | 技术总监 |
@@ -191,6 +191,16 @@ stateDiagram-v2
 > 当前只支持客户名称包含 / 合同号包含 / 合同服务项数 / 检测类别集合，CRM 字段留待跨系统集成。
 > 检测类别域的「必备资质」是资质名称（如 CISP-PTE），而能力校验比对能力码，两者编码体系不同，
 > 因此能力校验改由「必检能力码」驱动（留空即不额外校验，渗透测试仍自动追加 PENETRATION_TEST）。
+
+### 4.2.2 等保项目内嵌渗透测试专项
+
+渗透测试保留两种互不混淆的业务形态：合同中独立购买的渗透测试仍是 `test_mode=PENETRATION` 的服务项，沿用完整交付、报告和结算流程；等保测评中经项目经理与客户商定的附属渗透工作使用 `pm_penetration_work_package`，它不是服务项，不进入合同拆解数量、项目进度或独立结算。
+
+专项在等保服务项完成项目经理指派后自动建立，历史服务项在项目经理进入实施计划时按需建立。决策状态为 `PENDING / REQUIRED / NOT_REQUIRED`；执行状态为 `NOT_STARTED / IN_PROGRESS / COMPLETED / CANCELLED`；独立专项报告状态为 `NONE / DRAFTING / SUBMITTED / APPROVED / ISSUED / ARCHIVED`。所有写入均使用专项版本乐观锁、幂等键和不可变专项事件留痕。
+
+父服务项门禁：现场实施完成前，专项必须已登记“不开展”，或已确认开展且测试完成；父报告签发前，专项报告必须已签发；父项目归档前，专项报告必须已归档。专项状态只作为门禁，不直接改写父服务项或项目状态，因此各角色读取的父状态仍由统一状态机派生。
+
+确认开展时必须完整登记计划窗口、授权书及有效期、授权范围、测试范围、测试时间窗、应急联系人、回滚方案，并只能指派具备 `PENETRATION_TEST` 能力且排期无冲突的工程师。开始测试时再次校验授权有效期、人员能力与排期。取消专项必须由项目经理重新登记客户沟通结论及原因，最终归入“不开展”，不能删除专项记录。
 
 ### 4.3 资源、能力与设备
 
