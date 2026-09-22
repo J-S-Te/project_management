@@ -19,6 +19,10 @@ var (
 	ErrNotFound   = errors.New("resource not found")
 	ErrValidation = errors.New("validation failed")
 	ErrConflict   = errors.New("resource state conflict")
+	// ErrAlreadyApplied is an internal success signal for an exact replay of an
+	// offline field command. HTTP callers still receive success; automations are
+	// not fired a second time.
+	ErrAlreadyApplied = errors.New("client operation already applied")
 	// ErrDuplicateContract 表示同一租户下 (contract_id, contract_version) 已被并发请求创建。
 	// 调用方应按幂等处理：回读已存在的项目并同步盖章状态，而不是把唯一键冲突暴露成 500。
 	ErrDuplicateContract = errors.New("contract version already activated")

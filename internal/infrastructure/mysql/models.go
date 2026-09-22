@@ -378,14 +378,16 @@ type ruleRecord struct {
 func (ruleRecord) TableName() string { return "pm_rule" }
 
 type deliveryEventRecord struct {
-	ID            string    `gorm:"primaryKey;size:32"`
-	TenantID      string    `gorm:"size:64;not null;index:idx_pm_event_tenant_project_time,priority:1"`
-	ProjectID     string    `gorm:"size:32;not null;index:idx_pm_event_tenant_project_time,priority:2"`
-	ServiceItemID string    `gorm:"size:32;not null"`
-	EventType     string    `gorm:"size:64;not null"`
-	ActorUserID   string    `gorm:"size:64;not null"`
-	Payload       []byte    `gorm:"type:json;not null"`
-	CreatedAt     time.Time `gorm:"index:idx_pm_event_tenant_project_time,priority:3"`
+	ID                string  `gorm:"primaryKey;size:32"`
+	TenantID          string  `gorm:"size:64;not null;index:idx_pm_event_tenant_project_time,priority:1"`
+	ProjectID         string  `gorm:"size:32;not null;index:idx_pm_event_tenant_project_time,priority:2"`
+	ServiceItemID     string  `gorm:"size:32;not null"`
+	EventType         string  `gorm:"size:64;not null"`
+	ActorUserID       string  `gorm:"size:64;not null"`
+	ClientOperationID *string `gorm:"size:128"`
+	CapturedAt        *time.Time
+	Payload           []byte    `gorm:"type:json;not null"`
+	CreatedAt         time.Time `gorm:"index:idx_pm_event_tenant_project_time,priority:3"`
 }
 
 func (deliveryEventRecord) TableName() string { return "pm_delivery_event" }

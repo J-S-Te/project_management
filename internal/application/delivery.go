@@ -30,7 +30,9 @@ const (
 	EventPreparationStarted         = "PREPARATION_STARTED"
 	EventPreparationRevoked         = "PREPARATION_REVOKED"
 	EventFieldStarted               = "FIELD_STARTED"
+	EventFieldCheckedIn             = "FIELD_CHECKED_IN"
 	EventFieldRecordSubmitted       = "FIELD_RECORD_SUBMITTED"
+	EventFieldSignatureCaptured     = "FIELD_SIGNATURE_CAPTURED"
 	EventRollbackRequested          = "ROLLBACK_REQUESTED"
 	EventRollbackApproved           = "ROLLBACK_APPROVED"
 	EventRollbackRejected           = "ROLLBACK_REJECTED"
@@ -1736,9 +1738,6 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
 		return err
 	}
-	if err := s.verifyExpectedVersion(ctx, p, "project.field.execute", itemID, input.ExpectedVersion); err != nil {
-		return err
-	}
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
 		return ErrValidation
 	}
@@ -1753,6 +1752,9 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	if item.Status != "实施中" {
 		return PreconditionError("仅可在进入实施中后提交现场记录")
 	}
+	if len(input.EvidenceFiles) == 0 {
+		return ValidationError("现场记录必须包含至少一份文件网关证据")
+	}
 	if len(input.EvidenceURLs) > 0 {
 		return ValidationError("现场证据必须通过统一文件网关上传")
 	}
@@ -1761,7 +1763,103 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 			return err
 		}
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldRecordSubmitted, map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_files": input.EvidenceFiles, "expected_version": input.ExpectedVersion}))
+	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, false)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"raw_data": input.RawData, "environment": input.Environment, "evidence_files": input.EvidenceFiles, "expected_version": input.ExpectedVersion}
+	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldRecordSubmitted, payload, operationID, capturedAt))
+}
+
+// CheckInField records GPS and device accuracy before field work. It is replay-safe
+// so an offline client may submit the same operation after connectivity returns.
+func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCheckInInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
+	if input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 {
+		return ValidationError("签到经纬度超出有效范围")
+	}
+	if input.AccuracyMeters <= 0 || input.AccuracyMeters > 10000 {
+		return ValidationError("签到定位精度必须在 0 到 10000 米之间")
+	}
+	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, true)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"latitude": input.Latitude, "longitude": input.Longitude, "accuracy_meters": input.AccuracyMeters,
+		"deviation_reason": strings.TrimSpace(input.DeviationReason), "expected_version": input.ExpectedVersion,
+	}
+	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldCheckedIn, payload, operationID, capturedAt))
+}
+
+// CaptureFieldSignature stores an immutable signature artifact and audit timestamp.
+func (s *Service) CaptureFieldSignature(ctx context.Context, p platform.Principal, itemID string, input domain.FieldSignatureInput) error {
+	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+		return err
+	}
+	if err := normalizeFileEvidence(&input.SignatureFile, "电子签名"); err != nil {
+		return err
+	}
+	if input.SignatureFile.MIME != "image/png" {
+		return ValidationError("电子签名必须使用 PNG 格式")
+	}
+	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, true)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"evidence_files": []domain.ReportArtifactInput{input.SignatureFile},
+		"signature_file": input.SignatureFile, "expected_version": input.ExpectedVersion,
+	}
+	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldSignatureCaptured, payload, operationID, capturedAt))
+}
+
+func normalizeOfflineOperation(operationID, captured string, required bool) (string, time.Time, error) {
+	operationID = strings.TrimSpace(operationID)
+	captured = strings.TrimSpace(captured)
+	if operationID == "" && captured == "" && !required {
+		return "", time.Time{}, nil
+	}
+	if operationID == "" || captured == "" {
+		return "", time.Time{}, ValidationError("离线操作编号和采集时间必须同时提供")
+	}
+	if len(operationID) < 8 || len(operationID) > 128 {
+		return "", time.Time{}, ValidationError("离线操作编号长度必须在 8 到 128 个字符之间")
+	}
+	for _, r := range operationID {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._:-", r) {
+			return "", time.Time{}, ValidationError("离线操作编号只能包含字母、数字、点、下划线、冒号和连字符")
+		}
+	}
+	capturedAt, err := time.Parse(time.RFC3339, captured)
+	if err != nil {
+		return "", time.Time{}, ValidationError("采集时间必须是 RFC3339 格式")
+	}
+	if capturedAt.After(time.Now().UTC().Add(10 * time.Minute)) {
+		return "", time.Time{}, ValidationError("采集时间不能晚于服务器时间 10 分钟以上")
+	}
+	return operationID, capturedAt.UTC(), nil
+}
+
+func fieldDeliveryEvent(p platform.Principal, itemID, typ string, payload map[string]any, operationID string, capturedAt time.Time) domain.DeliveryEvent {
+	if !capturedAt.IsZero() {
+		payload["captured_at"] = capturedAt.Format(time.RFC3339Nano)
+	}
+	return domain.DeliveryEvent{
+		ID: ulid.Make().String(), TenantID: p.TenantID, ServiceItemID: itemID,
+		Type: typ, ActorUserID: p.UserID, Payload: payload, CreatedAt: time.Now().UTC(),
+		ClientOperationID: operationID, CapturedAt: capturedTimePointer(capturedAt),
+	}
+}
+
+func capturedTimePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 // StartFieldExecution 是“实施准备中”到“实施中”的显式业务动作。现场记录不再隐式推进
@@ -1836,17 +1934,22 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 	if decision != "RELEASE" && decision != "TERMINATE" && decision != "RETEST" {
 		return ErrValidation
 	}
+	if decision == "TERMINATE" && strings.TrimSpace(input.Comment) == "" {
+		return ValidationError("终止服务项时必须填写终止原因")
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, itemID, EventDeviationReviewed, map[string]any{"deviation_id": deviationID, "decision": decision, "comment": input.Comment}))
 }
 
 // CompleteServiceItemField 确认单个服务项现场实施完成：服务项进入「现场实施完成」
 // 并开启报告编制；全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切
 // 完成入口——多服务项项目里各服务项按自己的节奏收口。
-func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Principal, itemID string) error {
+func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCompletionInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, map[string]any{"confirmed_by": p.UserID}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, map[string]any{
+		"confirmed_by": p.UserID, "incomplete_reason": strings.TrimSpace(input.IncompleteReason),
+	}))
 }
 
 func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, projectID string) ([]domain.DeliveryEvent, error) {
@@ -2435,6 +2538,9 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	}
 	s.attachNotification(ctx, &event)
 	if err := repo.ApplyDeliveryEvent(ctx, event); err != nil {
+		if errors.Is(err, ErrAlreadyApplied) {
+			return nil
+		}
 		return err
 	}
 	s.fireAutomations(ctx, event)

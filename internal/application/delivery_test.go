@@ -709,12 +709,16 @@ type hookRepository struct {
 	events   []domain.DeliveryEvent
 	overdue  []domain.SlaOverdueItem
 	enqueued []domain.NotificationMessage
+	applyErr error
 }
 
 func (r *hookRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
 	return r.rules, nil
 }
 func (r *hookRepository) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
+	if r.applyErr != nil {
+		return r.applyErr
+	}
 	r.events = append(r.events, event)
 	return nil
 }
@@ -743,6 +747,9 @@ func (r *assignmentRevokeRepository) GetServiceItem(_ context.Context, filter pl
 func (r *assignmentRevokeRepository) ApplyDeliveryEvent(_ context.Context, event domain.DeliveryEvent) error {
 	r.events = append(r.events, event)
 	return nil
+}
+func (r *assignmentRevokeRepository) FindProjectForDeviation(_ context.Context, _ platform.ScopeFilter, _ string) (string, string, error) {
+	return r.item.ProjectID, r.item.ID, nil
 }
 
 type reportCorrectionRepository struct {
@@ -810,13 +817,137 @@ func TestFieldExecutionRequiresExplicitStartBeforeRecords(t *testing.T) {
 	// 不再承担“实施准备中 -> 实施中”的隐式状态迁移。
 	repository.item.Status = "实施中"
 	repository.item.Version = 8
+	evidence := domain.ReportArtifactInput{FileID: "FILE-FIELD-1", FileName: "field.jpg", MIME: "image/jpeg", Size: 128, SHA256: strings.Repeat("b", 64)}
 	if err := service.SubmitFieldRecord(context.Background(), manager, repository.item.ID, domain.FieldRecordInput{
-		RawData: "现场测评记录", Environment: "客户现场", ExpectedVersion: 8,
+		RawData: "现场测评记录", Environment: "客户现场", EvidenceFiles: []domain.ReportArtifactInput{evidence}, ExpectedVersion: 8,
 	}); err != nil {
 		t.Fatalf("submit field record after start: %v", err)
 	}
 	if len(repository.events) != 2 || repository.events[1].Type != EventFieldRecordSubmitted {
 		t.Fatalf("record events=%+v, want %s after %s", repository.events, EventFieldRecordSubmitted, EventFieldStarted)
+	}
+}
+
+func TestFieldRecordRequiresGatewayEvidence(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-RECORD-1", ProjectID: "PJ-RECORD-1", Status: "实施中"}}
+	service := Service{Repo: repository}
+	engineer := reportCorrectionPrincipal("engineer-1", "project.field.execute")
+	err := service.SubmitFieldRecord(context.Background(), engineer, repository.item.ID, domain.FieldRecordInput{RawData: "原始数据", Environment: "现场"})
+	if !errors.Is(err, ErrValidation) || !strings.Contains(UserMessage(err), "文件网关证据") {
+		t.Fatalf("missing field evidence error = %v", err)
+	}
+}
+
+func TestOfflineFieldEvidenceCarriesReplayIdentityAndCaptureTime(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-OFFLINE-1", ProjectID: "PJ-OFFLINE-1", Status: "实施中", Version: 3}}
+	service := Service{Repo: repository}
+	engineer := reportCorrectionPrincipal("engineer-1", "project.field.execute")
+	captured := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+
+	if err := service.CheckInField(context.Background(), engineer, repository.item.ID, domain.FieldCheckInInput{
+		Latitude: 30.2741, Longitude: 120.1551, AccuracyMeters: 12.5,
+		ClientOperationID: "checkin-01M2TEST", CapturedAt: captured.Format(time.RFC3339), ExpectedVersion: 3,
+	}); err != nil {
+		t.Fatalf("check in field: %v", err)
+	}
+	if len(repository.events) != 1 || repository.events[0].Type != EventFieldCheckedIn {
+		t.Fatalf("check-in events = %+v", repository.events)
+	}
+	checkIn := repository.events[0]
+	if checkIn.ClientOperationID != "checkin-01M2TEST" || checkIn.CapturedAt == nil || !checkIn.CapturedAt.Equal(captured) {
+		t.Fatalf("offline metadata = %+v", checkIn)
+	}
+	if checkIn.Payload["latitude"] != 30.2741 || checkIn.Payload["longitude"] != 120.1551 || checkIn.Payload["accuracy_meters"] != 12.5 {
+		t.Fatalf("GPS payload = %+v", checkIn.Payload)
+	}
+
+	signature := domain.ReportArtifactInput{FileID: "FILE-SIGN-1", FileName: "signature.png", MIME: "image/png", Size: 128, SHA256: strings.Repeat("a", 64)}
+	if err := service.CaptureFieldSignature(context.Background(), engineer, repository.item.ID, domain.FieldSignatureInput{
+		SignatureFile: signature, ClientOperationID: "signature-01M2TEST", CapturedAt: captured.Format(time.RFC3339), ExpectedVersion: 3,
+	}); err != nil {
+		t.Fatalf("capture signature: %v", err)
+	}
+	if len(repository.events) != 2 || repository.events[1].Type != EventFieldSignatureCaptured {
+		t.Fatalf("signature events = %+v", repository.events)
+	}
+	if got := repository.events[1].Payload["signature_file"].(domain.ReportArtifactInput).FileID; got != signature.FileID {
+		t.Fatalf("signature file id = %q", got)
+	}
+}
+
+func TestExactOfflineReplayReturnsSuccessWithoutAutomation(t *testing.T) {
+	repository := &hookRepository{
+		applyErr: ErrAlreadyApplied,
+		rules:    []domain.Rule{{Enabled: true, Trigger: EventFieldCheckedIn, Target: "project_manager"}},
+	}
+	service := Service{Repo: repository}
+	event := deliveryEvent(reportCorrectionPrincipal("engineer-1", "project.field.execute"), "PJ-1", "SI-1", EventFieldCheckedIn, map[string]any{"latitude": 30.2741})
+	if err := service.applyEvent(context.Background(), event); err != nil {
+		t.Fatalf("exact replay must be reported as success: %v", err)
+	}
+	if len(repository.events) != 0 || len(repository.enqueued) != 0 {
+		t.Fatalf("replay produced side effects: events=%d notifications=%d", len(repository.events), len(repository.enqueued))
+	}
+}
+
+func TestOfflineFieldEvidenceRejectsInvalidMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	for _, testCase := range []struct{ name, operationID, captured string }{
+		{name: "missing operation", captured: now.Format(time.RFC3339)},
+		{name: "invalid operation characters", operationID: "bad operation", captured: now.Format(time.RFC3339)},
+		{name: "invalid capture time", operationID: "operation-123", captured: "today"},
+		{name: "future capture time", operationID: "operation-123", captured: now.Add(11 * time.Minute).Format(time.RFC3339)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, _, err := normalizeOfflineOperation(testCase.operationID, testCase.captured, true); !errors.Is(err, ErrValidation) {
+				t.Fatalf("error = %v, want validation", err)
+			}
+		})
+	}
+}
+
+func TestFieldSignatureRejectsNonPNGArtifact(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-SIGN-1", ProjectID: "PJ-SIGN-1", Status: "实施中"}}
+	service := Service{Repo: repository}
+	engineer := reportCorrectionPrincipal("engineer-1", "project.field.execute")
+	err := service.CaptureFieldSignature(context.Background(), engineer, repository.item.ID, domain.FieldSignatureInput{
+		SignatureFile:     domain.ReportArtifactInput{FileID: "FILE-1", FileName: "signature.pdf", MIME: "application/pdf", Size: 128, SHA256: strings.Repeat("a", 64)},
+		ClientOperationID: "signature-format-1", CapturedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if !errors.Is(err, ErrValidation) || !strings.Contains(UserMessage(err), "PNG") {
+		t.Fatalf("non-PNG signature error = %v", err)
+	}
+}
+
+func TestCompleteFieldCarriesEvidenceGapAcknowledgement(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-COMPLETE-1", ProjectID: "PJ-COMPLETE-1", Status: "实施中"}}
+	service := Service{Repo: repository}
+	manager := reportCorrectionPrincipal("project-manager-1", "project.field.complete")
+
+	if err := service.CompleteServiceItemField(context.Background(), manager, repository.item.ID, domain.FieldCompletionInput{IncompleteReason: " 客户禁止留存现场照片 "}); err != nil {
+		t.Fatalf("complete field: %v", err)
+	}
+	if len(repository.events) != 1 || repository.events[0].Type != EventFieldCompleted {
+		t.Fatalf("completion events = %+v", repository.events)
+	}
+	if got := repository.events[0].Payload["incomplete_reason"]; got != "客户禁止留存现场照片" {
+		t.Fatalf("incomplete reason = %#v", got)
+	}
+}
+
+func TestDeviationRetestAndTerminationRequirementsMatchPrototype(t *testing.T) {
+	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-DV-1", ProjectID: "PJ-DV-1", Status: "异常处理中"}}
+	service := Service{Repo: repository}
+	reviewer := reportCorrectionPrincipal("technical-director-1", "project.deviation.review")
+
+	if err := service.ReviewDeviation(context.Background(), reviewer, "DV-1", domain.DeviationReviewInput{Decision: "TERMINATE"}); !errors.Is(err, ErrValidation) || !strings.Contains(UserMessage(err), "终止原因") {
+		t.Fatalf("missing terminate reason error = %v", err)
+	}
+	if err := service.ReviewDeviation(context.Background(), reviewer, "DV-1", domain.DeviationReviewInput{Decision: "RETEST", Comment: "补齐原始记录后重测"}); err != nil {
+		t.Fatalf("retest review: %v", err)
+	}
+	if len(repository.events) != 1 || repository.events[0].Payload["decision"] != "RETEST" {
+		t.Fatalf("review events = %+v", repository.events)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -226,6 +227,23 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 				return mapNotFound(err)
 			}
 			event.ProjectID = item.ProjectID
+			if event.ClientOperationID != "" {
+				var existing deliveryEventRecord
+				err := tx.Where("tenant_id=? AND service_item_id=? AND actor_user_id=? AND client_operation_id=?", event.TenantID, event.ServiceItemID, event.ActorUserID, event.ClientOperationID).Take(&existing).Error
+				if err == nil {
+					payload, marshalErr := json.Marshal(event.Payload)
+					if marshalErr != nil {
+						return marshalErr
+					}
+					if existing.EventType == event.Type && jsonSemanticallyEqual(existing.Payload, payload) {
+						return application.ErrAlreadyApplied
+					}
+					return application.ErrConflict
+				}
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			}
 			if err := applyItemEvent(tx, &item, event); err != nil {
 				return err
 			}
@@ -482,6 +500,17 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if err := persistEvidenceFiles(tx, item, event, "FIELD"); err != nil {
 			return err
 		}
+	case application.EventFieldCheckedIn:
+		if item.Status != "实施中" {
+			return application.ErrValidation
+		}
+	case application.EventFieldSignatureCaptured:
+		if item.Status != "实施中" {
+			return application.ErrValidation
+		}
+		if err := persistEvidenceFiles(tx, item, event, "FIELD"); err != nil {
+			return err
+		}
 	case application.EventFieldCompleted:
 		// 按服务项确认现场完成：先做完的项不必等项目里最后一个动作"顺带"完成。
 		if item.Status != "实施中" {
@@ -489,6 +518,13 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		}
 		if err := validatePenetrationFieldCompletionGate(tx, item); err != nil {
 			return err
+		}
+		missing, err := missingFieldEvidence(tx, item.TenantID, item.ID)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 && strings.TrimSpace(stringValue(event.Payload, "incomplete_reason")) == "" {
+			return application.PreconditionError("现场证据尚不完整（缺少" + strings.Join(missing, "、") + "）；确认确实无法补齐时请填写缺项说明")
 		}
 		updates["status"] = "现场实施完成"
 		updates["report_status"] = "NONE"
@@ -507,16 +543,11 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if item.Status != "异常处理中" {
 			return application.ErrValidation
 		}
-		switch stringValue(event.Payload, "decision") {
-		case "RELEASE":
-			updates["status"] = "实施中"
-		case "RETEST":
-			updates["status"] = "待实施"
-		case "TERMINATE":
-			updates["status"] = "已终止"
-		default:
+		status, ok := deviationReviewStatus(stringValue(event.Payload, "decision"))
+		if !ok {
 			return application.ErrValidation
 		}
+		updates["status"] = status
 	default:
 		// 审计类事件只留痕、不改服务项状态。其余未知类型必须显式拒绝：
 		// 静默成功会让未接线的新事件在接口层返回成功、审计流显示「已发生」，
@@ -544,6 +575,45 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		return application.ErrConflict
 	}
 	return nil
+}
+
+func deviationReviewStatus(decision string) (string, bool) {
+	switch decision {
+	case "RELEASE", "RETEST":
+		// 原型 FR-PJ-304 明确要求重测回到实施中重新执行，而不是重新走计划/准备。
+		return "实施中", true
+	case "TERMINATE":
+		return "已终止", true
+	default:
+		return "", false
+	}
+}
+
+func jsonSemanticallyEqual(left, right []byte) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func missingFieldEvidence(tx *gorm.DB, tenantID, itemID string) ([]string, error) {
+	required := []struct{ eventType, label string }{
+		{application.EventFieldCheckedIn, "GPS 签到"},
+		{application.EventFieldRecordSubmitted, "现场记录"},
+		{application.EventFieldSignatureCaptured, "电子签名"},
+	}
+	missing := make([]string, 0, len(required))
+	for _, requirement := range required {
+		var count int64
+		if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND service_item_id=? AND event_type=?", tenantID, itemID, requirement.eventType).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			missing = append(missing, requirement.label)
+		}
+	}
+	return missing, nil
 }
 
 func canStartPreparation(status string) bool {
@@ -727,7 +797,15 @@ func (r *Repository) ListDeliveryEvents(ctx context.Context, filter platform.Sco
 	for _, v := range records {
 		payload := map[string]any{}
 		_ = json.Unmarshal(v.Payload, &payload)
-		out = append(out, domain.DeliveryEvent{ID: v.ID, ProjectID: v.ProjectID, ServiceItemID: v.ServiceItemID, Type: v.EventType, ActorUserID: v.ActorUserID, Payload: payload, CreatedAt: v.CreatedAt})
+		event := domain.DeliveryEvent{ID: v.ID, ProjectID: v.ProjectID, ServiceItemID: v.ServiceItemID, Type: v.EventType, ActorUserID: v.ActorUserID, Payload: payload, CreatedAt: v.CreatedAt}
+		if v.ClientOperationID != nil {
+			event.ClientOperationID = *v.ClientOperationID
+		}
+		if v.CapturedAt != nil {
+			value := *v.CapturedAt
+			event.CapturedAt = &value
+		}
+		out = append(out, event)
 	}
 	return out, nil
 }
@@ -832,7 +910,17 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 	if err != nil {
 		return err
 	}
-	return tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, Payload: payload, CreatedAt: event.CreatedAt}).Error
+	var operationID *string
+	var capturedAt *time.Time
+	if event.ClientOperationID != "" {
+		value := event.ClientOperationID
+		operationID = &value
+	}
+	if event.CapturedAt != nil {
+		value := *event.CapturedAt
+		capturedAt = &value
+	}
+	return tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, ClientOperationID: operationID, CapturedAt: capturedAt, Payload: payload, CreatedAt: event.CreatedAt}).Error
 }
 
 // upsertImplPlan 把实施计划（含渗透测试专项合规要素）落到 pm_impl_plan，与服务项 1:1。
