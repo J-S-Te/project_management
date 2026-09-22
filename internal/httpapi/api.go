@@ -149,6 +149,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
 	api.POST("/service-items/:id/preparation/revoke", require("project.implementation.revoke"), h.revokePreparation)
 	api.POST("/service-items/:id/field-start", require("project.field.execute"), h.startFieldExecution)
+	api.POST("/service-items/:id/field-check-ins", require("project.field.execute"), h.checkInField)
+	api.POST("/service-items/:id/field-signatures", require("project.field.execute"), h.captureFieldSignature)
 	api.POST("/service-items/:id/rollback-requests", require("project.rollback.request"), h.requestRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/withdraw", require("project.rollback.request"), h.withdrawRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/decision", require("project.rollback.approve"), h.decideRollback)
@@ -676,7 +678,14 @@ func (h *Handler) listSlaOverdue(c *gin.Context) {
 	writeData(c, http.StatusOK, items)
 }
 func (h *Handler) completeServiceItemField(c *gin.Context) {
-	if err := h.service.CompleteServiceItemField(c.Request.Context(), principal(c), c.Param("id")); err != nil {
+	var input domain.FieldCompletionInput
+	// Older clients sent an empty POST body. Keep that wire shape valid while
+	// accepting the new acknowledgement payload when evidence is incomplete.
+	if err := c.ShouldBindJSON(&input); err != nil && !errors.Is(err, io.EOF) {
+		writeError(c, http.StatusBadRequest, "PM_INVALID_JSON", "请求内容不合法")
+		return
+	}
+	if err := h.service.CompleteServiceItemField(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
 		writeServiceError(c, err)
 		return
 	}
@@ -1167,6 +1176,30 @@ func (h *Handler) submitFieldRecord(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusCreated, map[string]string{"status": "RECORDED"})
+}
+
+func (h *Handler) checkInField(c *gin.Context) {
+	var input domain.FieldCheckInInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.CheckInField(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"status": "CHECKED_IN"})
+}
+
+func (h *Handler) captureFieldSignature(c *gin.Context) {
+	var input domain.FieldSignatureInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.CaptureFieldSignature(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, map[string]string{"status": "SIGNED"})
 }
 
 func (h *Handler) startFieldExecution(c *gin.Context) {

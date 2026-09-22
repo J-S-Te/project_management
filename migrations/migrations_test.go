@@ -263,3 +263,21 @@ func TestEmbeddedPenetrationWorkPackageMigrationSeparatesSubjectAndIdempotency(t
 		t.Fatal("embedded penetration must not be represented by expanding the service-item count")
 	}
 }
+
+func TestOfflineFieldEvidenceMigrationAddsReplayAndCaptureBoundaries(t *testing.T) {
+	body, err := Files.ReadFile("000026_offline_field_evidence.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"client_operation_id VARCHAR(128) NULL",
+		"captured_at DATETIME(3) NULL",
+		"UNIQUE KEY uq_pm_event_offline_operation",
+		"(tenant_id, service_item_id, actor_user_id, client_operation_id)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("offline field migration missing %q", required)
+		}
+	}
+}

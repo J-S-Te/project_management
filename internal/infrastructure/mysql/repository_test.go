@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,26 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+func TestJSONSemanticallyEqualIgnoresObjectKeyOrder(t *testing.T) {
+	left := json.RawMessage(`{"captured_at":"2026-09-21T10:00:00Z","latitude":30.2}`)
+	right := json.RawMessage(`{"latitude":30.2,"captured_at":"2026-09-21T10:00:00Z"}`)
+	if !jsonSemanticallyEqual(left, right) {
+		t.Fatal("equivalent replay payloads must compare equal after MySQL JSON normalization")
+	}
+	if jsonSemanticallyEqual(left, json.RawMessage(`{"latitude":30.3}`)) {
+		t.Fatal("changed replay payload must not compare equal")
+	}
+}
+
+func TestDeviationRetestReturnsToFieldExecution(t *testing.T) {
+	if status, ok := deviationReviewStatus("RETEST"); !ok || status != "实施中" {
+		t.Fatalf("RETEST status = %q, ok=%v; want 实施中", status, ok)
+	}
+	if status, ok := deviationReviewStatus("TERMINATE"); !ok || status != "已终止" {
+		t.Fatalf("TERMINATE status = %q, ok=%v; want 已终止", status, ok)
+	}
+}
 
 func TestTranslateRuleWriteErrorMapsConcurrentDuplicateRules(t *testing.T) {
 	duplicate := &drivermysql.MySQLError{Number: 1062, Message: "duplicate entry"}

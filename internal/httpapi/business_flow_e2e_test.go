@@ -194,11 +194,15 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 		`{"travel_request_id":"TR-E2E-001","notes":"走查",
 		  "equipment":[{"resource_type":"EQUIPMENT","resource_id":"EQ-E2E-001","window_start":"2026-09-20","window_end":"2026-09-25","note":"走查"}]}`)
 
-	// ---- 步骤 6：项目经理明确进入实施中并提交现场记录 ----
-	t.Log("步骤 6：项目经理进入实施中并提交现场记录")
+	// ---- 步骤 6：项目经理明确进入实施中，依次完成签到、记录和签名 ----
+	t.Log("步骤 6：项目经理进入实施中并完成现场证据链")
 	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/field-start", `{}`)
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/field-check-ins",
+		`{"latitude":30.2741,"longitude":120.1551,"accuracy_meters":12.5,"client_operation_id":"e2e-checkin-001","captured_at":"2026-09-20T08:00:00Z"}`)
 	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/field-records",
-		`{"raw_data":"{\"result\":\"pass\"}","environment":"现场","evidence_urls":[]}`)
+		`{"raw_data":"{\"result\":\"pass\"}","environment":"现场","client_operation_id":"e2e-record-001","captured_at":"2026-09-20T08:05:00Z","evidence_files":[{"file_id":"FILE-E2E-FIELD","file_name":"field.jpg","mime":"image/jpeg","size":128,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}`)
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/field-signatures",
+		`{"client_operation_id":"e2e-signature-001","captured_at":"2026-09-20T08:10:00Z","signature_file":{"file_id":"FILE-E2E-SIGN","file_name":"signature.png","mime":"image/png","size":128,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
 
 	// ---- 步骤 7：项目经理点击现场测评结束 ----
 	t.Log("步骤 7：项目经理点击现场测评结束")
