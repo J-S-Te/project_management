@@ -101,7 +101,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		router.GET("/logged-out", loggedOut)
 	}
 	api := router.Group("/api/v1")
-	api.Use(h.authenticate(), h.auditWrites())
+	// SEC-D11：cookie 会话写请求必须通过同源 Origin 校验（失败关闭）；
+	// 放在 auditWrites 之后，使跨站拒绝尝试同样进入审计。
+	api.Use(h.authenticate(), h.auditWrites(), h.requireSameOriginWrite())
 	api.GET("/auth/me", h.me)
 	api.GET("/navigation", require("project.read"), h.navigation)
 	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
@@ -301,18 +303,90 @@ func principal(c *gin.Context) platform.Principal {
 	return p
 }
 
+// auditWrites 在业务 handler 完成后把写请求结果上报平台审计。
+//
+// 安全理由（SEC-D4b）：原实现对审计管道 fail-open —— reporter 为 nil 时直接放行，
+// Report 失败只记一行 error（缺路由与请求 id），且从不拒绝请求；凭据失效或 ingest
+// 故障时项目审批/回滚/报告推进等所有写入都没有审计且不可见。现在：
+//  1. 上报失败一律 error 日志（含路由与请求 id）；
+//  2. 强制审计模式（PLATFORM_AUDIT_REQUIRED 或 PLATFORM_ENVIRONMENT_CODE=prod）下：
+//     - reporter 缺失 => 在执行业务 handler 之前就拒绝请求（503），不产生无审计的写；
+//     - 写请求先缓冲响应，Report 成功才提交给客户端；失败则丢弃业务响应并返回
+//     503，保证“审计写不进去 ⇒ 客户端拿不到成功”。
+//
+// 非强制模式保持原有放行语义，仅补上可告警的错误日志。
 func (h *Handler) auditWrites() gin.HandlerFunc {
+	logger := h.logger
+	if logger == nil {
+		// 审计失败必须留下可检索的日志；logger 缺失时退回默认 logger，绝不静默。
+		logger = slog.Default()
+	}
 	return func(c *gin.Context) {
-		c.Next()
-		if h.audit == nil || skipAudit(c.Request.Method, c.Request.URL.Path) {
+		if skipAudit(c.Request.Method, c.Request.URL.Path) {
+			c.Next()
 			return
 		}
-		p := principal(c)
-		status := c.Writer.Status()
-		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: c.GetHeader("X-Request-ID"), Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), UserLoginIP: requestClientIP(c.Request)}
-		if err := h.audit.Report(c.Request.Context(), event); err != nil {
-			h.logger.Error("report platform audit", "error", err)
+		route := c.Request.Method + " " + c.Request.URL.Path
+		requestID := c.GetHeader("X-Request-ID")
+		if h.audit == nil {
+			if !auditRequired() {
+				// 非强制模式：审计按配置关闭，/healthz 与 /readyz 已暴露 disabled 状态。
+				c.Next()
+				return
+			}
+			logger.ErrorContext(c.Request.Context(), "audit reporter unavailable, rejecting request",
+				"route", route,
+				"request_id", requestID,
+			)
+			c.Abort()
+			writeError(c, http.StatusServiceUnavailable, "PM_AUDIT_UNAVAILABLE", "审计服务不可用，操作已被拒绝")
+			return
 		}
+		required := auditRequired()
+		origWriter := c.Writer
+		var buffered *auditBuffer
+		if required && isUnsafeMethod(c.Request.Method) {
+			buffered = newAuditBuffer(origWriter)
+			c.Writer = buffered
+		}
+		// handler panic 展平时先恢复真实 writer，外层 gin.Recovery 才能把 500 写出去；
+		// 缓冲中的半成品响应被直接丢弃，不会被当成成功提交。
+		defer func() { c.Writer = origWriter }()
+		c.Next()
+		status := c.Writer.Status()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		p := principal(c)
+		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: requestID, Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), UserLoginIP: requestClientIP(c.Request)}
+		if err := h.audit.Report(c.Request.Context(), event); err != nil {
+			logger.ErrorContext(c.Request.Context(), "report platform audit failed",
+				"route", route,
+				"request_id", requestID,
+				"status", status,
+				"error", err,
+			)
+			if required {
+				// 强制审计模式：审计事件写入失败必须拒绝该请求，不能静默成功。
+				c.Writer = origWriter
+				writeError(c, http.StatusServiceUnavailable, "PM_AUDIT_WRITE_REJECTED", "审计记录写入失败，操作未被确认")
+			}
+			return
+		}
+		if buffered != nil {
+			buffered.flushTo(origWriter)
+		}
+	}
+}
+
+// isUnsafeMethod 判定需要缓冲响应的不安全方法（写请求）；读请求不缓冲，
+// 避免把导出下载整包压进内存。
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
 	}
 }
 

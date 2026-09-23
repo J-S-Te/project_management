@@ -360,6 +360,10 @@ func TestReportCorrectionAPIEnforcesPermissionsValidationAndSeparateApprover(t *
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+	// SEC-D11: same-origin middleware requires the configured Origin on writes.
+	request.Header.Set("Origin", "http://example.com")
+	// 同源校验（SEC-D11）要求写请求携带与 OIDC_REDIRECT_URI 一致的 Origin。
+	request.Header.Set("Origin", "http://example.com")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
