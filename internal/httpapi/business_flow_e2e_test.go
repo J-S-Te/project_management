@@ -90,6 +90,8 @@ func e2eCall(handler http.Handler, role, method, path, body string) (int, string
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-E2E-Role", role)
+	// 同源校验（SEC-D11）要求写请求携带与 OIDC_REDIRECT_URI 一致的 Origin。
+	request.Header.Set("Origin", "http://example.com")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder.Code, recorder.Body.String()
