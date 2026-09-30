@@ -46,9 +46,10 @@ func main() {
 	}
 	w := worker.New(temporalClient, cfg.TemporalTaskQueue, workerOptions)
 	logger.Info("project workflow worker started", "task_queue", cfg.TemporalTaskQueue, "deployment", cfg.TemporalWorkerDeploymentName, "build_id", cfg.TemporalWorkerBuildID, "versioning", cfg.TemporalWorkerVersioning)
-	// 版本路由开启时 Worker 只消费自身版本队列；Deployment 的 Current 版本为空会让新工作流
-	// 以 UNVERSIONED 入队且无人领取，因此启动时主动收敛，不再依赖人工 PROMOTE。
-	temporalworker.EnsureCurrentVersionOnStartup(ctx, temporalClient, logger, versioning)
+	// AUD-2026-027：本 worker 当前没有注册任何 workflow/activity（空跑 poller，属无害待机），
+	// 因此不再启动即抢占 Deployment 的 Current 版本——空的 Current 版本会让未来/外部工作流
+	// 入队后无人领取。恢复使用前必须先补齐工作流注册，版本收敛（promote/ramp）一律通过
+	// 显式运维工具 project-worker-rollout 执行，见 internal/temporalworker/rollout.go。
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		logger.Error("worker failed", "error", err)
 		os.Exit(1)

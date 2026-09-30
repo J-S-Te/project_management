@@ -39,7 +39,8 @@ services:
       default:
         aliases: [pm-mysql]
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uproject -p\"$${MYSQL_PASSWORD}\" --silent"]
+      # 安全（AUD-2026-035，对齐 SEC-F5b 规约）：口令经容器内 MYSQL_PWD 环境变量传递，禁止以 -p 出现在 argv（每 5 秒被 ps 读取）。
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30

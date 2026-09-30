@@ -1,14 +1,17 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.4-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
-ENV GOPROXY=https://proxy.golang.org,direct
+ARG GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct
+ARG GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
 # Dependency downloads occasionally fail with a transient EOF. Keep this in a
 # separate cached layer and retry so a flaky module-proxy connection does not
 # discard the whole compile step.
 RUN downloaded=0; \
     for attempt in 1 2 3 4 5; do \
-      if go mod download; then downloaded=1; break; fi; \
-      echo "go module download failed (attempt ${attempt}/5), retrying" >&2; \
+      if go mod download && go mod verify; then downloaded=1; break; fi; \
+      echo "go module download failed (attempt ${attempt}/5)" >&2; \
       sleep $((attempt * 2)); \
     done; \
     test "${downloaded}" = 1

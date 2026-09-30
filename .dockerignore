@@ -1,0 +1,25 @@
+# Dockerfile uses explicit COPY sources. Keep the context allowlisted as a
+# second boundary against credentials, dumps and future generated files.
+**
+!Dockerfile
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!authz/
+!authz/**
+!migrations/
+!migrations/**
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.jks
+**/*.bak
+**/*.backup
+**/*.dump
+**/dump*.sql
+**/.DS_Store

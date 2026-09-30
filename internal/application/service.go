@@ -81,10 +81,12 @@ func UserMessage(err error) string {
 }
 
 type Repository interface {
-	ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error)
+	// ListProjects / ListServiceItems 把过滤、排序、计数与分页下推到 SQL：
+	// page/pageSize<=0 表示不分页返回全量；返回值是（本页行, 过滤后总数）。
+	ListProjects(context.Context, platform.ScopeFilter, string, string, int, int) ([]domain.Project, int, error)
 	GetProject(context.Context, platform.ScopeFilter, string) (domain.Project, error)
 	CreateProject(context.Context, domain.Project) error
-	ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error)
+	ListServiceItems(context.Context, platform.ScopeFilter, string, int, int) ([]domain.ServiceItem, int, error)
 	GetServiceItem(context.Context, platform.ScopeFilter, string) (domain.ServiceItem, error)
 	ConfirmServiceItems(context.Context, platform.ScopeFilter, []string, string) ([]domain.ServiceItem, error)
 	ListRules(context.Context, string, string) ([]domain.Rule, error)
@@ -129,20 +131,29 @@ type Service struct {
 	Logger *slog.Logger
 }
 
+// ListProjects 返回全量（不分页）项目列表，供监控聚合等内部调用复用。
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {
+	projects, _, err := s.ListProjectsPage(ctx, p, q, status, 0, 0)
+	return projects, err
+}
+
+// ListProjectsPage 把过滤、计数与分页下推到仓储层（SQL COUNT + LIMIT/OFFSET，
+// AUD-2026-028）：只有本页记录会执行字段脱敏。字段脱敏逐行生效，不依赖全量集合，
+// 仅对本页脱敏与“全量脱敏后切片”的输出逐字段一致。
+func (s *Service) ListProjectsPage(ctx context.Context, p platform.Principal, q, status string, page, pageSize int) ([]domain.Project, int, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	projects, err := s.Repo.ListProjects(ctx, filter, q, status)
+	projects, total, err := s.Repo.ListProjects(ctx, filter, q, status, page, pageSize)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	masked, _, err := s.applyFieldPermissions(ctx, p, projects, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return masked, nil
+	return masked, total, nil
 }
 func (s *Service) GetProject(ctx context.Context, p platform.Principal, id string) (domain.Project, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
@@ -284,20 +295,29 @@ func (s *Service) logPendingProjectCountError(tenantID string, err error) {
 		s.Logger.Warn("pending project contract count unavailable", "tenant_id", tenantID, "error", err)
 	}
 }
+
+// ListServiceItems 返回全量（不分页）服务项列表，供交付/拆分配置/监控聚合等内部调用复用。
 func (s *Service) ListServiceItems(ctx context.Context, p platform.Principal, projectID string) ([]domain.ServiceItem, error) {
+	items, _, err := s.ListServiceItemsPage(ctx, p, projectID, 0, 0)
+	return items, err
+}
+
+// ListServiceItemsPage 把过滤、计数与分页下推到仓储层（AUD-2026-028），
+// 只有本页记录会执行字段脱敏与计划/工作包补查。
+func (s *Service) ListServiceItemsPage(ctx context.Context, p platform.Principal, projectID string, page, pageSize int) ([]domain.ServiceItem, int, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	items, err := s.Repo.ListServiceItems(ctx, filter, projectID)
+	items, total, err := s.Repo.ListServiceItems(ctx, filter, projectID, page, pageSize)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	_, masked, err := s.applyFieldPermissions(ctx, p, nil, items)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return masked, nil
+	return masked, total, nil
 }
 
 // ListPersonnel 从基础平台负责人目录读取可选人员，供服务项操作台选择团队负责人、

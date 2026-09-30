@@ -68,7 +68,7 @@ func TestDerivedProjectStatusAgainstRealDatabase(t *testing.T) {
 	repo := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: integrationTenant, AllowAll: true}
 
-	projects, err := repo.ListProjects(ctx, filter, "", "")
+	projects, _, err := repo.ListProjects(ctx, filter, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestDerivedProjectStatusAgainstRealDatabase(t *testing.T) {
 	}
 
 	// 状态筛选必须作用于派生值：这些行的存储列都是 待分配，按 已完成 过滤应只命中归档项目。
-	completed, err := repo.ListProjects(ctx, filter, "", "已完成")
+	completed, _, err := repo.ListProjects(ctx, filter, "", "已完成", 0, 0)
 	if err != nil {
 		t.Fatalf("list by derived status: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestDecompositionAdjustmentAndSupplementResetAgainstRealDatabase(t *testing
 	}
 
 	// P0-1：主键必须补齐且互不重复，否则两行冲突整单回滚、单行落成 id='' 的孤儿行。
-	items, err := repo.ListServiceItems(ctx, filter, "PJ-TEST-ADJUST")
+	items, _, err := repo.ListServiceItems(ctx, filter, "PJ-TEST-ADJUST", 0, 0)
 	if err != nil {
 		t.Fatalf("list items: %v", err)
 	}
