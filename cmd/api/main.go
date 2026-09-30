@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/j-s-te/project-management/internal/application"
@@ -140,8 +143,33 @@ func main() {
 	})
 	server := &http.Server{Addr: cfg.HTTPAddress, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second}
 	logger.Info("project management API started", "address", cfg.HTTPAddress, "task_queue", cfg.TemporalTaskQueue, "embedded_worker", cfg.RunWorkerWithAPI, "worker_deployment", cfg.TemporalWorkerDeploymentName, "worker_build_id", cfg.TemporalWorkerBuildID, "worker_versioning", cfg.TemporalWorkerVersioning)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// AUD-2026-029：监听 SIGTERM/SIGINT 后先排空在途请求再退出（对齐 worker 的
+	// InterruptCh 风格）。强制审计模式下写请求的响应先缓冲、Report 成功才提交，
+	// 若 SIGTERM 直接断连，缓冲中的响应与在途审计上报都会丢失。
+	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stopSignals()
+	if err := serveWithGracefulShutdown(server, shutdownCtx.Done(), logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
+	}
+}
+
+// serverShutdownTimeout 是收到信号后排空在途请求的上限：超过即强制退出，
+// 避免卡死的下游连接把进程挂住（容器运行时最终会升级为 SIGKILL）。
+const serverShutdownTimeout = 15 * time.Second
+
+// serveWithGracefulShutdown 运行 HTTP 服务直到监听退出或收到停机信号；
+// 信号到达后调用 server.Shutdown 排空在途请求，返回 Shutdown 或监听的错误。
+func serveWithGracefulShutdown(server *http.Server, shutdown <-chan struct{}, logger *slog.Logger) error {
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		return err
+	case <-shutdown:
+		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+		logger.Info("shutdown signal received, draining in-flight requests", "timeout", serverShutdownTimeout.String())
+		return server.Shutdown(ctx)
 	}
 }

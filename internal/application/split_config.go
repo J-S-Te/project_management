@@ -435,7 +435,7 @@ func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, fi
 	if !ok {
 		return nil
 	}
-	items, err := s.Repo.ListServiceItems(ctx, filter, "")
+	items, _, err := s.Repo.ListServiceItems(ctx, filter, "", 0, 0)
 	if err != nil {
 		return err
 	}

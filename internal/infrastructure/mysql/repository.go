@@ -20,32 +20,124 @@ type Repository struct{ db *gorm.DB }
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
-func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, q, status string) ([]domain.Project, error) {
-	query := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project")
+// derivedProjectStatusJoin 是按项目聚合服务项推进等级的 LEFT JOIN 子查询：
+// total_items 为服务项总数，terminated_items 为其中已终止的数量，
+// lowest_rank 取非终止服务项的最滞后推进等级（已终止计为哨兵值 9，
+// 只有「全部终止」时才会胜出，而该情形由外层 CASE 的终止分支先行接住）。
+// 等级分支由 domain.ServiceItemStatusStages / ServiceItemReportStages 生成，
+// 与 domain.DeriveProjectStatus 共用同一套状态表，避免两处实现漂移。
+// 注意：SQL 的 TRIM 只去除空格，与 Go strings.TrimSpace 在制表符/换行等
+// 极端输入上存在理论差异；状态词汇表由本系统写入、不含此类字符。
+func derivedProjectStatusJoin() string {
+	var rankCases strings.Builder
+	for _, stage := range domain.ServiceItemStatusStages() {
+		rankCases.WriteString("WHEN TRIM(aggregated.status) IN (")
+		rankCases.WriteString(quotedSQLList(stage.Statuses))
+		rankCases.WriteString(") THEN ")
+		rankCases.WriteString(strconv.Itoa(stage.Rank))
+		rankCases.WriteString(" ")
+	}
+	var reportCases strings.Builder
+	for _, stage := range domain.ServiceItemReportStages() {
+		reportCases.WriteString("WHEN UPPER(TRIM(COALESCE(aggregated.report_status, ''))) IN (")
+		reportCases.WriteString(quotedSQLList(stage.Statuses))
+		reportCases.WriteString(") THEN ")
+		reportCases.WriteString(strconv.Itoa(stage.Rank))
+		reportCases.WriteString(" ")
+	}
+	join := `LEFT JOIN (
+		SELECT aggregated.project_id AS project_id,
+		       COUNT(*) AS total_items,
+		       SUM(CASE WHEN TRIM(aggregated.status) = '` + domain.ProjectStatusTerminated + `' THEN 1 ELSE 0 END) AS terminated_items,
+		       MIN(CASE
+		           WHEN TRIM(aggregated.status) = '` + domain.ProjectStatusTerminated + `' THEN 9
+		           WHEN TRIM(aggregated.status) = '` + domain.ProjectStatusFieldCompleted + `' THEN CASE
+		               ` + reportCases.String() + `
+		               ELSE 6
+		           END
+		           ` + rankCases.String() + `
+		           ELSE 0
+		       END) AS lowest_rank
+		FROM pm_service_item AS aggregated
+		WHERE aggregated.tenant_id = ?
+		GROUP BY aggregated.project_id
+	) AS derived_status ON derived_status.project_id = pm_project.id`
+	return join
+}
+
+// derivedProjectStatusPredicate 按派生状态还原表达式过滤项目，短路顺序与
+// domain.DeriveProjectStatus 完全一致：补充协议 → 无服务项回退存储状态 →
+// 全部终止 → 最滞后推进等级对应的线性节点。该条件只用于 COUNT 与 LIMIT/OFFSET
+// 的分页下推（AUD-2026-028）；返回行的派生状态仍由 Go 侧 applyDerivedProjectMetrics 计算。
+func derivedProjectStatusPredicate(wanted string) string {
+	nodes := domain.ProjectStatusNodes()
+	nodeList := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		nodeList = append(nodeList, "'"+strings.ReplaceAll(node, "'", "''")+"'")
+	}
+	return `CASE
+		WHEN UPPER(TRIM(COALESCE(pm_project.supplement_status, ''))) = 'REQUIRED' THEN '` + domain.ProjectStatusSupplementRequired + `'
+		WHEN COALESCE(derived_status.total_items, 0) = 0 THEN CASE
+			WHEN TRIM(COALESCE(pm_project.status, '')) <> '' THEN TRIM(pm_project.status)
+			ELSE '` + domain.ProjectStatusPendingDecomposition + `'
+		END
+		WHEN derived_status.terminated_items = derived_status.total_items THEN '` + domain.ProjectStatusTerminated + `'
+		ELSE ELT(COALESCE(derived_status.lowest_rank, 0) + 1, ` + strings.Join(nodeList, ", ") + `)
+	END = ?`
+}
+
+// quotedSQLList 把字符串列表渲染为转义后的 SQL 字面量清单（仅用于编译期常量，
+// 用户输入一律走参数占位符）。
+func quotedSQLList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+strings.ReplaceAll(value, "'", "''")+"'")
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// ListProjects 把租户/范围/关键字/派生状态过滤与分页全部下推到 SQL：
+// 主查询 COUNT 取 total，LIMIT/OFFSET 只取本页记录；服务项聚合补查仅覆盖本页 ID。
+// 排序保持 id DESC 与全量口径一致；派生状态（status/progress/risk）仍只在
+// Go 侧对本页记录计算，输出结构与历史全量口径完全一致（AUD-2026-028）。
+func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, q, status string, page, pageSize int) ([]domain.Project, int, error) {
+	base := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project")
 	if q = strings.TrimSpace(q); q != "" {
 		like := "%" + q + "%"
-		query = query.Where("id LIKE ? OR name LIKE ? OR customer LIKE ? OR contract LIKE ? OR category LIKE ? OR manager LIKE ?", like, like, like, like, like, like)
+		base = base.Where("id LIKE ? OR name LIKE ? OR customer LIKE ? OR contract LIKE ? OR category LIKE ? OR manager LIKE ?", like, like, like, like, like, like)
+	}
+	wanted := strings.TrimSpace(status)
+	if wanted != "" {
+		base = base.Joins(derivedProjectStatusJoin(), filter.TenantID).Where(derivedProjectStatusPredicate(wanted), wanted)
+	}
+	var total int64
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	list := base.Session(&gorm.Session{}).Order("id DESC")
+	if pageSize > 0 {
+		list = list.Offset(max(0, (page-1)*pageSize)).Limit(pageSize)
 	}
 	var records []projectRecord
-	if err := query.Order("id DESC").Find(&records).Error; err != nil {
-		return nil, err
+	if err := list.Find(&records).Error; err != nil {
+		return nil, 0, err
 	}
 	inputs, err := r.projectStatusInputs(ctx, filter.TenantID, projectIDsOf(records))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	wanted := strings.TrimSpace(status)
 	items := make([]domain.Project, 0, len(records))
 	for _, record := range records {
 		project := projectFromRecord(record)
 		applyDerivedProjectMetrics(&project, inputs[record.ID])
-		// 状态过滤必须作用于唯一的派生状态，而不是可能滞后的存储列。
+		// SQL 分页已按派生状态筛选；这里用 Go 侧派生函数保留同一过滤作为最终口径：
+		// 若两套实现漂移，宁可少返回行（等价性集成测试可发现），也不返回状态不符的行。
 		if wanted != "" && project.Status != wanted {
 			continue
 		}
 		items = append(items, project)
 	}
-	return items, nil
+	return items, int(total), nil
 }
 func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter, id string) (domain.Project, error) {
 	var record projectRecord
@@ -122,14 +214,27 @@ func (r *Repository) CreateProject(ctx context.Context, item domain.Project) err
 	}
 	return err
 }
-func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string) ([]domain.ServiceItem, error) {
-	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
+
+// ListServiceItems 把租户/范围/项目过滤与分页下推到 SQL：COUNT 取 total、
+// LIMIT/OFFSET 只取本页记录（AUD-2026-028）。实施计划与渗透工作包两次 IN 补查
+// 原先是两次全表拉取，现只查本页 ID 集合；计划/包与状态派生都是服务项内部属性，
+// 仅按本页 ID 补齐与全量口径逐行一致。排序保持 id 升序不变。
+func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string, page, pageSize int) ([]domain.ServiceItem, int, error) {
+	base := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
 	if projectID != "" {
-		query = query.Where("project_id = ?", projectID)
+		base = base.Where("project_id = ?", projectID)
+	}
+	var total int64
+	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	list := base.Session(&gorm.Session{}).Order("id")
+	if pageSize > 0 {
+		list = list.Offset(max(0, (page-1)*pageSize)).Limit(pageSize)
 	}
 	var records []serviceItemRecord
-	if err := query.Order("id").Find(&records).Error; err != nil {
-		return nil, err
+	if err := list.Find(&records).Error; err != nil {
+		return nil, 0, err
 	}
 	plans := map[string]domain.ImplementationPlan{}
 	penetrationPackages := map[string]domain.PenetrationWorkPackage{}
@@ -140,7 +245,7 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 		}
 		var rows []implPlanRecord
 		if err := r.db.WithContext(ctx).Where("tenant_id=? AND service_item_id IN ?", filter.TenantID, ids).Find(&rows).Error; err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, row := range rows {
 			plan := implPlanFromRecord(row)
@@ -148,7 +253,7 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 		}
 		var packageRows []penetrationWorkPackageRecord
 		if err := r.db.WithContext(ctx).Where("tenant_id=? AND parent_service_item_id IN ?", filter.TenantID, ids).Find(&packageRows).Error; err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, row := range packageRows {
 			penetrationPackages[row.ParentServiceItemID] = penetrationWorkPackageFromRecord(row)
@@ -165,7 +270,7 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 		}
 		items = append(items, item)
 	}
-	return items, nil
+	return items, int(total), nil
 }
 func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
 	var record serviceItemRecord

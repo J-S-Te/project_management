@@ -311,8 +311,11 @@ func principal(c *gin.Context) platform.Principal {
 //  1. 上报失败一律 error 日志（含路由与请求 id）；
 //  2. 强制审计模式（PLATFORM_AUDIT_REQUIRED 或 PLATFORM_ENVIRONMENT_CODE=prod）下：
 //     - reporter 缺失 => 在执行业务 handler 之前就拒绝请求（503），不产生无审计的写；
-//     - 写请求先缓冲响应，Report 成功才提交给客户端；失败则丢弃业务响应并返回
-//     503，保证“审计写不进去 ⇒ 客户端拿不到成功”。
+//     - 写请求与敏感读（导出/下载/令牌签发，见 sensitiveRead）先缓冲响应，Report 成功
+//     才提交给客户端；失败则丢弃业务响应并返回 503，保证“审计写不进去 ⇒ 客户端拿
+//     不到成功”（AUD-2026-006：敏感读此前不缓冲，503 追加在已发出的数据之后，形同虚设）；
+//     - 响应体超过 maxAuditBufferBytes 时降级为 write-through 并记 Warn：数据照常
+//     返回，审计失守只能靠日志追溯——避免把大体积导出整包压进内存。
 //
 // 非强制模式保持原有放行语义，仅补上可告警的错误日志。
 func (h *Handler) auditWrites() gin.HandlerFunc {
@@ -345,7 +348,11 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 		required := auditRequired()
 		origWriter := c.Writer
 		var buffered *auditBuffer
-		if required && isUnsafeMethod(c.Request.Method) {
+		// AUD-2026-006：强制审计模式下，除不安全方法外，敏感读（导出/下载/令牌签发）
+		// 同样必须先缓冲后提交。此前敏感读的响应边生成边发往客户端，Report 失败时
+		// 503 追加在已提交的响应之后，客户端早已拿到数据，“审计写不进 ⇒ 拿不到结果”
+		// 对敏感读不成立。
+		if required && (isUnsafeMethod(c.Request.Method) || sensitiveRead(c.Request.URL.Path)) {
 			buffered = newAuditBuffer(origWriter)
 			c.Writer = buffered
 		}
@@ -357,6 +364,17 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		if buffered != nil && buffered.Degraded() {
+			// 响应超过缓冲上限已降级为 write-through：数据已在发送途中，审计失守时
+			// 无法用 503 撤回，只能记 Warn 留下可追溯痕迹（内存安全优先于事后拒绝，
+			// 否则大体积导出会把整包响应压进内存）。审计失败本身仍走下方 error 日志。
+			logger.WarnContext(c.Request.Context(), "audit buffered response exceeded limit, flushed without audit gating",
+				"route", route,
+				"request_id", requestID,
+				"limit_bytes", maxAuditBufferBytes,
+				"response_bytes", buffered.Size(),
+			)
+		}
 		p := principal(c)
 		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: requestID, Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), UserLoginIP: requestClientIP(c.Request)}
 		if err := h.audit.Report(c.Request.Context(), event); err != nil {
@@ -367,6 +385,11 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 				"error", err,
 			)
 			if required {
+				if buffered != nil && buffered.Degraded() {
+					// 超限降级后业务数据已经发给客户端，追加 503 既无法撤回数据，
+					// 也会破坏已提交的响应语义；取舍是保内存上限 + 告警日志。
+					return
+				}
 				// 强制审计模式：审计事件写入失败必须拒绝该请求，不能静默成功。
 				c.Writer = origWriter
 				writeError(c, http.StatusServiceUnavailable, "PM_AUDIT_WRITE_REJECTED", "审计记录写入失败，操作未被确认")
@@ -625,12 +648,12 @@ func (h *Handler) listProjects(c *gin.Context) {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
 	}
-	items, err := h.service.ListProjects(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"))
+	items, total, err := h.service.ListProjectsPage(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"), page, pageSize)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writePage(c, items, page, pageSize)
+	writePage(c, items, total, page, pageSize)
 }
 func (h *Handler) monitorProjects(c *gin.Context) {
 	page, pageSize, err := pageParams(c)
@@ -781,12 +804,12 @@ func (h *Handler) listServiceItems(c *gin.Context) {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
 	}
-	items, err := h.service.ListServiceItems(c.Request.Context(), principal(c), c.Query("project_id"))
+	items, total, err := h.service.ListServiceItemsPage(c.Request.Context(), principal(c), c.Query("project_id"), page, pageSize)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writePage(c, items, page, pageSize)
+	writePage(c, items, total, page, pageSize)
 }
 
 func (h *Handler) listReportRevisions(c *gin.Context) {
@@ -1036,13 +1059,28 @@ func pageParams(c *gin.Context) (int, int, error) {
 	return page, pageSize, nil
 }
 
-// writePage 输出统一分页响应。项目列表的状态过滤发生在服务端的派生态上，
-// 因此这里对已经过筛选与派生的结果切片，保证分页结果与"唯一的派生状态"口径一致。
-func writePage[T any](c *gin.Context, items []T, page, pageSize int) {
+// writePage 输出统一分页响应。项目与服务项列表的分页与计数已下推仓储层
+// （SQL COUNT + LIMIT/OFFSET，AUD-2026-028），items 即本页数据、total 为过滤后的
+// 总数；派生状态筛选由 SQL 与 Go 侧同一口径完成，这里不再二次切片。
+// 未分页（page_size<=0）时返回全部行，与"下拉数据源需要完整集合"的既有语义一致。
+func writePage[T any](c *gin.Context, items []T, total, page, pageSize int) {
+	if pageSize <= 0 {
+		// 不分页时返回的就是全部行，总数以实际切片长度为准。
+		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: len(items), Page: 1, PageSize: len(items)})
+		return
+	}
+	if page <= 0 {
+		page = 1
+	}
+	writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
+// pageSlice 在内存中对全量切片分页（仅限尚未下推分页的列表，如设备台账），
+// 语义与历史 writePage 切片完全一致：page 归位到 1，越界页返回空切片。
+func pageSlice[T any](items []T, page, pageSize int) ([]T, int) {
 	total := len(items)
 	if pageSize <= 0 {
-		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: total, Page: 1, PageSize: total})
-		return
+		return items, total
 	}
 	if page <= 0 {
 		page = 1
@@ -1055,7 +1093,7 @@ func writePage[T any](c *gin.Context, items []T, page, pageSize int) {
 	if end > total {
 		end = total
 	}
-	writeData(c, http.StatusOK, PageEnvelope{Items: items[start:end], Total: total, Page: page, PageSize: pageSize})
+	return items[start:end], total
 }
 
 func optionalPositiveInt(value string) (int, error) {
@@ -1425,7 +1463,9 @@ func (h *Handler) listEquipment(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writePage(c, items, page, pageSize)
+	// 设备列表尚未下推分页，仍在内存中按既有切片语义分页。
+	items, total := pageSlice(items, page, pageSize)
+	writePage(c, items, total, page, pageSize)
 }
 func (h *Handler) upsertEquipment(c *gin.Context) {
 	var input domain.Capability

@@ -1082,8 +1082,9 @@ type assignmentValidationRepository struct {
 	foundCapabilities []domain.Capability
 }
 
-func (r *assignmentValidationRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string) ([]domain.ServiceItem, error) {
-	return []domain.ServiceItem{r.item}, nil
+func (r *assignmentValidationRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string, _, _ int) ([]domain.ServiceItem, int, error) {
+	items := []domain.ServiceItem{r.item}
+	return items, len(items), nil
 }
 
 func (r *assignmentValidationRepository) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {

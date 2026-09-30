@@ -85,9 +85,9 @@ func (r *serviceProjectRepository) CreateProjectWithServiceItems(_ context.Conte
 	return nil
 }
 
-func (r *scopeRepository) ListProjects(_ context.Context, filter platform.ScopeFilter, _, _ string) ([]domain.Project, error) {
+func (r *scopeRepository) ListProjects(_ context.Context, filter platform.ScopeFilter, _, _ string, _, _ int) ([]domain.Project, int, error) {
 	r.lastFilter = filter
-	return nil, nil
+	return nil, 0, nil
 }
 func (r *scopeRepository) GetProject(_ context.Context, filter platform.ScopeFilter, id string) (domain.Project, error) {
 	r.lastFilter = filter
@@ -97,9 +97,9 @@ func (r *scopeRepository) CreateProject(_ context.Context, item domain.Project) 
 	r.created = item
 	return nil
 }
-func (r *scopeRepository) ListServiceItems(_ context.Context, filter platform.ScopeFilter, _ string) ([]domain.ServiceItem, error) {
+func (r *scopeRepository) ListServiceItems(_ context.Context, filter platform.ScopeFilter, _ string, _, _ int) ([]domain.ServiceItem, int, error) {
 	r.lastFilter = filter
-	return nil, nil
+	return nil, 0, nil
 }
 func (r *scopeRepository) GetServiceItem(_ context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
 	r.lastFilter = filter
@@ -985,8 +985,8 @@ func (r *maskingRepository) GetProject(_ context.Context, _ platform.ScopeFilter
 	project.ID = id
 	return project, nil
 }
-func (r *maskingRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string) ([]domain.ServiceItem, error) {
-	return r.items, nil
+func (r *maskingRepository) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string, _, _ int) ([]domain.ServiceItem, int, error) {
+	return r.items, len(r.items), nil
 }
 
 // 命中角色的 hidden 规则把敏感字段脱敏为 ***，其余字段不受影响。

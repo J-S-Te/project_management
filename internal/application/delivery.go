@@ -687,7 +687,7 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	required := append([]string{}, existing.RequiredCodes...)
 	required = append(required, input.RequiredCodes...)
 	required = normalizeCapabilityCodes(required)
-	items, err := s.Repo.ListServiceItems(ctx, filter, "")
+	items, _, err := s.Repo.ListServiceItems(ctx, filter, "", 0, 0)
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}

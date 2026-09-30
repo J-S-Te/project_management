@@ -161,8 +161,9 @@ func (r *repo) ListDetectionCategories(context.Context, string) ([]domain.Detect
 	return domain.DefaultDetectionCategories(), nil
 }
 
-func (r *repo) ListProjects(context.Context, platform.ScopeFilter, string, string) ([]domain.Project, error) {
-	return r.projects, nil
+// ListProjects 模拟仓储层的 SQL 分页契约：page/pageSize>0 时返回本页切片与总数。
+func (r *repo) ListProjects(_ context.Context, _ platform.ScopeFilter, _, _ string, page, pageSize int) ([]domain.Project, int, error) {
+	return paginateFake(r.projects, page, pageSize), len(r.projects), nil
 }
 func (r *repo) GetProject(_ context.Context, _ platform.ScopeFilter, id string) (domain.Project, error) {
 	for _, p := range r.projects {
@@ -181,8 +182,29 @@ func (r *repo) CreateProjectWithServiceItems(_ context.Context, p domain.Project
 	r.items = append(r.items, items...)
 	return nil
 }
-func (r *repo) ListServiceItems(context.Context, platform.ScopeFilter, string) ([]domain.ServiceItem, error) {
-	return r.items, nil
+
+// ListServiceItems 模拟仓储层的 SQL 分页契约（与 ListProjects 一致）。
+func (r *repo) ListServiceItems(_ context.Context, _ platform.ScopeFilter, _ string, page, pageSize int) ([]domain.ServiceItem, int, error) {
+	return paginateFake(r.items, page, pageSize), len(r.items), nil
+}
+
+// paginateFake 按仓储层分页语义切片：page<=0 归位到第一页，超界页返回空切片。
+func paginateFake[T any](items []T, page, pageSize int) []T {
+	if pageSize <= 0 {
+		return items
+	}
+	if page <= 0 {
+		page = 1
+	}
+	start := (page - 1) * pageSize
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + pageSize
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
 }
 func (r *repo) GetServiceItem(_ context.Context, _ platform.ScopeFilter, id string) (domain.ServiceItem, error) {
 	for _, item := range r.items {

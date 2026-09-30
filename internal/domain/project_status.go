@@ -185,6 +185,34 @@ func serviceItemLifecycleRank(item ProjectStatusItem) int {
 	return 0
 }
 
+// ProjectStatusStage 是「状态 → 推进等级」分组映射的导出视图。基础设施层把派生
+// 项目状态过滤下推到 SQL（分页/计数）时，必须与 DeriveProjectStatus 共用同一套表，
+// 否则两处各写一份会在业务新增状态时漂移。
+type ProjectStatusStage struct {
+	Rank     int
+	Statuses []string
+}
+
+// ServiceItemStatusStages 返回服务项状态到线性推进等级（0..6）的只读副本。
+// 表外的未知/空状态一律按等级 0 处理（与 serviceItemLifecycleRank 的兜底一致）。
+func ServiceItemStatusStages() []ProjectStatusStage {
+	stages := make([]ProjectStatusStage, 0, len(serviceItemStatusStages))
+	for _, stage := range serviceItemStatusStages {
+		stages = append(stages, ProjectStatusStage{Rank: stage.Rank, Statuses: append([]string(nil), stage.Statuses...)})
+	}
+	return stages
+}
+
+// ServiceItemReportStages 返回「现场实施完成」后按报告状态细分的等级表：
+// 报告编制/审核/签发中 → 7（报告编制），全部归档 → 8（已完成）；表外值由调用方
+// 兜底为 6（现场实施完成），同样与 serviceItemLifecycleRank 保持一致。
+func ServiceItemReportStages() []ProjectStatusStage {
+	return []ProjectStatusStage{
+		{Rank: 7, Statuses: []string{"COMPILING", "REVIEWED", "ISSUED"}},
+		{Rank: 8, Statuses: []string{"ARCHIVED"}},
+	}
+}
+
 // DeriveProjectProgress 按服务项推进等级派生项目进度百分比：
 // 各服务项等级均值除以最高等级。已终止服务项不再有剩余工作量，既不计入分子也不计入分母：
 // 按满分计入会得出「1 终止 + 1 待实施 = 62%」这种与状态口径相反的进度。
