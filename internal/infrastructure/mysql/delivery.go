@@ -840,7 +840,51 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 		identityStatus = firstValue(item.IdentityStatus, domain.IdentityStatusActive)
 	}
 	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, UserID: strings.TrimSpace(item.UserID), CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), IdentityStatus: identityStatus, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
+	if item.ResourceType == "PERSON" {
+		// An application-side ownership check cannot prevent simultaneous imports
+		// from choosing the same generated number. Lock existing rows and never
+		// turn a conflicting insert into an unconditional identity overwrite.
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var current capabilityRecord
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND resource_type=? AND resource_id=?", item.TenantID, "PERSON", item.ResourceID).Take(&current).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if err = tx.Create(&rec).Error; isDuplicateKey(err) {
+					return application.ValidationError("资质编号已被并发导入占用，请重新检测")
+				}
+				return err
+			}
+			if err != nil {
+				return err
+			}
+			if current.UserID != "" && current.UserID != rec.UserID {
+				return application.ValidationError("资质编号已属于其他人员，不能覆盖")
+			}
+			item.ID = current.ID
+			return tx.Model(&capabilityRecord{}).Where("tenant_id=? AND id=?", item.TenantID, current.ID).Updates(map[string]any{
+				"resource_name": rec.ResourceName, "user_id": rec.UserID, "capability_codes": rec.CapabilityCodes,
+				"valid_from": rec.ValidFrom, "valid_until": rec.ValidUntil, "status": rec.Status,
+				"usage_scope": rec.UsageScope, "updated_at": rec.UpdatedAt, "updated_by": actor,
+			}).Error
+		})
+		return item, err
+	}
 	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "resource_type"}, {Name: "resource_id"}}, DoUpdates: clause.AssignmentColumns([]string{"resource_name", "user_id", "capability_codes", "valid_from", "valid_until", "status", "usage_scope", "updated_at", "updated_by"})}).Create(&rec).Error
+	return item, err
+}
+
+// CreateEquipmentForImport refuses a number claimed since preview. An import
+// creation must never become an update of an unrelated concurrent creation.
+func (r *Repository) CreateEquipmentForImport(ctx context.Context, item domain.Capability, actor string) (domain.Capability, error) {
+	if item.ResourceType != "EQUIPMENT" || item.TenantID == "" || item.ResourceID == "" {
+		return item, application.ErrValidation
+	}
+	item.ID = ulid.Make().String()
+	item.UpdatedAt = time.Now().UTC()
+	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: "EQUIPMENT", ResourceID: item.ResourceID, ResourceName: item.ResourceName, CapabilityCodes: jsonValue(item.Codes), ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), IdentityStatus: domain.IdentityStatusUnlinked, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
+	err := r.db.WithContext(ctx).Create(&rec).Error
+	if isDuplicateKey(err) {
+		return item, application.ValidationError("设备编号已被其他请求占用，请重新预检")
+	}
 	return item, err
 }
 

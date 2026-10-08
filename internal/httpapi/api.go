@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -164,6 +163,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/capabilities", requireAny("project.read", "project.resource.read"), h.listCapabilities)
 	api.PUT("/capabilities", require("project.resource.manage"), h.upsertCapability)
 	api.POST("/capabilities/import", require("project.resource.manage"), h.importCapabilities)
+	api.GET("/capabilities/import/template", require("project.resource.manage"), h.capabilityImportTemplate)
+	api.POST("/capabilities/import/preview", require("project.resource.manage"), h.previewCapabilitiesImport)
 	// 回基础平台复核人员资质档案：资质在本系统维护，人员是否真实存在由平台回答。
 	api.POST("/capabilities/sync-identities", require("project.resource.manage"), h.syncPersonnelIdentities)
 	api.GET("/capabilities/export", require("project.resource.read"), h.exportCapabilities)
@@ -172,6 +173,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/equipment-return", requireAny("project.implementation.plan", "project.device.manage"), h.returnEquipment)
 	api.PUT("/equipment", require("project.device.manage"), h.upsertEquipment)
 	api.POST("/equipment/import", require("project.device.manage"), h.importEquipment)
+	api.GET("/equipment/import/template", require("project.device.manage"), h.equipmentImportTemplate)
+	api.POST("/equipment/import/preview", require("project.device.manage"), h.previewEquipmentImport)
 	api.DELETE("/equipment/:resource_id", require("project.device.manage"), h.deleteEquipment)
 	// 站点台账：站点是项目/服务项的公共主数据，读以 project.read 为基线，
 	// 写沿用资源主数据权限 project.resource.manage。
@@ -192,6 +195,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/detection-categories", require("project.read"), h.listDetectionCategories)
 	api.POST("/detection-categories", require("project_rule.manage"), h.saveDetectionCategory)
 	api.POST("/detection-categories/import", require("project_rule.manage"), h.importDetectionCategories)
+	api.GET("/detection-categories/import/template", require("project_rule.manage"), h.detectionCategoryImportTemplate)
+	api.POST("/detection-categories/import/preview", require("project_rule.manage"), h.previewDetectionCategoryImport)
 	api.DELETE("/detection-categories/:category", require("project_rule.manage"), h.deleteDetectionCategory)
 	api.GET("/split-overrides", require("project.read"), h.listSplitOverrides)
 	api.POST("/split-overrides", require("project_rule.manage"), h.saveSplitOverride)
@@ -587,6 +592,7 @@ var allNavigationSections = []string{
 	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
+	"notifications",
 }
 
 func navigationSections(roles []string) []string {
@@ -627,7 +633,10 @@ func navigationSections(roles []string) []string {
 	if len(sections) == 0 {
 		// Unknown roles receive the least-privileged read-only entry point; endpoint
 		// authorization remains the final enforcement boundary.
-		return []string{"dashboard", "projects"}
+		return []string{"dashboard", "projects", "notifications"}
+	}
+	if !seen["notifications"] {
+		sections = append(sections, "notifications")
 	}
 	return sections
 }
@@ -1661,43 +1670,7 @@ func (h *Handler) saveDetectionCategory(c *gin.Context) {
 
 // importDetectionCategories 批量导入检测类别域（页面的「导入」入口）。
 func (h *Handler) importDetectionCategories(c *gin.Context) {
-	file, err := c.FormFile("file")
-	if err != nil || file.Size <= 0 || file.Size > maximumCapabilityImportBytes {
-		writeServiceError(c, application.ErrValidation)
-		return
-	}
-	opened, err := file.Open()
-	if err != nil {
-		writeServiceError(c, application.ErrValidation)
-		return
-	}
-	defer opened.Close()
-	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
-	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes {
-		writeServiceError(c, application.ErrValidation)
-		return
-	}
-	if h.service.EvidenceFiles == nil {
-		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "统一文件网关暂不可用，导入未执行")
-		return
-	}
-	if _, err = h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "DETECTION_CATEGORY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
-		writeError(c, http.StatusServiceUnavailable, "PM_FILE_GATEWAY_UNAVAILABLE", "文件校验暂不可用，导入未执行")
-		return
-	}
-	items, parseErrs := detectionCategoriesFromCSV(content)
-	if len(items) == 0 {
-		writeServiceError(c, application.ErrValidation)
-		return
-	}
-	result, err := h.service.ImportDetectionCategories(c.Request.Context(), principal(c), items)
-	if err != nil {
-		writeServiceError(c, err)
-		return
-	}
-	result.Errors = append(parseErrs, result.Errors...)
-	result.Skipped += len(parseErrs)
-	writeData(c, http.StatusOK, result)
+	h.confirmDetectionCategoryImport(c)
 }
 
 func (h *Handler) deleteDetectionCategory(c *gin.Context) {
