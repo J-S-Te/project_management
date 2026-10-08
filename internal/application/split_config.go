@@ -569,7 +569,7 @@ func (s *Service) ImportDetectionCategories(ctx context.Context, p platform.Prin
 		}
 		if _, err := repo.SaveDetectionCategory(ctx, p.TenantID, normalized, p.UserID); err != nil {
 			result.Skipped++
-			result.Errors = append(result.Errors, line+": "+err.Error())
+			result.Errors = append(result.Errors, line+": 保存失败，请刷新目录后重新检测")
 			continue
 		}
 		result.Imported++

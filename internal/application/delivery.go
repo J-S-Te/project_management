@@ -2108,6 +2108,13 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	item.UserID = person.UserID
 	item.ResourceName = person.DisplayName
 	item.IdentityStatus = domain.IdentityStatusActive
+	// Import confirmation can race another edit after preview. Never rebind an
+	// existing numbered qualification to a different identity during upsert.
+	for _, current := range existing {
+		if item.ResourceID != "" && current.ResourceID == item.ResourceID && current.UserID != "" && current.UserID != item.UserID {
+			return item, ValidationError("资质编号已属于其他人员，不能覆盖")
+		}
+	}
 	if strings.TrimSpace(item.ResourceID) == "" {
 		assignResourceID(existing, &item)
 	}
@@ -2161,62 +2168,18 @@ func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, 
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
 		return CapabilityImportResult{}, err
 	}
-	repo, e := s.deliveryRepo()
-	if e != nil {
-		return CapabilityImportResult{}, e
-	}
 	result := CapabilityImportResult{}
-	// 导入同样支持编号留空：按类型顺延生成，且本批次内逐行消耗，避免整批手工编号。
-	known, err := repo.ListCapabilities(ctx, p.TenantID, "")
-	if err != nil {
-		return CapabilityImportResult{}, err
-	}
-	codeRules, err := s.loadCapabilityCodeRules(ctx, p.TenantID)
-	if err != nil {
-		return CapabilityImportResult{}, err
-	}
-	for i := range rows {
-		line := fmt.Sprintf("数据行 %d", i+1)
-		normalizeCapability(&rows[i])
-		if rows[i].ResourceType != "PERSON" {
+	for i, row := range rows {
+		if _, err := s.UpsertCapability(ctx, p, row); err != nil {
 			result.Skipped++
-			result.Errors = append(result.Errors, line+": 只能导入人员资质；设备请在「设备能力」中新建或维护")
+			result.Errors = append(result.Errors, fmt.Sprintf("数据行 %d: %s", i+1, capabilityImportSafeError(err)))
 			continue
-		}
-		assignResourceID(known, &rows[i])
-		if err := validateCapability(rows[i]); err != nil {
-			result.Skipped++
-			result.Errors = append(result.Errors, line+": 资源类型、编号、名称或能力码不完整")
-			continue
-		}
-		if err := validateCapabilityCodesAgainstCatalog(codeRules, rows[i].ResourceType, rows[i].Codes, existingCapabilityCodes(known, rows[i].ResourceType, rows[i].ResourceID)); err != nil {
-			result.Skipped++
-			result.Errors = append(result.Errors, line+": "+err.Error())
-			continue
-		}
-		rows[i].TenantID = p.TenantID
-		rows[i].Status = firstNonEmpty(rows[i].Status, "ACTIVE")
-		rows[i].UsageScope = ""
-		if _, err := repo.UpsertCapability(ctx, rows[i], p.UserID); err != nil {
-			result.Skipped++
-			result.Errors = append(result.Errors, line+": "+err.Error())
-			continue
-		}
-		updated := false
-		for knownIndex := range known {
-			if known[knownIndex].ResourceType == rows[i].ResourceType && known[knownIndex].ResourceID == rows[i].ResourceID {
-				known[knownIndex] = rows[i]
-				updated = true
-				break
-			}
-		}
-		if !updated {
-			known = append(known, rows[i])
 		}
 		result.Imported++
 	}
 	return result, nil
 }
+
 func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, typ string) ([]domain.Capability, error) {
 	if err := requireDirectoryRead(p, "project.read", "project.resource.read"); err != nil {
 		return nil, err
@@ -2466,6 +2429,10 @@ func equipmentInUseAt(reservations []domain.EquipmentReservation, now time.Time)
 }
 
 func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, item domain.Capability) (domain.Capability, error) {
+	return s.upsertEquipment(ctx, p, item, false)
+}
+
+func (s *Service) upsertEquipment(ctx context.Context, p platform.Principal, item domain.Capability, createOnly bool) (domain.Capability, error) {
 	if err := requireApplicationAuthorization(p, "project.device.manage"); err != nil {
 		return item, err
 	}
@@ -2498,7 +2465,17 @@ func (s *Service) UpsertEquipment(ctx context.Context, p platform.Principal, ite
 		return item, ValidationError("使用范围只能是「可借出」或「仅在公司使用」")
 	}
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
-	saved, err := repo.UpsertCapability(ctx, item, p.UserID)
+	var saved domain.Capability
+	if createOnly {
+		// Generated import numbers must never turn an insert race into an overwrite.
+		creator, ok := repo.(EquipmentImportCreator)
+		if !ok {
+			return item, ValidationError("设备导入安全写入暂不可用，请稍后重试")
+		}
+		saved, err = creator.CreateEquipmentForImport(ctx, item, p.UserID)
+	} else {
+		saved, err = repo.UpsertCapability(ctx, item, p.UserID)
+	}
 	if err != nil {
 		return saved, err
 	}
