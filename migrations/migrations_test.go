@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestIncomeContractCategoriesOnlyAddMissingTenantEntries(t *testing.T) {
+	body, err := Files.ReadFile("000027_income_contract_service_categories.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, want := range []string{"模块开发", "技术咨询", "WHERE NOT EXISTS", "existing.tenant_id = tenants.tenant_id", "existing.category = categories.category", "UNION SELECT tenant_id FROM pm_project"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("missing migration boundary %q", want)
+		}
+	}
+	if strings.Contains(sql, "UPDATE pm_detection_category") || strings.Contains(sql, "DELETE FROM") {
+		t.Fatal("migration must not rewrite existing categories")
+	}
+}
+
 func TestOIDCSessionMigrationPreservesReplayAuditAndIdentityRevocationIndex(t *testing.T) {
 	body, err := Files.ReadFile("000003_project_oidc_sessions.sql")
 	if err != nil {

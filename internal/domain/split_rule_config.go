@@ -209,7 +209,7 @@ func ValidateDetectionCategory(item DetectionCategory) error {
 }
 
 // DefaultDetectionCategories 返回原型「Q1 已确认」的检测类别域初始值。
-// 原型表格渲染了 17 行（页脚标注共 19 类），这里以可见行为准，缺的类别由管理员新增。
+// 保留原型可见的 17 类；收入合同另增加模块开发、技术咨询，不虚构资质要求。
 func DefaultDetectionCategories() []DetectionCategory {
 	entries := []struct{ category, systemStandard, qualifications, special string }{
 		{"等保测评", "等保 2.0", "等级保护测评师（中级+）", SpecialMethodNo},
@@ -229,6 +229,8 @@ func DefaultDetectionCategories() []DetectionCategory {
 		{"应急响应服务", "", "", SpecialMethodMarkable},
 		{"网络安全攻防演练", "", "", SpecialMethodMarkable},
 		{"安全运维", "", "", SpecialMethodNo},
+		{"模块开发", "", "", SpecialMethodNo},
+		{"技术咨询", "", "", SpecialMethodNo},
 	}
 	items := make([]DetectionCategory, 0, len(entries))
 	for _, entry := range entries {
