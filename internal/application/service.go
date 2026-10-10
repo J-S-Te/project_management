@@ -117,7 +117,9 @@ type AvailableApprovedContractFilter interface {
 }
 
 type Service struct {
-	Repo Repository
+	// CheckBusinessLicense is called again at asynchronous business side effects.
+	CheckBusinessLicense func(context.Context) error
+	Repo                 Repository
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
 	// ErrPersonnelUnavailable，不影响其余项目功能。
 	Personnel platform.OwnerDirectory

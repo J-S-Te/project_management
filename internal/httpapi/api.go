@@ -41,6 +41,7 @@ type Handler struct {
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
 type RouterOptions struct {
+	CommercialLicense    CommercialLicenseGate
 	ContractIntegration  *ContractIntegrationOptions
 	DashboardIntegration *DashboardIntegrationOptions
 	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
@@ -63,6 +64,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		routerOptions = options[0]
 	}
 	pendingMigrations := routerOptions.PendingMigrations
+	router.Use(commercialLicenseMiddleware(routerOptions.CommercialLicense))
 	router.GET("/healthz", func(c *gin.Context) {
 		writeData(c, http.StatusOK, map[string]any{"status": "ok", "audit": auditStatus, "pending_migrations": len(pendingMigrations)})
 	})

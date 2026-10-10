@@ -30,6 +30,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	commercialGate, err := bootstrap.OpenCommercialLicense(ctx, logger)
+	if err != nil {
+		logger.Error("commercial license configuration failed")
+		os.Exit(1)
+	}
 
 	db, err := bootstrap.OpenDatabase(ctx, cfg.MySQLDSN)
 	if err != nil {
@@ -43,6 +48,7 @@ func main() {
 		logger.Warn("platform notification integration disabled; sla notifications will not be delivered")
 	}
 	service := &application.Service{Repo: store.NewRepository(db), Notifications: notifications, Logger: logger}
+	service.CheckBusinessLicense = func(ctx context.Context) error { return commercialGate.Check(ctx, "MUTATE_BUSINESS") }
 	workerID, _ := os.Hostname()
 	workerID = "project-sla-notifier-" + workerID
 	if len(cfg.SlaScanTenants) == 0 {

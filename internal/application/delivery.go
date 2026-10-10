@@ -468,6 +468,11 @@ func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project 
 // 幂等键按「服务项 + 口径 + UTC 日期」生成：同一天重复扫描不会重复打扰，
 // 跨天仍会重新提醒（超期是持续状态，每天都值得提醒一次）。
 func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now time.Time) (int, error) {
+	if s.CheckBusinessLicense != nil {
+		if err := s.CheckBusinessLicense(ctx); err != nil {
+			return 0, err
+		}
+	}
 	outbox, hasOutbox := s.Repo.(NotificationOutboxEnqueuer)
 	if strings.TrimSpace(tenantID) == "" {
 		return 0, nil
@@ -512,6 +517,11 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 			Recipients:     recipients,
 			OccurredAt:     now.UTC(),
 			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
+		}
+		if s.CheckBusinessLicense != nil {
+			if err := s.CheckBusinessLicense(ctx); err != nil {
+				return published, err
+			}
 		}
 		queued, queueErr := outbox.EnqueueNotification(ctx, filter.TenantID, notification)
 		if queueErr != nil {

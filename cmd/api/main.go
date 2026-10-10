@@ -29,6 +29,13 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
+	licenseCtx, licenseStop := context.WithCancel(ctx)
+	defer licenseStop()
+	commercialGate, err := bootstrap.OpenCommercialLicense(licenseCtx, logger)
+	if err != nil {
+		logger.Error("commercial license configuration failed")
+		os.Exit(1)
+	}
 	metrics := temporalworker.NewMetricsRegistry()
 	if err := temporalworker.StartMetricsServer(ctx, cfg.TemporalMetricsAddress, metrics, logger); err != nil {
 		logger.Error("start Temporal metrics server", "error", err)
@@ -131,6 +138,7 @@ func main() {
 	}
 	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, Logger: logger}
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
+		CommercialLicense: commercialGate,
 		PendingMigrations: pendingMigrations,
 		ContractIntegration: &httpapi.ContractIntegrationOptions{
 			Enabled:        cfg.ContractIntegrationEnabled,

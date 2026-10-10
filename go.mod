@@ -3,6 +3,7 @@ module github.com/j-s-te/project-management
 go 1.25.4
 
 require (
+	github.com/J-S-Te/license-core v0.0.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-sql-driver/mysql v1.8.1
@@ -13,6 +14,8 @@ require (
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.1
 )
+
+replace github.com/J-S-Te/license-core => ./third_party/license-core
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

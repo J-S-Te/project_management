@@ -1,6 +1,9 @@
 FROM golang:1.25.4-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY third_party/license-core ./third_party/license-core
+COPY scripts/license-core-sync.sh scripts/license-core.sha256 ./scripts/
+RUN sh scripts/license-core-sync.sh --check
 ARG GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct
 ARG GOSUMDB=sum.golang.google.cn
 ENV GOPROXY=${GOPROXY} \
@@ -27,7 +30,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/project-api ./cmd/
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sla-notifier ./cmd/sla-notifier
 
 FROM alpine:3.22
-RUN addgroup -S app && adduser -S -G app app && mkdir -p /var/lib/project-management && chown app:app /var/lib/project-management
+ARG APP_VERSION
+LABEL org.opencontainers.image.version=${APP_VERSION} com.basic-platform.license.protocol="1"
+RUN addgroup -S app && adduser -S -G app app && mkdir -p /var/lib/project-management /var/lib/commercial-license && chown app:app /var/lib/project-management /var/lib/commercial-license
 COPY --from=builder /out/project-api /usr/local/bin/project-api
 COPY --from=builder /out/project-worker /usr/local/bin/project-worker
 COPY --from=builder /out/project-worker-rollout /usr/local/bin/project-worker-rollout

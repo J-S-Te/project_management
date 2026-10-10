@@ -18,6 +18,12 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
+	licenseCtx, licenseStop := context.WithCancel(ctx)
+	defer licenseStop()
+	if _, err := bootstrap.OpenCommercialLicense(licenseCtx, logger); err != nil {
+		logger.Error("commercial license configuration failed")
+		os.Exit(1)
+	}
 	metrics := temporalworker.NewMetricsRegistry()
 	if err := temporalworker.StartMetricsServer(ctx, cfg.TemporalMetricsAddress, metrics, logger); err != nil {
 		logger.Error("start Temporal metrics server", "error", err)
