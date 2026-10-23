@@ -23,8 +23,10 @@ type AuditEvent struct {
 	RequestID, CorrelationID, Result, ReasonCode         string
 	// RiskLevel 为 LOW/MEDIUM/HIGH/CRITICAL；为空时按 LOW 上报。
 	RiskLevel string
-	// UserLoginIP 是被审计用户的原始客户端地址；缺少该字段时，平台只能记录
-	// 项目服务投递请求的容器地址。
+	// 统一审计来源协议（AUD-IP-2026）：LoginIP 固定于会话，ClientIP 是本次操作地址，
+	// IPSource 标记获取方式；三者分开上报，互不顶替。
+	LoginIP, ClientIP, IPSource string
+	// UserLoginIP 是旧协议字段，继续按"登录地址"语义上报以兼容滚动升级。
 	UserLoginIP string
 }
 type AuditReporter interface {
@@ -89,8 +91,8 @@ type auditClient struct {
 	applicationCode, environmentCode string
 }
 
-// AuditReporterConfiguration describes whether this process can send audit
-// events without exposing any credential values.
+// AuditReporterConfiguration 描述本进程是否可发送审计
+// 事件，不暴露任何凭据值。
 type AuditReporterConfiguration struct {
 	Enabled       bool
 	MissingFields []string
@@ -145,8 +147,19 @@ func (c *auditClient) Report(ctx context.Context, event AuditEvent) error {
 		correlationID = requestID
 	}
 	payload := map[string]any{"event_id": ulid.Make().String(), "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "application_code": c.applicationCode, "environment_code": c.environmentCode, "actor_type": "USER", "actor_id": event.ActorID, "actor_name": event.ActorName, "action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID, "request_id": requestID, "trace_id": hex.EncodeToString(trace), "correlation_id": correlationID, "result": event.Result, "risk_level": riskLevelOrDefault(event.RiskLevel), "reason_code": event.ReasonCode}
-	if event.UserLoginIP != "" {
-		payload["user_login_ip"] = event.UserLoginIP
+	loginIP := event.LoginIP
+	if loginIP == "" {
+		loginIP = event.UserLoginIP
+	}
+	if loginIP != "" {
+		payload["login_ip"] = loginIP
+		payload["user_login_ip"] = loginIP
+	}
+	if event.ClientIP != "" {
+		payload["client_ip"] = event.ClientIP
+	}
+	if event.IPSource != "" {
+		payload["ip_source"] = event.IPSource
 	}
 	body, _ := json.Marshal(payload)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.service.baseURL+"/api/v1/audit/events", bytes.NewReader(body))

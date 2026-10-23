@@ -33,7 +33,7 @@ type CapabilityImportPreview struct {
 	Rows    []CapabilityImportPreviewRow `json:"rows"`
 }
 
-// PreviewCapabilityImport never writes. Confirmation repeats directory/catalog validation.
+// PreviewCapabilityImport 从不写入。确认时再次执行目录及清单校验。
 func (s *Service) PreviewCapabilityImport(ctx context.Context, p platform.Principal, inputs []CapabilityImportInput) (CapabilityImportPreview, error) {
 	result := CapabilityImportPreview{Rows: []CapabilityImportPreviewRow{}}
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {

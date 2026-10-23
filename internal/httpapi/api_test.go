@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/httpapi"
@@ -80,7 +79,14 @@ func (r *repo) FilterUnreferencedApprovedContracts(_ context.Context, tenantID s
 	for _, reference := range references {
 		used := false
 		for _, project := range r.projects {
-			if project.TenantID == tenantID && (project.ContractID == reference.ID || (project.Contract == reference.Number && project.ContractVersion == fmt.Sprint(reference.Version))) {
+			if project.TenantID != tenantID {
+				continue
+			}
+			identity := strings.TrimSpace(project.ContractID)
+			if identity == "" {
+				identity = strings.TrimSpace(project.Contract)
+			}
+			if identity != "" && (identity == strings.TrimSpace(reference.ID) || identity == strings.TrimSpace(reference.Number)) {
 				used = true
 				break
 			}
@@ -92,9 +98,16 @@ func (r *repo) FilterUnreferencedApprovedContracts(_ context.Context, tenantID s
 	return available, nil
 }
 
-func (r *repo) FindProjectByContractVersion(_ context.Context, filter platform.ScopeFilter, contract, version string) (domain.Project, error) {
+func (r *repo) FindProjectByContract(_ context.Context, filter platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
 	for _, p := range r.projects {
-		if p.TenantID == filter.TenantID && (p.ContractID == contract || p.Contract == contract) && p.ContractVersion == version {
+		if p.TenantID != filter.TenantID {
+			continue
+		}
+		identity := strings.TrimSpace(p.ContractID)
+		if identity == "" {
+			identity = strings.TrimSpace(p.Contract)
+		}
+		if identity != "" && (identity == strings.TrimSpace(contractID) || identity == strings.TrimSpace(contractNumber)) {
 			return p, nil
 		}
 	}
@@ -382,7 +395,7 @@ func TestReportCorrectionAPIEnforcesPermissionsValidationAndSeparateApprover(t *
 func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
-	// SEC-D11: same-origin middleware requires the configured Origin on writes.
+	// SEC-D11：同源中间件要求写操作携带配置的 Origin。
 	request.Header.Set("Origin", "http://example.com")
 	// 同源校验（SEC-D11）要求写请求携带与 OIDC_REDIRECT_URI 一致的 Origin。
 	request.Header.Set("Origin", "http://example.com")
@@ -430,7 +443,8 @@ func TestApprovedContractsUseProjectSessionAndCreationPermission(t *testing.T) {
 	}
 }
 
-func TestApprovedContractsHideContractVersionsAlreadyLinkedToAProject(t *testing.T) {
+func TestApprovedContractsHideContractsAlreadyLinkedToAProject(t *testing.T) {
+	// 项目建项时的版本已是历史值：普通状态流转递增版本后，该合同仍必须从选择器隐藏。
 	repository := &repo{projects: []domain.Project{{ID: "PJ-1", TenantID: "tenant-1", ContractID: "approved-1", Contract: "HT-1", ContractVersion: "1"}}}
 	service := &application.Service{Repo: repository, Contracts: approvedContractVerifier{}}
 	principal := platform.Principal{
@@ -923,7 +937,7 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}
 	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "contract_management", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	body := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"HT-1","contract_number":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -941,7 +955,7 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 		t.Fatalf("events=%+v", repository.events)
 	}
 
-	stampedBody := `{"contract_id":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	stampedBody := `{"contract_id":"HT-1","contract_number":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", stampedBody)
 	if response.Code != http.StatusCreated || len(repository.events) != 2 || repository.events[1].Type != application.EventContractStampStatus {
 		t.Fatalf("status=%d projects=%+v events=%+v", response.Code, repository.projects, repository.events)
@@ -985,7 +999,7 @@ func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testi
 	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 	})
-	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"HT-2","contract_number":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	deliveryID, tenantID := ulid.Make().String(), "tenant-contract"
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -1063,7 +1077,7 @@ func TestContractIntegrationRequiresVerifiedKeycloakMachineTokenWhenEnabled(t *t
 	handler := httpapi.NewRouter(service, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 	})
-	body := `{"contract_id":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"HT-2","contract_number":"HT-2","contract_version":"4","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
@@ -1677,7 +1691,7 @@ func TestInternalContractActivationIsAudited(t *testing.T) {
 	handler := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, auditLog, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
 		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
 	})
-	body := `{"contract_id":"HT-AUDIT","contract_version":"1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"HT-AUDIT","contract_number":"HT-AUDIT","contract_version":"1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","test_mode":"STANDARD"}]}`
 	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer verified-machine-token")

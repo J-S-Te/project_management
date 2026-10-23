@@ -11,13 +11,16 @@ type CommercialLicenseGate interface {
 	Check(context.Context, core.Operation) error
 }
 
-// Exact reviewed read routes: future GET endpoints do not inherit permission
-// to compute or advance business merely because they use GET.
+// 精确审查的读取路由：未来 GET 端点不能仅因使用 GET
+// 就继承计算或推进业务的权限。
 var commercialHistoryRoutes = map[string]bool{
+	"/internal/v1/dashboard/projects/snapshot": true,
 	"/internal/v1/contracts/detection-categories": true, "/internal/v1/dashboard": true,
+	"/internal/v1/handover/responsibilities": true, "/internal/v1/handover/transfers/:item_id": true,
 	"/api/v1/navigation": true, "/api/v1/role-catalog": true, "/api/v1/rule-configuration-catalog": true,
 	"/api/v1/dashboard": true, "/api/v1/projects": true, "/api/v1/projects-monitoring": true,
 	"/api/v1/approved-contracts": true, "/api/v1/approved-contracts/:contractID/service-items": true,
+	"/api/v1/projects/:id/supplement-contracts": true,
 	"/api/v1/projects/:id": true, "/api/v1/delivery-events": true, "/api/v1/delivery/sla-overdue": true,
 	"/api/v1/service-items": true, "/api/v1/service-items/:id/penetration-work-package": true,
 	"/api/v1/service-items/:id/penetration-work-package/report-revisions": true, "/api/v1/service-items/:id/report-revisions": true,
@@ -30,6 +33,12 @@ var commercialHistoryRoutes = map[string]bool{
 
 func commercialOperation(method, path string) core.Operation {
 	if method == http.MethodOptions {
+		return core.ESSENTIAL_SERVICE
+	}
+	// 审计恢复仅检查失败投递或重试不可变审计
+	// 事件。将此精确方法和路径策略与业务重放分离。
+	if (method == http.MethodGet && path == "/api/v1/audit-outbox/failed") ||
+		(method == http.MethodPost && path == "/api/v1/audit-outbox/failed/:id/retry") {
 		return core.ESSENTIAL_SERVICE
 	}
 	for _, route := range []string{"/healthz", "/readyz", "/auth/login", "/auth/callback", "/auth/logout", "/auth/local-logout", "/auth/backchannel-logout", "/logged-out", "/api/v1/auth/me"} {

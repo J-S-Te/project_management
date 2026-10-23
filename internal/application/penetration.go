@@ -130,6 +130,9 @@ func (s *Service) SavePenetrationDecision(ctx context.Context, p platform.Princi
 	if input.CustomerContact == "" || input.CommunicationSummary == "" {
 		return domain.PenetrationWorkPackage{}, ValidationError("请填写客户联系人和沟通结论")
 	}
+	if err := validatePenetrationDecisionTexts(input); err != nil {
+		return domain.PenetrationWorkPackage{}, err
+	}
 	if _, err = time.Parse(time.RFC3339, input.CommunicatedAt); err != nil {
 		return domain.PenetrationWorkPackage{}, ValidationError("沟通时间必须是有效的日期时间")
 	}
@@ -161,6 +164,9 @@ func (s *Service) SavePenetrationPlan(ctx context.Context, p platform.Principal,
 		return domain.PenetrationWorkPackage{}, err
 	}
 	if err = requireProjectManager(p, item); err != nil {
+		return domain.PenetrationWorkPackage{}, err
+	}
+	if err := validatePenetrationPlanTexts(input); err != nil {
 		return domain.PenetrationWorkPackage{}, err
 	}
 	start, end, authStart, authEnd, err := validateEmbeddedPenetrationPlan(input)
@@ -298,6 +304,15 @@ func (s *Service) AdvancePenetrationExecution(ctx context.Context, p platform.Pr
 		}
 		if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.CustomerContact) == "" || strings.TrimSpace(input.CommunicationSummary) == "" {
 			return domain.PenetrationWorkPackage{}, ValidationError("取消专项必须填写原因、客户联系人和最新沟通结论")
+		}
+		if err := validateProjectTextLength(input.Reason, 1000, "取消原因"); err != nil {
+			return domain.PenetrationWorkPackage{}, err
+		}
+		if err := validateProjectTextLength(input.CustomerContact, 128, "客户联系人"); err != nil {
+			return domain.PenetrationWorkPackage{}, err
+		}
+		if err := validateProjectTextLength(input.CommunicationSummary, 2000, "沟通结论"); err != nil {
+			return domain.PenetrationWorkPackage{}, err
 		}
 		if _, err = time.Parse(time.RFC3339, input.CommunicatedAt); err != nil {
 			return domain.PenetrationWorkPackage{}, ValidationError("沟通时间必须是有效的日期时间")

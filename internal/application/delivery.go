@@ -66,7 +66,9 @@ const (
 )
 
 type DeliveryRepository interface {
-	FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error)
+	// FindProjectByContract 按稳定的合同身份（合同 ID；历史空 ID 回退合同号）查找项目。
+	// 普通行版本只用于并发与审计，不参与建项唯一性。
+	FindProjectByContract(context.Context, platform.ScopeFilter, string, string) (domain.Project, error)
 	ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error
 	SyncContractStampStatus(context.Context, domain.Project, bool, domain.DeliveryEvent) error
 	ApplyDeliveryEvent(context.Context, domain.DeliveryEvent) error
@@ -83,9 +85,9 @@ type DeliveryRepository interface {
 }
 
 type NotificationOutboxRepository interface {
-	ClaimNotificationOutbox(context.Context, string, int, time.Time) ([]domain.NotificationOutboxItem, error)
-	MarkNotificationOutboxSent(context.Context, uint64, string, time.Time) error
-	MarkNotificationOutboxRetry(context.Context, uint64, string, time.Time, bool) error
+	ClaimNotificationOutbox(context.Context, string, string, int, time.Time) ([]domain.NotificationOutboxItem, error)
+	MarkNotificationOutboxSent(context.Context, string, uint64, string, time.Time) error
+	MarkNotificationOutboxRetry(context.Context, string, uint64, string, time.Time, time.Time, bool) error
 }
 
 type NotificationOutboxEnqueuer interface {
@@ -214,7 +216,26 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	if err != nil {
 		return domain.Project{}, err
 	}
-	if existing, findErr := repo.FindProjectByContractVersion(ctx, filter, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractVersion)); findErr == nil {
+	// 兼容投递可能只带稳定 ID，而历史项目只存旧编号。两者的字符串空间
+	// 不能混为身份依据：必须在任何查重/盖章同步前受控回读权威编号。
+	resolvedNumber := strings.TrimSpace(input.ContractNumber) == ""
+	if resolvedNumber {
+		if s.Contracts == nil {
+			return domain.Project{}, ErrContractUnavailable
+		}
+		contract, err := s.Contracts.Get(ctx, strings.TrimSpace(input.ContractID))
+		if err != nil {
+			return domain.Project{}, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+		}
+		if strings.TrimSpace(contract.ID) != strings.TrimSpace(input.ContractID) || strings.TrimSpace(contract.Number) == "" || !contract.ApprovalPassed {
+			return domain.Project{}, ErrContractUnavailable
+		}
+		input.ContractNumber = strings.TrimSpace(contract.Number)
+	}
+	if existing, findErr := repo.FindProjectByContract(ctx, filter, strings.TrimSpace(input.ContractID), strings.TrimSpace(input.ContractNumber)); findErr == nil {
+		if resolvedNumber && strings.TrimSpace(existing.Contract) != input.ContractNumber {
+			return domain.Project{}, PreconditionError("历史项目合同身份无法安全映射，请核对权威合同编号")
+		}
 		return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
 	} else if !errors.Is(findErr, ErrNotFound) {
 		return domain.Project{}, findErr
@@ -269,60 +290,36 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	}
 	project.Services = len(items)
 	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.ContractID, "contract_number": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
+	if len(missingCategories) > 0 && plan.MissingRuleAction == domain.SplitMissingHumanConfirm {
+		event.RoleNotification = &domain.RoleNotification{Roles: []string{"business_admin"}, Message: domain.NotificationMessage{
+			EventID: ulid.Make().String(), EventType: "SPLIT_RULE_MISSING", Scope: platform.NotificationScopeCrossSystem, Priority: "HIGH",
+			Title:         fmt.Sprintf("合同 %s 存在未配置的检测类别，已标记待人工确认", project.Contract),
+			Content:       fmt.Sprintf("项目 %s（客户 %s）的检测类别 %s 缺少拆解规则，请补齐规则或人工核对后确认拆解。", project.ID, project.Customer, strings.Join(missingCategories, "、")),
+			ReferenceType: "project", ReferenceID: project.ID, OccurredAt: event.CreatedAt, IdempotencyKey: project.ID + "-split-rule-missing",
+		}}
+	}
 	if err := repo.ActivateContract(ctx, project, items, event); err != nil {
 		if errors.Is(err, ErrDuplicateContract) {
 			// 竞态窗口：find 阶段两请求都未命中，先到者已建好项目，后到者撞唯一键。
 			// 回读已存在项目并同步盖章状态，按幂等成功返回，不再抛 500。
-			existing, findErr := repo.FindProjectByContractVersion(ctx, filter, project.ContractID, project.ContractVersion)
+			existing, findErr := repo.FindProjectByContract(ctx, filter, project.ContractID, project.Contract)
 			if findErr != nil {
 				return domain.Project{}, findErr
+			}
+			if resolvedNumber && strings.TrimSpace(existing.Contract) != input.ContractNumber {
+				return domain.Project{}, PreconditionError("历史项目合同身份无法安全映射，请核对权威合同编号")
 			}
 			return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
 		}
 		return domain.Project{}, err
 	}
-	// 缺规则的告警是主流程的派生副作用：放在事务提交之后，绝不能影响已经落库的拆解结果。
-	if len(missingCategories) > 0 && plan.MissingRuleAction == domain.SplitMissingHumanConfirm {
-		s.notifyMissingSplitRule(ctx, p, project, missingCategories)
-	}
 	return project, nil
 }
 
-// notifyMissingSplitRule 在检测类别不在检测类别域内、或分组规则无法确定时，
-// 按原型「分组规则缺失时」的默认口径通知业务管理员：标记待人工确认并提醒核对。
-func (s *Service) notifyMissingSplitRule(ctx context.Context, p platform.Principal, project domain.Project, categories []string) {
-	if s.Personnel == nil || len(categories) == 0 {
-		return
-	}
-	recipients := s.roleRecipients(ctx, p.TenantID, "business_admin")
-	if len(recipients) == 0 {
-		return
-	}
-	notification := domain.NotificationMessage{
-		EventID:   ulid.Make().String(),
-		EventType: "SPLIT_RULE_MISSING",
-		// 必须是平台白名单取值，写错会让整条通知被判 400。
-		Scope:    platform.NotificationScopeCrossSystem,
-		Priority: "HIGH",
-		Title:    fmt.Sprintf("合同 %s 存在未配置的检测类别，已标记待人工确认", project.Contract),
-		Content: fmt.Sprintf("项目 %s（客户 %s）按分组规则无法确定以下检测类别的拆解口径：%s。"+
-			"请在「系统配置 · 拆解规则」的检测类别域中补齐，或人工核对拆解结果后再确认拆解。",
-			project.ID, project.Customer, strings.Join(categories, "、")),
-		ReferenceType:  "project",
-		ReferenceID:    project.ID,
-		Recipients:     recipients,
-		OccurredAt:     time.Now().UTC(),
-		IdempotencyKey: project.ID + "-split-rule-missing",
-	}
-	if _, err := s.enqueueBusinessNotification(ctx, p.TenantID, notification); err != nil && s.Logger != nil {
-		s.Logger.Warn("enqueue split rule missing notification failed", "project_id", project.ID, "error", err)
-	}
-}
-
-// enqueueBusinessNotification is the only producer path for notifications that are not attached to
-// the same delivery-event transaction. Keeping this boundary explicit prevents a future feature from
-// silently reintroducing a synchronous platform call and losing the notification after a transient
-// network failure.
+// enqueueBusinessNotification 是未附着于同一交付事件事务的通知
+// 的唯一生产路径。保持该边界明确，防止未来功能
+// 静默重新引入同步平台调用，并在暂时
+// 网络故障后丢失通知。
 func (s *Service) enqueueBusinessNotification(ctx context.Context, tenantID string, message domain.NotificationMessage) (bool, error) {
 	outbox, ok := s.Repo.(NotificationOutboxEnqueuer)
 	if !ok {
@@ -331,32 +328,7 @@ func (s *Service) enqueueBusinessNotification(ctx context.Context, tenantID stri
 	return outbox.EnqueueNotification(ctx, strings.TrimSpace(tenantID), message)
 }
 
-// roleRecipients 按应用角色码解析站内信收件人；目录不可用或该角色下无人时返回空。
-func (s *Service) roleRecipients(ctx context.Context, tenantID, roleCode string) []string {
-	if s.Personnel == nil || strings.TrimSpace(roleCode) == "" {
-		return nil
-	}
-	page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{RoleCodes: []string{strings.TrimSpace(roleCode)}, Page: 1, PageSize: maximumPersonnelNameLookups})
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Warn("resolve role recipients failed", "role_code", roleCode, "error", err)
-		}
-		return nil
-	}
-	recipients := make([]string, 0, len(page.Items))
-	seen := map[string]bool{}
-	for _, person := range page.Items {
-		userID := strings.TrimSpace(person.UserID)
-		if userID == "" || seen[userID] {
-			continue
-		}
-		seen[userID] = true
-		recipients = append(recipients, userID)
-	}
-	return recipients
-}
-
-// syncExistingContract 对已经存在的合同版本做幂等收尾：同步盖章状态并返回既有项目。
+// syncExistingContract 对已经存在的合同做幂等收尾：同步盖章状态并返回既有项目。
 func syncExistingContract(ctx context.Context, repo DeliveryRepository, p platform.Principal, existing domain.Project, stampedUploaded bool) (domain.Project, error) {
 	contractID := firstNonEmpty(existing.ContractID, existing.Contract)
 	event := deliveryEvent(p, existing.ID, "", EventContractStampStatus, map[string]any{"contract_id": contractID, "contract_number": existing.Contract, "contract_version": existing.ContractVersion, "stamped_contract_uploaded": stampedUploaded})
@@ -378,8 +350,14 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
 	}
+	if err := validateProjectTextLength(input.Reason, 1000, "调整原因"); err != nil {
+		return err
+	}
 	if len(input.Items) == 0 {
 		return ValidationError("调整后的服务项清单不能为空")
+	}
+	if err := validateContractServiceTexts(input.Items); err != nil {
+		return err
 	}
 	if err := s.verifyApprovedSupplementContract(ctx, project, input.SupplementContractID); err != nil {
 		return err
@@ -399,7 +377,8 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	for _, source := range input.Items {
 		categories = append(categories, source.Category)
 	}
-	if err := s.validateControlledDetectionCategories(ctx, p.TenantID, categories); err != nil {
+	baselines, err := s.detectionCategoryBaselines(ctx, p.TenantID, categories)
+	if err != nil {
 		return err
 	}
 	for _, source := range input.Items {
@@ -416,21 +395,28 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 			return siteErr
 		}
 		outcome := resolveSplitOutcome(plan, source.Category, mode, "", categoryDomain)
+		outcome.RequiredCodes = normalizeCapabilityCodes(append(outcome.RequiredCodes, baselines[splitCategoryKey(source.Category)]...))
 		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突。
-		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, SiteCode: source.SiteCode, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
+		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, SiteCode: source.SiteCode, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, RequiredCodes: outcome.RequiredCodes, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
 }
 
-// verifyApprovedSupplementContract prevents the decomposition form from turning an arbitrary
-// string into evidence of a supplement agreement. The selected record must be a different,
-// approved contract for the same customer; the contract service remains the authority.
+// verifyApprovedSupplementContract 防止拆解表单将任意字符串
+// 作为补充协议证据。所选记录必须是同一客户下的另一份
+// 已完成审批的合同；合同服务仍是
+// 权威来源。同时接受 `approved` 和 `active`，因为合同服务
+// 在同一事务内执行正常审批副作用（pending -> approved -> active），
+// 并原样返回持久化状态。
 func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project domain.Project, supplementContractID string) error {
 	supplementContractID = strings.TrimSpace(supplementContractID)
 	if supplementContractID == "" {
 		return ValidationError("请选择已审批的补充协议")
 	}
-	if strings.TrimSpace(project.ContractID) != "" && supplementContractID == strings.TrimSpace(project.ContractID) {
+	projectContractID, projectContractNumber := strings.TrimSpace(project.ContractID), strings.TrimSpace(project.Contract)
+	if supplementContractID == projectContractID ||
+		// 历史项目的 contract_id 可能为空而只保留合同号：同样不能把原合同当成补充协议。
+		(projectContractID == "" && projectContractNumber != "" && supplementContractID == projectContractNumber) {
 		return ValidationError("补充协议不能与原合同相同")
 	}
 	if s.Contracts == nil {
@@ -440,7 +426,17 @@ func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project 
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrContractUnavailable, err)
 	}
-	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !strings.EqualFold(strings.TrimSpace(supplement.Status), "approved") {
+	return validateSupplementContract(project, supplementContractID, supplement)
+}
+
+func validateSupplementContract(project domain.Project, supplementContractID string, supplement platform.ApprovedContract) error {
+	// 权威回读后统一比较稳定 ID 与历史编号；旧 contract_id 也可能保存编号。
+	for _, original := range []string{strings.TrimSpace(project.ContractID), strings.TrimSpace(project.Contract)} {
+		if original != "" && (original == strings.TrimSpace(supplement.ID) || original == strings.TrimSpace(supplement.Number)) {
+			return ValidationError("补充协议不能与原合同相同")
+		}
+	}
+	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !supplementContractApprovedStatus(supplement.Status) {
 		return PreconditionError("所选补充协议尚未审批通过")
 	}
 	projectCustomerID := strings.TrimSpace(project.CustomerID)
@@ -457,6 +453,18 @@ func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project 
 		return PreconditionError("补充协议与当前项目不属于同一客户")
 	}
 	return nil
+}
+
+// supplementContractApprovedStatus 是补充协议的业务资格状态集合：
+// 正常审批在同一事务内完成 pending -> approved -> active，因此 approved（历史停留）
+// 与 active（正常完成）都属于审批通过；draft/pending/terminated/archived 不构成调整依据。
+func supplementContractApprovedStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "approved", "active":
+		return true
+	default:
+		return false
+	}
 }
 
 // ScanSlaNotifications 扫描一个租户的 SLA 超期/临近项并投递站内提醒。
@@ -585,6 +593,9 @@ func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID s
 		return err
 	}
 	input.TeamLeadID = strings.TrimSpace(input.TeamLeadID)
+	if err := s.ensurePersonnelNotFrozen(ctx, p.TenantID, input.TeamLeadID); err != nil {
+		return err
+	}
 	if input.TeamLeadID == "" {
 		return ErrValidation
 	}
@@ -608,7 +619,7 @@ func (s *Service) AssignTeam(ctx context.Context, p platform.Principal, itemID s
 		return PreconditionError("所选人员未被授予团队负责人角色，请先维护角色权限")
 	}
 	input.TeamLeadID = canonical
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventTeamAssigned, map[string]any{"team_lead_id": input.TeamLeadID, "expected_version": input.ExpectedVersion}))
 }
 
 // RevokeTeamAssignment 只允许在尚未发布计划的待分配阶段撤销团队负责人。撤销团队负责人
@@ -688,6 +699,9 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	}
 	input.ProjectManagerID = strings.TrimSpace(input.ProjectManagerID)
 	input.EngineerIDs = normalizePersonnelIDs(input.EngineerIDs)
+	if err := s.ensurePersonnelNotFrozen(ctx, p.TenantID, append([]string{input.ProjectManagerID}, input.EngineerIDs...)...); err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
 	if input.ProjectManagerID == "" || len(input.EngineerIDs) == 0 {
 		return domain.ConflictCheckResult{}, ErrValidation
 	}
@@ -759,12 +773,9 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 		}
 	}
 	result := checkCapabilities(required, ids, caps)
-	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts}
+	payload := map[string]any{"project_manager_id": input.ProjectManagerID, "engineer_ids": input.EngineerIDs, "required_codes": required, "conflict_status": map[bool]string{true: "PASSED", false: "CONFLICT"}[result.Passed], "conflicts": result.Conflicts, "expected_version": input.ExpectedVersion}
 	if err := s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventExecutionTeamAssigned, payload)); err != nil {
 		return domain.ConflictCheckResult{}, err
-	}
-	if !result.Passed {
-		s.fireConflictWarning(ctx, p, itemID, result.Conflicts)
 	}
 	return result, nil
 }
@@ -818,6 +829,9 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 	}); err != nil {
 		return err
 	}
+	if err := validateImplementationPlanTexts(input); err != nil {
+		return err
+	}
 	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
 	end, e2 := time.Parse(time.RFC3339, input.PlannedEnd)
 	if e1 != nil || e2 != nil {
@@ -836,6 +850,7 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 		return err
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventImplementationPlanned, map[string]any{
+		"expected_version":      input.ExpectedVersion,
 		"planned_start":         input.PlannedStart,
 		"planned_end":           input.PlannedEnd,
 		"site_plan":             input.SitePlan,
@@ -917,10 +932,13 @@ func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, i
 	if err != nil {
 		return domain.PlanResource{}, err
 	}
+	// 校验边界：留空时段表示“全程使用”，此时校验必须以计划开始日为准；
+	// 用零值时间与设备检定开始日比较会把“检定从计划开始日生效”的有效设备误判为越界。
+	validationStart := effectiveWindowStart(start, planStart)
 	validUntil := ""
 	if resourceType == "EQUIPMENT" {
 		// 设备检定时段以日期表达：覆盖到当天即算覆盖，不因时分量产生边界误判。
-		if !capability.ValidFrom.IsZero() && dayOf(capability.ValidFrom).After(dayOf(start)) {
+		if !capability.ValidFrom.IsZero() && dayOf(capability.ValidFrom).After(dayOf(validationStart)) {
 			return domain.PlanResource{}, fmt.Errorf("%s「%s」的检定有效期从 %s 开始，不覆盖使用时段开始日 %s",
 				label, capability.ResourceName, capability.ValidFrom.Format("2006-01-02"), start.Format("2006-01-02"))
 		}
@@ -1084,7 +1102,7 @@ func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, 
 	if err := s.verifyExpectedVersion(ctx, p, reportPhasePermission(phase), itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase, "expected_version": input.ExpectedVersion}))
 }
 
 func (s *Service) ListReportRevisions(ctx context.Context, p platform.Principal, itemID string) ([]domain.ReportRevision, error) {
@@ -1166,6 +1184,17 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 	if err != nil {
 		return err
 	}
+	if err := validateTravelTexts(input.Travel); err != nil {
+		return err
+	}
+	if err := validateProjectTextLength(input.Notes, 2000, "实施准备备注"); err != nil {
+		return err
+	}
+	for index, equipment := range input.Equipment {
+		if err := validateProjectTextLength(equipment.Note, 500, fmt.Sprintf("第 %d 行设备备注", index+1)); err != nil {
+			return err
+		}
+	}
 	if err := s.verifyExpectedVersion(ctx, p, "project.implementation.plan", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
@@ -1199,6 +1228,7 @@ func (s *Service) StartPreparation(ctx context.Context, p platform.Principal, it
 		return err
 	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventPreparationStarted, map[string]any{
+		"expected_version":  input.ExpectedVersion,
 		"travel_request_id": travel.RequestID,
 		"travel":            travel,
 		"notes":             strings.TrimSpace(input.Notes),
@@ -1348,6 +1378,9 @@ func rollbackKindAllowed(kind string, item domain.ServiceItem) bool {
 
 // RequestRollback 把现场/报告回退变成双人复核：申请本身不改变状态，也不会删除现场或报告证据。
 func (s *Service) RequestRollback(ctx context.Context, p platform.Principal, itemID string, input domain.RollbackRequestInput) (string, error) {
+	if err := validateProjectTextLength(input.Reason, 1000, "回退原因"); err != nil {
+		return "", err
+	}
 	if err := s.authorizeServiceItem(ctx, p, "project.rollback.request", itemID); err != nil {
 		return "", err
 	}
@@ -1403,6 +1436,9 @@ func hasPendingRollback(events []domain.DeliveryEvent, itemID, kind string) bool
 }
 
 func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.RollbackDecisionInput) error {
+	if err := validateProjectTextLength(input.Comment, 1000, "回退审批意见"); err != nil {
+		return err
+	}
 	if err := s.authorizeServiceItem(ctx, p, "project.rollback.approve", itemID); err != nil {
 		return err
 	}
@@ -1458,6 +1494,9 @@ func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, item
 
 // WithdrawRollback 仅允许原申请人在审批前撤回，避免用“驳回”冒充申请人取消。
 func (s *Service) WithdrawRollback(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.RollbackWithdrawInput) error {
+	if err := validateProjectTextLength(input.Reason, 1000, "撤回回退原因"); err != nil {
+		return err
+	}
 	if err := s.authorizeServiceItem(ctx, p, "project.rollback.request", itemID); err != nil {
 		return err
 	}
@@ -1506,6 +1545,9 @@ func (s *Service) WithdrawRollback(ctx context.Context, p platform.Principal, it
 
 // RequestReportCorrection 只允许针对已签发或已归档的当前版本提出更正；申请不改变旧报告有效性。
 func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Principal, itemID string, input domain.ReportCorrectionRequestInput) (string, error) {
+	if err := validateProjectTextLength(input.Reason, 1000, "报告更正原因"); err != nil {
+		return "", err
+	}
 	if err := s.authorizeServiceItem(ctx, p, "project.report.correction.request", itemID); err != nil {
 		return "", err
 	}
@@ -1534,6 +1576,9 @@ func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Princi
 }
 
 func (s *Service) DecideReportCorrection(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.ReportCorrectionDecisionInput) error {
+	if err := validateProjectTextLength(input.Comment, 1000, "报告更正审批意见"); err != nil {
+		return err
+	}
 	if err := s.authorizeServiceItem(ctx, p, "project.report.correction.approve", itemID); err != nil {
 		return err
 	}
@@ -1751,6 +1796,12 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	if strings.TrimSpace(input.RawData) == "" || strings.TrimSpace(input.Environment) == "" {
 		return ErrValidation
 	}
+	if err := validateProjectTextLength(input.RawData, 2000, "现场实测数据"); err != nil {
+		return err
+	}
+	if err := validateProjectTextLength(input.Environment, 500, "现场环境"); err != nil {
+		return err
+	}
 	filter, err := authorizeProjectScope(p, "project.field.execute")
 	if err != nil {
 		return err
@@ -1781,8 +1832,8 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldRecordSubmitted, payload, operationID, capturedAt))
 }
 
-// CheckInField records GPS and device accuracy before field work. It is replay-safe
-// so an offline client may submit the same operation after connectivity returns.
+// CheckInField 在现场作业前记录 GPS 和设备精度，支持安全重放，
+// 使离线客户端恢复连接后可提交相同操作。
 func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCheckInInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
 		return err
@@ -1792,6 +1843,9 @@ func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID
 	}
 	if input.AccuracyMeters <= 0 || input.AccuracyMeters > 10000 {
 		return ValidationError("签到定位精度必须在 0 到 10000 米之间")
+	}
+	if err := validateProjectTextLength(input.DeviationReason, 1000, "签到偏离原因"); err != nil {
+		return err
 	}
 	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, true)
 	if err != nil {
@@ -1804,7 +1858,7 @@ func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID
 	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldCheckedIn, payload, operationID, capturedAt))
 }
 
-// CaptureFieldSignature stores an immutable signature artifact and audit timestamp.
+// CaptureFieldSignature 存储不可变签名文件及审计时间戳。
 func (s *Service) CaptureFieldSignature(ctx context.Context, p platform.Principal, itemID string, input domain.FieldSignatureInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
 		return err
@@ -1902,6 +1956,9 @@ func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, ite
 	if strings.TrimSpace(input.Description) == "" {
 		return "", ErrValidation
 	}
+	if err := validateProjectTextLength(input.Description, 1000, "偏离描述"); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(input.EvidenceURL) != "" {
 		return "", ValidationError("偏离证据必须通过统一文件网关上传")
 	}
@@ -1944,6 +2001,9 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 	if decision != "RELEASE" && decision != "TERMINATE" && decision != "RETEST" {
 		return ErrValidation
 	}
+	if err := validateProjectTextLength(input.Comment, 1000, "偏离处理意见"); err != nil {
+		return err
+	}
 	if decision == "TERMINATE" && strings.TrimSpace(input.Comment) == "" {
 		return ValidationError("终止服务项时必须填写终止原因")
 	}
@@ -1957,8 +2017,14 @@ func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Princ
 	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
 		return err
 	}
+	if err := validateProjectTextLength(input.IncompleteReason, 1000, "现场完成缺项原因"); err != nil {
+		return err
+	}
+	if err := s.verifyExpectedVersion(ctx, p, "project.field.complete", itemID, input.ExpectedVersion); err != nil {
+		return err
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, map[string]any{
-		"confirmed_by": p.UserID, "incomplete_reason": strings.TrimSpace(input.IncompleteReason),
+		"confirmed_by": p.UserID, "incomplete_reason": strings.TrimSpace(input.IncompleteReason), "expected_version": input.ExpectedVersion,
 	}))
 }
 
@@ -2001,9 +2067,9 @@ const (
 	capabilityEffectiveNotYetEffective = "NOT_YET_EFFECTIVE"
 )
 
-// deriveCapabilityEffectiveStatus keeps the persisted administration switch separate from the
-// current business state. Equipment validity is date-based, so an ACTIVE row becomes ineffective
-// automatically on the day after valid_until without requiring a scheduler or a write on read.
+// deriveCapabilityEffectiveStatus 将持久化管理开关与当前业务状态分离。
+// 设备有效性基于日期，因此 ACTIVE 行会在 valid_until
+// 次日自动失效，无需调度器或读取时写入。
 func deriveCapabilityEffectiveStatus(item domain.Capability, now time.Time) domain.Capability {
 	item.EffectiveStatus = capabilityEffectiveDisabled
 	item.StatusReason = "已手工停用"
@@ -2118,8 +2184,8 @@ func (s *Service) UpsertCapability(ctx context.Context, p platform.Principal, it
 	item.UserID = person.UserID
 	item.ResourceName = person.DisplayName
 	item.IdentityStatus = domain.IdentityStatusActive
-	// Import confirmation can race another edit after preview. Never rebind an
-	// existing numbered qualification to a different identity during upsert.
+	// 导入确认可能与预览后的其他编辑竞争。执行 upsert 时，
+	// 不得将已有编号资质重新绑定到其他身份。
 	for _, current := range existing {
 		if item.ResourceID != "" && current.ResourceID == item.ResourceID && current.UserID != "" && current.UserID != item.UserID {
 			return item, ValidationError("资质编号已属于其他人员，不能覆盖")
@@ -2237,10 +2303,10 @@ func (s *Service) assignmentRoleUserIDs(ctx context.Context, roleCode string) (m
 	return allowed, nil
 }
 
-// ListQualifiedPersonnel is the only assignment picker source. A person must
-// simultaneously have an active identity-linked PERSON qualification record
-// and the requested effective platform role. Personnel dates do not constrain
-// assignment; only equipment calibration uses a validity window.
+// ListQualifiedPersonnel 是唯一指派选择器来源。人员必须
+// 同时拥有有效、关联身份的 PERSON 资质记录，
+// 以及请求的平台有效角色。人员日期不约束
+// 指派，只有设备校准使用有效期窗口。
 func (s *Service) ListQualifiedPersonnel(ctx context.Context, p platform.Principal, roleCode, keyword string, page, pageSize int) (domain.QualifiedPersonnelPage, error) {
 	result := domain.QualifiedPersonnelPage{Items: []domain.QualifiedPersonnel{}}
 	if !p.Has("project.read") && !p.Has("project.team.assign") && !p.Has("project.execution.assign") {
@@ -2450,6 +2516,12 @@ func (s *Service) upsertEquipment(ctx context.Context, p platform.Principal, ite
 	if item.ResourceType != "EQUIPMENT" || item.ResourceID == "" || item.ResourceName == "" || len(item.Codes) == 0 {
 		return item, ErrValidation
 	}
+	if err := validateProjectTextLength(item.ResourceID, 64, "设备编号"); err != nil {
+		return item, err
+	}
+	if err := validateProjectTextLength(item.ResourceName, 128, "设备名称"); err != nil {
+		return item, err
+	}
 	repo, e := s.deliveryRepo()
 	if e != nil {
 		return item, e
@@ -2477,7 +2549,7 @@ func (s *Service) upsertEquipment(ctx context.Context, p platform.Principal, ite
 	item.Status = firstNonEmpty(item.Status, "ACTIVE")
 	var saved domain.Capability
 	if createOnly {
-		// Generated import numbers must never turn an insert race into an overwrite.
+		// 生成的导入编号绝不能将插入竞争变为覆盖。
 		creator, ok := repo.(EquipmentImportCreator)
 		if !ok {
 			return item, ValidationError("设备导入安全写入暂不可用，请稍后重试")
@@ -2530,7 +2602,6 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 		}
 		return err
 	}
-	s.fireAutomations(ctx, event)
 	return nil
 }
 
@@ -2558,33 +2629,70 @@ func (s *Service) attachNotification(ctx context.Context, event *domain.Delivery
 	}
 }
 
-// DispatchNotificationOutbox leases durable notifications and publishes them with bounded retry.
-// The producer transaction is already committed; delivery is at-least-once and the platform
-// idempotency key makes retries safe.
-func (s *Service) DispatchNotificationOutbox(ctx context.Context, workerID string, limit int, now time.Time) (int, error) {
+// DispatchNotificationOutbox 为持久通知取得租约，并通过有界重试发布。
+// 生产事务已经提交；投递至少一次，平台
+// 幂等键保证重试安全。
+func (s *Service) DispatchNotificationOutbox(ctx context.Context, tenantID, workerID string, limit int, now time.Time) (int, error) {
+	if err := ValidateOutboxIdentity(tenantID, workerID); err != nil {
+		return 0, err
+	}
 	repo, ok := s.Repo.(NotificationOutboxRepository)
 	if !ok {
 		return 0, errors.New("notification outbox repository unavailable")
 	}
+	if s.CheckBusinessLicense != nil {
+		if err := s.CheckBusinessLicense(ctx); err != nil {
+			return 0, err
+		}
+	}
 	if s.Notifications == nil {
 		return 0, nil
 	}
-	items, err := repo.ClaimNotificationOutbox(ctx, workerID, limit, now)
-	if err != nil {
-		return 0, err
+	if limit <= 0 || limit > 50 {
+		limit = 50
 	}
+	started := time.Now()
 	sent := 0
-	for _, item := range items {
+	for processed := 0; processed < limit && time.Since(started) < 4*time.Minute; processed++ {
+		if err := ctx.Err(); err != nil {
+			return sent, err
+		}
+		if s.CheckBusinessLicense != nil {
+			if err := s.CheckBusinessLicense(ctx); err != nil {
+				return sent, err
+			}
+		}
+		items, err := repo.ClaimNotificationOutbox(ctx, tenantID, workerID, 1, now.Add(time.Since(started)))
+		if err != nil {
+			return sent, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		item := items[0]
+		if s.CheckBusinessLicense != nil {
+			if err := s.CheckBusinessLicense(ctx); err != nil {
+				return sent, err
+			}
+		}
 		message := item.Message
-		err := s.Notifications.Publish(ctx, platform.NotificationEvent{
+		err = s.Notifications.Publish(ctx, platform.NotificationEvent{
 			EventID: message.EventID, EventType: message.EventType, Scope: message.Scope,
 			Priority: message.Priority, Title: message.Title, Content: message.Content,
 			ReferenceType: message.ReferenceType, ReferenceID: message.ReferenceID,
 			Recipients: message.Recipients, OccurredAt: message.OccurredAt,
 			IdempotencyKey: message.IdempotencyKey,
 		})
+		// An accepted publication may cross a license boundary. Leave its lease intact;
+		// recovery republishes the persisted payload and key without spending an attempt.
+		if s.CheckBusinessLicense != nil {
+			if checkErr := s.CheckBusinessLicense(ctx); checkErr != nil {
+				return sent, checkErr
+			}
+		}
+		ackNow := now.Add(time.Since(started))
 		if err == nil {
-			if markErr := repo.MarkNotificationOutboxSent(ctx, item.ID, workerID, now); markErr != nil {
+			if markErr := repo.MarkNotificationOutboxSent(ctx, tenantID, item.ID, workerID, ackNow); markErr != nil {
 				return sent, markErr
 			}
 			sent++
@@ -2592,7 +2700,7 @@ func (s *Service) DispatchNotificationOutbox(ctx context.Context, workerID strin
 		}
 		dead := item.RetryCount+1 >= 12
 		backoff := time.Duration(1<<min(int(item.RetryCount), 8)) * time.Minute
-		if markErr := repo.MarkNotificationOutboxRetry(ctx, item.ID, workerID, now.Add(backoff), dead); markErr != nil {
+		if markErr := repo.MarkNotificationOutboxRetry(ctx, tenantID, item.ID, workerID, ackNow, ackNow.Add(backoff), dead); markErr != nil {
 			return sent, markErr
 		}
 		if s.Logger != nil {
@@ -2738,184 +2846,6 @@ func payloadTextList(payload map[string]any, key string) []string {
 		}
 	}
 	return out
-}
-
-// fireAutomations 在事件落库后按启用的「自动化触发」规则追加 AUTOMATION_TRIGGERED
-// 派生事件，让配置表中的 trigger/target 真正参与运行时行为。未命中任何规则时不产生
-// 额外事件；派生事件不再递归触发下一次自动化，也绝不因配置读取失败回滚主事件。
-func (s *Service) fireAutomations(ctx context.Context, event domain.DeliveryEvent) {
-	if event.Type == EventAutomationTriggered || event.Type == EventWarningTriggered {
-		return
-	}
-	repo, e := s.deliveryRepo()
-	if e != nil {
-		return
-	}
-	rules, err := s.Repo.ListRules(ctx, event.TenantID, "automations")
-	if err != nil {
-		return
-	}
-	targets := make([]string, 0, len(rules))
-	for _, rule := range rules {
-		if !rule.Enabled || strings.TrimSpace(rule.Trigger) != event.Type {
-			continue
-		}
-		target := strings.TrimSpace(rule.Target)
-		// 历史数据可能保存过“通知技术总监 / 创建工单”等自由文本。只有当前应用
-		// 角色目录中的角色码才是可执行目标，避免旧的展示性描述继续生成假动作事件。
-		if validateCatalogRole(target) != nil {
-			continue
-		}
-		targets = append(targets, target)
-	}
-	if len(targets) == 0 {
-		return
-	}
-	triggered := event
-	triggered.Type = EventAutomationTriggered
-	triggered.CreatedAt = time.Now().UTC().Add(time.Millisecond)
-	triggered.Payload = map[string]any{"trigger": event.Type, "targets": targets}
-	s.persistDerivedEvent(ctx, "automation", event, triggered, repo)
-	s.notifyAutomationTargets(ctx, event, targets)
-}
-
-// notifyAutomationTargets 把自动化规则的 target 解析成平台用户并投递站内信。
-// target 约定为项目系统的应用角色码（例如 technical_director / quality_manager），
-// 通过负责人目录按 role_code 解析成具体人员；不引入自由文本收件人，
-// 避免"配了目标却没人收到"。未开通站内信集成、目录不可用或该角色下无人时静默跳过：
-// 通知是派生副作用，绝不能影响已提交的主事件。
-func (s *Service) notifyAutomationTargets(ctx context.Context, event domain.DeliveryEvent, targets []string) {
-	if s.Personnel == nil || len(targets) == 0 {
-		return
-	}
-	recipients := make([]string, 0, len(targets))
-	seen := make(map[string]struct{}, len(targets))
-	for _, target := range targets {
-		roleCode := strings.TrimSpace(target)
-		if roleCode == "" {
-			continue
-		}
-		page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{RoleCodes: []string{roleCode}, Page: 1, PageSize: maximumPersonnelNameLookups})
-		if err != nil {
-			if s.Logger != nil {
-				s.Logger.Warn("resolve automation notification recipients failed", "role_code", roleCode, "error", err)
-			}
-			continue
-		}
-		for _, person := range page.Items {
-			userID := strings.TrimSpace(person.UserID)
-			if userID == "" {
-				continue
-			}
-			if _, exists := seen[userID]; exists {
-				continue
-			}
-			seen[userID] = struct{}{}
-			recipients = append(recipients, userID)
-		}
-	}
-	if len(recipients) == 0 {
-		return
-	}
-	notification := domain.NotificationMessage{
-		EventID:   ulid.Make().String(),
-		EventType: EventAutomationTriggered,
-		// 必须用平台白名单取值：此前写死 "application"，平台只接受 CROSS_SYSTEM|PLATFORM，
-		// 导致自动化通知必然被判 400，且失败只记 Warn 不易察觉。
-		Scope:         platform.NotificationScopeCrossSystem,
-		Priority:      "NORMAL",
-		Title:         "项目自动化规则触发",
-		Content:       fmt.Sprintf("规则命中的事件：%s。项目 %s，服务项 %s。", event.Type, event.ProjectID, event.ServiceItemID),
-		ReferenceType: "service_item",
-		ReferenceID:   event.ServiceItemID,
-		Recipients:    recipients,
-		OccurredAt:    time.Now().UTC(),
-		// 同一源事件只投递一次，平台按幂等键去重。
-		IdempotencyKey: event.ID + "-automation-notification",
-	}
-	if _, err := s.enqueueBusinessNotification(ctx, event.TenantID, notification); err != nil && s.Logger != nil {
-		s.Logger.Warn("enqueue automation notification failed", "event_id", event.ID, "error", err)
-	}
-}
-
-// persistDerivedEvent 写入派生事件。派生事件是主事件提交后的 best-effort 副作用，
-// 不能回滚主流程，但"配了规则却没生效"必须可诊断：先重试几次（连接抖动通常是瞬时的），
-// 仍然失败才放弃并记录，而不是静默吞掉。
-func (s *Service) persistDerivedEvent(ctx context.Context, kind string, source, event domain.DeliveryEvent, repo DeliveryRepository) {
-	const attempts = 3
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		if lastErr = repo.ApplyDeliveryEvent(ctx, event); lastErr == nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			lastErr = ctx.Err()
-		case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
-			continue
-		}
-		break
-	}
-	s.logDerivedEventFailure(kind, source, lastErr)
-}
-
-// logDerivedEventFailure 记录派生事件写入失败。派生事件不回滚主事件，
-// 但静默吞掉会让"规则配了却没触发"变成无法诊断的问题。
-func (s *Service) logDerivedEventFailure(kind string, source domain.DeliveryEvent, err error) {
-	if s.Logger == nil {
-		return
-	}
-	s.Logger.Warn("derived delivery event was not persisted",
-		"kind", kind, "source_event", source.Type, "project_id", source.ProjectID,
-		"service_item_id", source.ServiceItemID, "error", err)
-}
-
-// fireConflictWarning 在任务分配/执行团队指派产生能力冲突且有启用的「冲突预警规则」时，
-// 追加 WARNING_TRIGGERED 派生事件，把冲突明细纳入项目事件流。非破坏性：失败不影响主流程。
-func (s *Service) fireConflictWarning(ctx context.Context, p platform.Principal, itemID string, conflicts []string) {
-	rules, err := s.Repo.ListRules(ctx, p.TenantID, "warning-rules")
-	if err != nil {
-		return
-	}
-	// check_type 决定规则覆盖哪一类冲突，threshold 决定至少要几项命中才告警。
-	// 两个字段都必须参与判定，否则"配了规则就无差别触发"等于配置没有意义。
-	matchedRules := make([]string, 0, len(rules))
-	matchedConflicts := make([]string, 0, len(conflicts))
-	threshold := 0
-	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-		hits := make([]string, 0, len(conflicts))
-		for _, conflict := range conflicts {
-			if warningRuleMatches(rule, conflict) {
-				hits = append(hits, conflict)
-			}
-		}
-		required := warningThreshold(rule)
-		if len(hits) < required {
-			continue
-		}
-		matchedRules = append(matchedRules, rule.Name)
-		matchedConflicts = append(matchedConflicts, hits...)
-		if threshold == 0 || required < threshold {
-			threshold = required
-		}
-	}
-	if len(matchedRules) == 0 {
-		return
-	}
-	repo, e := s.deliveryRepo()
-	if e != nil {
-		return
-	}
-	source := deliveryEvent(p, "", itemID, EventWarningTriggered, nil)
-	event := deliveryEvent(p, "", itemID, EventWarningTriggered, map[string]any{
-		"conflicts": uniqueStrings(matchedConflicts),
-		"rules":     matchedRules,
-		"threshold": threshold,
-	})
-	s.persistDerivedEvent(ctx, "warning", source, event, repo)
 }
 
 // conflictKind 把能力校验产生的冲突描述归类，供预警规则的 check_type 匹配。
@@ -3127,9 +3057,9 @@ func checkCapabilities(required, resources []string, items []domain.Capability) 
 	return domain.ConflictCheckResult{Passed: len(conflicts) == 0, Conflicts: conflicts}
 }
 
-// qualifiedUserID accepts either the qualification resource number or its
-// linked platform user id, but always returns the platform user id for storage
-// in workflow responsibility fields and subsequent current-user scoping.
+// qualifiedUserID 接受资质资源编号或其关联的
+// 平台用户 ID，但始终返回平台用户 ID，用于存入
+// 工作流责任字段及后续当前用户范围限定。
 func qualifiedUserID(candidate string, items []domain.Capability) (string, bool) {
 	candidate = strings.TrimSpace(candidate)
 	for _, item := range items {
@@ -3142,4 +3072,13 @@ func qualifiedUserID(candidate string, items []domain.Capability) (string, bool)
 		}
 	}
 	return "", false
+}
+
+// effectiveWindowStart 返回用于设备检定校验的窗口开始日：
+// 行级时段留空表示“全程使用”，此时取计划开始日；否则取行级填写值。
+func effectiveWindowStart(windowStart, planStart time.Time) time.Time {
+	if windowStart.IsZero() {
+		return planStart
+	}
+	return windowStart
 }

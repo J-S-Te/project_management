@@ -16,7 +16,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/auditctx"
 	"github.com/j-s-te/project-management/internal/domain"
+	"github.com/j-s-te/project-management/internal/handover"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
 )
@@ -33,6 +35,7 @@ type OIDCFlow interface {
 }
 
 type Handler struct {
+	handover *handover.Service
 	service  *application.Service
 	identity Identity
 	audit    platform.AuditReporter
@@ -41,9 +44,13 @@ type Handler struct {
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
 type RouterOptions struct {
-	CommercialLicense    CommercialLicenseGate
-	ContractIntegration  *ContractIntegrationOptions
+	CommercialLicense   CommercialLicenseGate
+	ContractIntegration *ContractIntegrationOptions
+	HandoverIntegration *HandoverIntegrationOptions
+	// HandoverService 是人员交接协议的领域服务；与 HandoverIntegration 一并注入。
+	HandoverService      *handover.Service
 	DashboardIntegration *DashboardIntegrationOptions
+	ProjectSnapshotLimits application.ProjectSnapshotLimits
 	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
 	// 就绪检查直接判为 not_ready，避免带着缺失的列/表对外提供写服务（写路径只会报 500）。
 	PendingMigrations []string
@@ -51,6 +58,9 @@ type RouterOptions struct {
 
 func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, options ...RouterOptions) *gin.Engine {
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
+	if len(options) > 0 {
+		h.handover = options[0].HandoverService
+	}
 	router := gin.New()
 	router.Use(gin.Recovery(), requestID(), securityHeaders())
 	auditStatus := "disabled"
@@ -62,6 +72,13 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	var routerOptions RouterOptions
 	if len(options) > 0 {
 		routerOptions = options[0]
+	}
+	snapshotLimits := routerOptions.ProjectSnapshotLimits
+	if snapshotLimits == (application.ProjectSnapshotLimits{}) {
+		snapshotLimits = application.DefaultProjectSnapshotLimits()
+	}
+	if err := snapshotLimits.Validate(); err != nil {
+		panic(err)
 	}
 	pendingMigrations := routerOptions.PendingMigrations
 	router.Use(commercialLicenseMiddleware(routerOptions.CommercialLicense))
@@ -88,10 +105,20 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		internal.POST("/contracts/activate", h.activateContract)
 		internal.GET("/contracts/detection-categories", h.listContractDetectionCategories)
 	}
+	if integration := routerOptions.HandoverIntegration; integration != nil && integration.Enabled {
+		internal := router.Group("/internal/v1")
+		internal.Use(h.authenticateHandoverIntegration(*integration), h.auditWrites())
+		internal.POST("/handover/freeze", h.handoverFreeze)
+		internal.GET("/handover/responsibilities", h.handoverResponsibilities)
+		internal.POST("/handover/transfers", h.handoverTransfer)
+		internal.GET("/handover/transfers/:item_id", h.handoverReceipt)
+		internal.POST("/handover/complete", h.handoverComplete)
+	}
 	if integration := routerOptions.DashboardIntegration; integration != nil && integration.Enabled {
 		daInternal := router.Group("/internal/v1")
 		daInternal.Use(h.authenticateDashboardIntegration(*integration), h.auditWrites())
 		daInternal.GET("/dashboard", h.dashboard)
+		daInternal.GET("/dashboard/projects/snapshot", h.projectSnapshot(snapshotLimits))
 	}
 	if flow, ok := identity.(OIDCFlow); ok {
 		router.GET("/auth/login", func(c *gin.Context) { flow.Login(c.Writer, c.Request) })
@@ -109,10 +136,13 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/navigation", require("project.read"), h.navigation)
 	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
 	api.GET("/rule-configuration-catalog", require("project.read"), h.ruleConfigurationCatalog)
+	api.GET("/audit-outbox/failed", require("project_rule.manage"), h.listFailedAuditEvents)
+	api.POST("/audit-outbox/failed/:id/retry", require("project_rule.manage"), h.retryFailedAuditEvent)
 	api.GET("/dashboard", require("project.read"), h.dashboard)
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.GET("/projects-monitoring", require("project.read"), h.monitorProjects)
 	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
+	api.GET("/projects/:id/supplement-contracts", require("project.decomposition.manage"), h.listSupplementContracts)
 	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
 	api.POST("/projects", require("project.create"), h.createProject)
 	api.POST("/contracts/activate", require("project.contract.import"), h.activateContract)
@@ -278,6 +308,24 @@ func (h *Handler) authenticate() gin.HandlerFunc {
 		c.Next()
 	}
 }
+func (h *Handler) listFailedAuditEvents(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	items, err := h.service.ListFailedAuditEvents(c.Request.Context(), principal(c), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) retryFailedAuditEvent(c *gin.Context) {
+	if err := h.service.RetryFailedAuditEvent(c.Request.Context(), principal(c), c.Param("id")); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"id": c.Param("id"), "status": "retry"})
+}
+
 func require(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !principal(c).Has(permission) {
@@ -312,7 +360,7 @@ func principal(c *gin.Context) platform.Principal {
 
 // auditWrites 在业务 handler 完成后把写请求结果上报平台审计。
 //
-// 安全理由（SEC-D4b）：原实现对审计管道 fail-open —— reporter 为 nil 时直接放行，
+// 安全理由（SEC-D4b）：原实现对审计管道 失败时放行 —— reporter 为 nil 时直接放行，
 // Report 失败只记一行 error（缺路由与请求 id），且从不拒绝请求；凭据失效或 ingest
 // 故障时项目审批/回滚/报告推进等所有写入都没有审计且不可见。现在：
 //  1. 上报失败一律 error 日志（含路由与请求 id）；
@@ -321,7 +369,7 @@ func principal(c *gin.Context) platform.Principal {
 //     - 写请求与敏感读（导出/下载/令牌签发，见 sensitiveRead）先缓冲响应，Report 成功
 //     才提交给客户端；失败则丢弃业务响应并返回 503，保证“审计写不进去 ⇒ 客户端拿
 //     不到成功”（AUD-2026-006：敏感读此前不缓冲，503 追加在已发出的数据之后，形同虚设）；
-//     - 响应体超过 maxAuditBufferBytes 时降级为 write-through 并记 Warn：数据照常
+//     - 响应体超过 maxAuditBufferBytes 时降级为 直接透传写入 并记 Warn：数据照常
 //     返回，审计失守只能靠日志追溯——避免把大体积导出整包压进内存。
 //
 // 非强制模式保持原有放行语义，仅补上可告警的错误日志。
@@ -372,7 +420,7 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 			status = http.StatusOK
 		}
 		if buffered != nil && buffered.Degraded() {
-			// 响应超过缓冲上限已降级为 write-through：数据已在发送途中，审计失守时
+			// 响应超过缓冲上限已降级为 直接透传写入：数据已在发送途中，审计失守时
 			// 无法用 503 撤回，只能记 Warn 留下可追溯痕迹（内存安全优先于事后拒绝，
 			// 否则大体积导出会把整包响应压进内存）。审计失败本身仍走下方 error 日志。
 			logger.WarnContext(c.Request.Context(), "audit buffered response exceeded limit, flushed without audit gating",
@@ -383,7 +431,12 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 			)
 		}
 		p := principal(c)
-		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: requestID, Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), UserLoginIP: requestClientIP(c.Request)}
+		// AUD-IP-2026：交付事件在业务事务内写审计时读同一份来源信息。
+		clientIP, ipSource := requestClientIP(c.Request), requestIPSource(c.Request)
+		c.Request = c.Request.WithContext(auditctx.WithMeta(c.Request.Context(), auditctx.Meta{
+			ClientIP: clientIP, IPSource: ipSource,
+		}))
+		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: requestID, Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), ClientIP: clientIP, IPSource: ipSource}
 		if err := h.audit.Report(c.Request.Context(), event); err != nil {
 			logger.ErrorContext(c.Request.Context(), "report platform audit failed",
 				"route", route,
@@ -474,12 +527,12 @@ func sensitiveRead(path string) bool {
 	return containsAnyAudit(lowered, "embed", "download", "export")
 }
 
-// requestClientIP extracts a public client address from the managed frontend
-// proxy. X-Real-IP is authoritative; the right-most XFF value is used as a
-// fallback so a client-supplied left-most value cannot spoof audit records.
-// Forwarding headers are only honoured when the direct peer is the trusted
-// reverse proxy, so a directly reachable service cannot have its audit source
-// address spoofed by client-supplied headers.
+// requestClientIP 从受管前端代理提取公开客户端
+// 地址。X-Real-IP 为权威值，最右侧 XFF 值作为
+// 回退，防止客户端提供的最左值伪造审计记录。
+// 仅在直接对端是可信反向代理时信任转发头，
+// 确保可直接访问的服务不会被客户端请求头
+// 伪造审计源地址。
 func requestClientIP(request *http.Request) string {
 	if request == nil {
 		return ""
@@ -505,10 +558,10 @@ func requestClientIP(request *http.Request) string {
 	return ""
 }
 
-// trustedProxyPeer reports whether the direct peer address belongs to the
-// trusted reverse proxy (loopback or private/link-local Docker gateway).
-// A public peer means the service is directly reachable, so client-supplied
-// forwarding headers must not be trusted.
+// trustedProxyPeer 判断直接对端地址是否属于
+// 可信反向代理（回环或私有、链路本地 Docker 网关）。
+// 公网对端表示服务可被直接访问，因此不能信任
+// 客户端提供的转发头。
 func trustedProxyPeer(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
 	if err != nil {
@@ -521,12 +574,30 @@ func trustedProxyPeer(remoteAddr string) bool {
 	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
 }
 
-func publicClientIP(value string) *netip.Addr {
+func publicClientIP(value string) *netip.Addr { return clientIPAddress(value) }
+
+// clientIPAddress 接受任意合法单播地址（含办公网/VPN/回环）。
+// AUD-IP-2026：按地址段过滤会把真实办公网地址丢掉，审计只能显示"未采集"。
+func clientIPAddress(value string) *netip.Addr {
 	addr, err := netip.ParseAddr(strings.TrimSpace(value))
-	if err != nil || !addr.IsGlobalUnicast() || addr.IsPrivate() {
+	if err != nil || addr.IsUnspecified() || addr.IsMulticast() {
 		return nil
 	}
 	return &addr
+}
+
+// requestIPSource 标记操作地址的来源：经可信代理解析还是直连观察。
+func requestIPSource(request *http.Request) string {
+	if request == nil {
+		return "UNKNOWN"
+	}
+	if trustedProxyPeer(request.RemoteAddr) {
+		return "TRUSTED_PROXY"
+	}
+	if requestClientIP(request) != "" {
+		return "DIRECT"
+	}
+	return "UNKNOWN"
 }
 func auditResource(path string) string {
 	if strings.Contains(path, "service-items") {
@@ -550,8 +621,8 @@ func (h *Handler) me(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
 }
 
-// navigation is the server-owned workbench contract. The browser may hide or order
-// navigation items, but it must not infer a role from display labels or expand permissions.
+// navigation 是服务端定义的工作台契约。浏览器可以隐藏或排序
+// 导航项，但不得从显示标签推断角色或扩大权限。
 func (h *Handler) navigation(c *gin.Context) {
 	p := principal(c)
 	sections := navigationSections(p.Roles)
@@ -633,8 +704,8 @@ func navigationSections(roles []string) []string {
 		}
 	}
 	if len(sections) == 0 {
-		// Unknown roles receive the least-privileged read-only entry point; endpoint
-		// authorization remains the final enforcement boundary.
+		// 未知角色获得最小权限的只读入口；端点
+		// 授权仍是最终执行边界。
 		return []string{"dashboard", "projects", "notifications"}
 	}
 	if !seen["notifications"] {
@@ -694,6 +765,23 @@ func (h *Handler) getProject(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, item)
 }
+func (h *Handler) listSupplementContracts(c *gin.Context) {
+	limit, err := optionalPositiveInt(c.Query("limit"))
+	if err != nil || limit > 200 {
+		writeServiceError(c, application.ValidationError("合同查询数量必须在 1 到 200 之间"))
+		return
+	}
+	if limit == 0 {
+		limit = 200
+	}
+	items, err := h.service.ListSupplementContracts(c.Request.Context(), principal(c), c.Param("id"), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, items)
+}
+
 func (h *Handler) listApprovedContracts(c *gin.Context) {
 	limit, err := optionalPositiveInt(c.Query("limit"))
 	if err != nil || limit > 200 {
@@ -787,8 +875,8 @@ func (h *Handler) listSlaOverdue(c *gin.Context) {
 }
 func (h *Handler) completeServiceItemField(c *gin.Context) {
 	var input domain.FieldCompletionInput
-	// Older clients sent an empty POST body. Keep that wire shape valid while
-	// accepting the new acknowledgement payload when evidence is incomplete.
+	// 旧客户端发送空 POST 请求体。保持该传输结构有效，
+	// 同时在证据不完整时接受新的确认载荷。
 	if err := c.ShouldBindJSON(&input); err != nil && !errors.Is(err, io.EOF) {
 		writeError(c, http.StatusBadRequest, "PM_INVALID_JSON", "请求内容不合法")
 		return
@@ -995,8 +1083,8 @@ func (h *Handler) listPersonnel(c *gin.Context) {
 	writeData(c, http.StatusOK, result)
 }
 
-// listQualifiedPersonnel returns the intersection of the project PERSON
-// qualification ledger and the requested effective platform project role.
+// listQualifiedPersonnel 返回项目 PERSON 资质台账与
+// 请求的有效平台项目角色的交集。
 func (h *Handler) listQualifiedPersonnel(c *gin.Context) {
 	page, err := optionalPositiveInt(c.Query("page"))
 	if err != nil {
@@ -1380,9 +1468,9 @@ func (h *Handler) listCapabilities(c *gin.Context) {
 	writeData(c, http.StatusOK, items)
 }
 
-// capabilityUpsertRequest keeps optional dates as strings at the HTTP boundary.
-// Binding directly into time.Time rejects empty strings from older clients before
-// PERSON-specific normalization can intentionally discard those fields.
+// capabilityUpsertRequest 在 HTTP 边界将可选日期保留为字符串。
+// 直接绑定 time.Time 会在 PERSON 专用规范化有意丢弃这些
+// 字段前，就拒绝旧客户端传入的空字符串。
 type capabilityUpsertRequest struct {
 	ResourceType string   `json:"resource_type"`
 	ResourceID   string   `json:"resource_id"`
@@ -1629,7 +1717,7 @@ func (h *Handler) saveSplitPolicy(c *gin.Context) {
 	writeData(c, http.StatusOK, policy)
 }
 
-// listDetectionCategories / saveDetectionCategory / deleteDetectionCategory
+// listDetectionCategories / saveDetectionCategory / deleteDetectionCategory 分别处理检测类别的列表、保存和删除。
 // 维护检测类别域（原型第二块）：默认体系要求、必备资质、是否特殊方法。
 func (h *Handler) listDetectionCategories(c *gin.Context) {
 	items, err := h.service.ListDetectionCategories(c.Request.Context(), principal(c))
@@ -1778,7 +1866,7 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrDuplicateProject):
 		// 同一合同版本已有项目：这是业务可判断的重复操作，必须给出项目编号与替代动作，
 		// 不能让它以 MySQL 1062 的形式兜底成 500「服务暂不可用」。
-		writeError(c, http.StatusConflict, "PM_DUPLICATE_PROJECT", serviceMessage(err, "该合同版本已存在项目，不能重复创建"))
+		writeError(c, http.StatusConflict, "PM_DUPLICATE_PROJECT", serviceMessage(err, "该合同已存在项目，不能重复创建"))
 	case errors.Is(err, application.ErrConflict):
 		writeError(c, http.StatusConflict, "PM_STATE_CONFLICT", "资源状态已被其他操作修改，请刷新后重试")
 	case errors.Is(err, application.ErrServiceTimeout):

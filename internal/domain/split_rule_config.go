@@ -195,6 +195,12 @@ func ValidateDetectionCategory(item DetectionCategory) error {
 	if len([]rune(item.Category)) > 128 {
 		return fmt.Errorf("检测类别过长")
 	}
+	if len([]rune(item.SystemStandard)) > 128 {
+		return fmt.Errorf("默认体系要求过长")
+	}
+	if len([]rune(item.RequiredQualifications)) > 255 {
+		return fmt.Errorf("必备资质过长")
+	}
 	switch item.SpecialMethod {
 	case SpecialMethodNo, SpecialMethodMarkable, SpecialMethodRequired:
 	default:
@@ -296,6 +302,20 @@ type SplitOverride struct {
 func ValidateSplitOverride(item SplitOverride) error {
 	if strings.TrimSpace(item.Name) == "" {
 		return fmt.Errorf("覆盖规则名称不能为空")
+	}
+	if len([]rune(item.Name)) > 255 {
+		return fmt.Errorf("覆盖规则名称不能超过 255 个字符")
+	}
+	if len([]rune(item.Match.CustomerContains)) > 255 {
+		return fmt.Errorf("客户匹配条件不能超过 255 个字符")
+	}
+	if len([]rune(item.Match.ContractContains)) > 64 {
+		return fmt.Errorf("合同匹配条件不能超过 64 个字符")
+	}
+	for _, category := range item.Match.Categories {
+		if len([]rune(category)) > 128 {
+			return fmt.Errorf("匹配的检测类别过长")
+		}
 	}
 	if item.Match.Empty() {
 		return fmt.Errorf("覆盖规则至少要有一个匹配条件")

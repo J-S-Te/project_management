@@ -11,9 +11,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestMonitoringPageUsesDatabasePagination verifies that detail aggregation is
-// restricted to the selected database page while totals and facets still cover
-// the complete filtered result set.
+// TestMonitoringPageUsesDatabasePagination 验证详情聚合
+// 仅限选中数据库页，同时总数及分面仍覆盖
+// 完整筛选结果集。
 func TestMonitoringPageUsesDatabasePagination(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {

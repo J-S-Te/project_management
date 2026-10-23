@@ -28,8 +28,8 @@ type DetectionCategoryImportPreview struct {
 	Rows    []DetectionCategoryImportPreviewRow `json:"rows"`
 }
 
-// PreviewDetectionCategoryImport deliberately shares the write-side code catalog policy.
-// It reads configuration only and never creates categories or rules.
+// PreviewDetectionCategoryImport 有意共享写入侧编码目录策略。
+// 仅读取配置，绝不创建类别或规则。
 func (s *Service) PreviewDetectionCategoryImport(ctx context.Context, p platform.Principal, inputs []DetectionCategoryImportInput) (DetectionCategoryImportPreview, error) {
 	if err := requireApplicationAuthorization(p, "project_rule.manage"); err != nil {
 		return DetectionCategoryImportPreview{}, err

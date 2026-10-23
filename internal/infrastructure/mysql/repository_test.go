@@ -99,7 +99,6 @@ func TestEmbeddedPenetrationParentLifecycleGates(t *testing.T) {
 func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testing.T) {
 	references := []platform.ApprovedContract{
 		{ID: "C-1", Number: "HT-1", Version: 4},
-		{ID: "C-1", Number: "HT-1", Version: 5},
 		{ID: "C-2", Number: "HT-2", Version: 4},
 		{ID: "C-3", Number: "HT-3", Version: 4},
 		{ID: "C-4", Number: "HT-4", Version: 4},
@@ -107,18 +106,41 @@ func TestCountMatchedContractReferencesSupportsStableAndLegacyProjects(t *testin
 	}
 	records := []projectRecord{
 		{ID: "PJ-current", ContractID: "C-1", Contract: "HT-1", ContractVersion: "4"},
-		// 生产历史记录把合同编号写入 contract_id；必须通过合同号和版本兼容识别。
+		// 生产历史记录把合同编号写入 contract_id；必须通过合同号别名兼容识别。
 		{ID: "PJ-legacy", ContractID: "HT-2", Contract: "HT-2", ContractVersion: "4"},
-		{ID: "PJ-old-version", ContractID: "HT-3", Contract: "HT-3", ContractVersion: "3"},
+		// 普通状态变更递增 version：同一合同的新版本仍必须视为已建项。
+		{ID: "PJ-changed-version", ContractID: "C-3", Contract: "HT-3", ContractVersion: "9"},
+		// 历史空 contract_id 回退合同号。
+		{ID: "PJ-empty-id", Contract: "HT-4", ContractVersion: "2"},
 		{ID: "PJ-unrelated", ContractID: "E2E-1", Contract: "E2E-1"},
 	}
 
-	if got := countMatchedContractReferences(records, references); got != 2 {
-		t.Fatalf("matched references=%d, want 2", got)
+	if got := countMatchedContractReferences(records, references); got != 4 {
+		t.Fatalf("matched references=%d, want 4 (C-1/C-2/C-3/C-4)", got)
 	}
 	matched := matchedContractReferenceKeys(records, references)
-	if !matched[approvedContractReferenceKey(references[0])] || matched[approvedContractReferenceKey(references[1])] || !matched[approvedContractReferenceKey(references[2])] || matched[approvedContractReferenceKey(references[3])] || matched[approvedContractReferenceKey(references[4])] || matched[approvedContractReferenceKey(references[5])] {
-		t.Fatalf("matched reference keys=%v, want only C-1 v4 and C-2 v4", matched)
+	if !matched[approvedContractReferenceKey(references[0])] || !matched[approvedContractReferenceKey(references[1])] || !matched[approvedContractReferenceKey(references[2])] || !matched[approvedContractReferenceKey(references[3])] || matched[approvedContractReferenceKey(references[4])] {
+		t.Fatalf("matched reference keys=%v, want C-1..C-4 and not C-5", matched)
+	}
+	// 建项身份不含版本：同一合同不同版本得到同一键。
+	if approvedContractReferenceKey(platform.ApprovedContract{ID: "C-1", Number: "HT-1", Version: 1}) != approvedContractReferenceKey(platform.ApprovedContract{ID: "C-1", Number: "HT-1", Version: 2}) {
+		t.Fatal("contract reference key must not include the ordinary row version")
+	}
+}
+
+// A04：建项查找只使用合同身份（contract_id，空则 contract），普通行版本不参与；
+// 版本变化不能再命中不同项目。
+func TestProjectContractIdentityLookupSQLIgnoresRowVersion(t *testing.T) {
+	var records []projectRecord
+	sql := projectContractIdentityQuery(dryRunDB(t), platform.ScopeFilter{TenantID: "tenant-1", AllowAll: true}, []string{"C-1", "HT-1"}).
+		Order("created_at ASC, id ASC").Find(&records).Statement.SQL.String()
+	for _, required := range []string{"CASE WHEN contract_id <> '' THEN contract_id ELSE contract END", "IN (?,?)", "pm_project.tenant_id = ?"} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("contract identity lookup SQL missing %q: %s", required, sql)
+		}
+	}
+	if strings.Contains(sql, "contract_version") {
+		t.Fatalf("contract identity lookup must not use the ordinary row version: %s", sql)
 	}
 }
 

@@ -44,9 +44,9 @@ type invEnv struct {
 	handler http.Handler
 }
 
-// invariantPersonnelDirectory mirrors the active platform identities linked by the
-// capability fixtures below. Resource IDs remain project-domain IDs; user IDs are
-// the platform identities used by authorization scope checks.
+// invariantPersonnelDirectory 映射下方能力夹具关联的有效平台
+// 身份。资源 ID 仍为项目域 ID；用户 ID 是
+// 授权范围检查使用的平台身份。
 type invariantPersonnelDirectory struct{}
 
 func (invariantPersonnelDirectory) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {

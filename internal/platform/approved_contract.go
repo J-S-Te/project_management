@@ -21,8 +21,8 @@ type ApprovedContract struct {
 	ApprovalPassed bool   `json:"approval_passed"`
 }
 
-// ApprovedContractService is the approved contract's project-facing service
-// scope. It contains no contract text, pricing, contacts or file metadata.
+// ApprovedContractService 是已审批合同面向项目的服务
+// 范围，不含合同正文、价格、联系人或文件元数据。
 type ApprovedContractService struct {
 	SourceID    string `json:"source_id"`
 	Name        string `json:"name"`

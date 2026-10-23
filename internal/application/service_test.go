@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -565,7 +566,7 @@ type capabilityRepository struct {
 	reservations []domain.EquipmentReservation
 	saved        []domain.Capability
 	// rules=nil 时提供旧用例共用的编码目录；显式空 slice 表示未配置，
-	// 供 fail-closed 专项用例使用。
+	// 供 失败时安全拒绝 专项用例使用。
 	rules []domain.Rule
 	// identityStatuses 记录身份复核回写的结果，供人员资质同步用例断言。
 	identityStatuses map[string]string
@@ -599,7 +600,7 @@ func (r *capabilityRepository) UpdateCapabilityIdentities(_ context.Context, _ s
 	return nil
 }
 
-func (r *capabilityRepository) FindProjectByContractVersion(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
+func (r *capabilityRepository) FindProjectByContract(context.Context, platform.ScopeFilter, string, string) (domain.Project, error) {
 	return domain.Project{}, ErrNotFound
 }
 func (r *capabilityRepository) ActivateContract(context.Context, domain.Project, []domain.ServiceItem, domain.DeliveryEvent) error {
@@ -966,6 +967,73 @@ func TestControlledDetectionCategoriesRejectUnknownAndDisabledValues(t *testing.
 		if !errors.Is(err, ErrValidation) {
 			t.Fatalf("category %q error = %v, want ErrValidation", category, err)
 		}
+	}
+}
+
+// manualCategoryContractVerifier 让人工建项的服务目录只包含指定类别，
+// 便于把检测类别配置与项目服务项基线对齐验证。
+type manualCategoryContractVerifier struct {
+	approvedContractVerifierStub
+	category string
+}
+
+func (v manualCategoryContractVerifier) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: "C-1", ContractVersion: 1, ServiceItems: []platform.ApprovedContractService{
+		{SourceID: "S1", Name: v.category, ServiceType: v.category, Site: "默认场所", Batch: "第一批", Category: v.category, TestMode: "STANDARD"},
+	}}, nil
+}
+
+// A09：人工建项必须复用检测类别的 RequiredCodes 解析并写入服务项，
+// 与自动拆解入口使用同一能力基线；随后分配到有效但缺该能力的资源时不得 PASSED。
+func TestManualProjectCreationCarriesDetectionCategoryRequiredCodesAndRejectsMissingCapability(t *testing.T) {
+	category := "等级保护测评"
+	repository := &controlledCategoryRepository{categories: []domain.DetectionCategory{
+		{Category: category, RequiredCodes: " core，EXTRA ; core ", SpecialMethod: domain.SpecialMethodNo, Enabled: true},
+	}}
+	service := &Service{Repo: repository, Contracts: manualCategoryContractVerifier{category: category}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"})
+	if _, err := service.CreateProjectWithServiceItems(context.Background(), principal,
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
+		[]domain.ContractService{{SourceID: "S1", Site: "杭州机房"}}); err != nil {
+		t.Fatalf("manual project creation failed: %v", err)
+	}
+	if len(repository.items) != 1 {
+		t.Fatalf("items=%+v", repository.items)
+	}
+	baseline := repository.items[0].RequiredCodes
+	if !reflect.DeepEqual(baseline, []string{"CORE", "EXTRA"}) {
+		t.Fatalf("manual service item required_codes=%v, want normalized [CORE EXTRA]", baseline)
+	}
+	// 自动拆解入口对同一类别必须解析出同一基线。
+	auto := resolveSplitOutcome(SplitPlan{SplitPolicy: domain.DefaultSplitPolicy()}, category, "STANDARD", "",
+		map[string]domain.DetectionCategory{category: repository.categories[0]})
+	if !reflect.DeepEqual(auto.RequiredCodes, baseline) {
+		t.Fatalf("automatic path required_codes=%v, manual path=%v; both entries must share the category baseline", auto.RequiredCodes, baseline)
+	}
+
+	// 人工建项之后，选到档案有效但缺 EXTRA 的人员：能力校验不得通过。
+	assignmentRepo := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{item: repository.items[0]}}
+	assignmentRepo.foundCapabilities = []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-MANAGER", UserID: "PM-1", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE", Codes: []string{"CORE"}},
+		{ResourceType: "PERSON", ResourceID: "P-ENGINEER", UserID: "ENG-1", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE", Codes: []string{"CORE"}},
+	}
+	assignmentService := Service{Repo: assignmentRepo, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleProjectManager: {"PM-1"},
+		assignmentRoleEngineer:       {"ENG-1"},
+	}}}
+	assignPrincipal := platform.Principal{
+		TenantID: "tenant-1", UserID: "lead-1",
+		Permissions: map[string]bool{"project.execution.assign": true},
+		DataScopes:  []platform.DataScope{{RoleCode: "team_lead", ScopeType: "APPLICATION"}},
+	}
+	result, err := assignmentService.AssignExecutionTeam(context.Background(), assignPrincipal, repository.items[0].ID, domain.ExecutionAssignmentInput{
+		ProjectManagerID: "P-MANAGER", EngineerIDs: []string{"P-ENGINEER"},
+	})
+	if err != nil {
+		t.Fatalf("assign execution team: %v", err)
+	}
+	if result.Passed || !contains(result.Conflicts, "缺少能力：EXTRA") {
+		t.Fatalf("manual-created category baseline must block assignment missing EXTRA: %+v", result)
 	}
 }
 

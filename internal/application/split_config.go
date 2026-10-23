@@ -301,34 +301,46 @@ func splitCategoryKey(category string) string {
 	return strings.ToLower(strings.TrimSpace(category))
 }
 
-// validateControlledDetectionCategories is the write-side guard for project service items.
-// The category directory is the canonical service-type domain: browser controls are only a UX
-// aid and direct API calls must not be able to persist arbitrary text or disabled categories.
-func (s *Service) validateControlledDetectionCategories(ctx context.Context, tenantID string, categories []string) error {
+// detectionCategoryBaselines 读取启用的检测类别域、校验给定类别全部启用，并返回
+// 「类别键 -> 必检能力码」基线。人工建项与自动拆解共用 domain.SplitCapabilityCodes
+// 的解析口径；客户端只能追加要求，不能削减类别基线。
+func (s *Service) detectionCategoryBaselines(ctx context.Context, tenantID string, categories []string) (map[string][]string, error) {
 	repo, ok := s.Repo.(detectionCategoryReader)
 	if !ok {
-		return errors.New("detection category directory unavailable")
+		return nil, errors.New("detection category directory unavailable")
 	}
 	items, err := repo.ListDetectionCategories(ctx, tenantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	enabled := make(map[string]string, len(items))
+	requiredCodes := make(map[string][]string, len(items))
 	for _, item := range items {
-		if item.Enabled {
-			enabled[splitCategoryKey(item.Category)] = strings.TrimSpace(item.Category)
+		if !item.Enabled {
+			continue
 		}
+		key := splitCategoryKey(item.Category)
+		enabled[key] = strings.TrimSpace(item.Category)
+		requiredCodes[key] = normalizeCapabilityCodes(domain.SplitCapabilityCodes(item.RequiredCodes))
 	}
 	for _, category := range categories {
 		category = strings.TrimSpace(category)
 		if category == "" {
-			return ValidationError("检测类别不能为空")
+			return nil, ValidationError("检测类别不能为空")
 		}
 		if _, exists := enabled[splitCategoryKey(category)]; !exists {
-			return ValidationError(fmt.Sprintf("检测类别「%s」不在启用的检测类别域中，请先在拆解规则中配置或启用", category))
+			return nil, ValidationError(fmt.Sprintf("检测类别「%s」不在启用的检测类别域中，请先在拆解规则中配置或启用", category))
 		}
 	}
-	return nil
+	return requiredCodes, nil
+}
+
+// validateControlledDetectionCategories 是项目服务项写入侧守卫。
+// 类别目录是服务类型的规范域；浏览器控件仅改善体验，
+// 直接 API 调用也不能持久化任意文本或停用类别。
+func (s *Service) validateControlledDetectionCategories(ctx context.Context, tenantID string, categories []string) error {
+	_, err := s.detectionCategoryBaselines(ctx, tenantID, categories)
+	return err
 }
 
 // resolveSplitOutcome 按生效方案与检测类别域决定一个分组的初始状态与方法类型。
@@ -360,7 +372,8 @@ func resolveSplitOutcome(plan SplitPlan, category string, sourceMode, sourceSyst
 	return SplitOutcome{
 		Status: plan.DefaultStatus, TestMode: mode, Special: yesNo(mode == "PENETRATION"),
 		SystemStandard: systemStandard, RequiredQualifications: entry.RequiredQualifications,
-		RequiredCodes: domain.SplitCapabilityCodes(entry.RequiredCodes),
+		// 与人工建项共用同一解析与归一化口径：能力码比较不因大小写/空格差异失效。
+		RequiredCodes: normalizeCapabilityCodes(domain.SplitCapabilityCodes(entry.RequiredCodes)),
 	}
 }
 

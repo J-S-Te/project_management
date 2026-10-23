@@ -2,8 +2,10 @@ package application
 
 import (
 	"context"
+
 	"errors"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/auditoutbox"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -19,17 +21,17 @@ var (
 	ErrNotFound   = errors.New("resource not found")
 	ErrValidation = errors.New("validation failed")
 	ErrConflict   = errors.New("resource state conflict")
-	// ErrAlreadyApplied is an internal success signal for an exact replay of an
-	// offline field command. HTTP callers still receive success; automations are
-	// not fired a second time.
+	// ErrAlreadyApplied 是离线现场命令精确重放的内部
+	// 成功信号。HTTP 调用方仍收到成功；自动化
+	// 不会再次触发。
 	ErrAlreadyApplied = errors.New("client operation already applied")
-	// ErrDuplicateContract 表示同一租户下 (contract_id, contract_version) 已被并发请求创建。
+	// ErrDuplicateContract 表示同一租户下的合同身份已被并发请求创建。
 	// 调用方应按幂等处理：回读已存在的项目并同步盖章状态，而不是把唯一键冲突暴露成 500。
-	ErrDuplicateContract = errors.New("contract version already activated")
-	// ErrDuplicateProject 表示同一租户下 (contract, contract_version) 已经有项目：
-	// 手动新建项目没有合同激活那样的幂等回读，唯一键 uq_pm_project_contract_version 冲突
-	// 会以 MySQL 1062 冒到接口层，若原样兜底就只剩「服务暂不可用」。
-	ErrDuplicateProject = errors.New("project already exists for the contract version")
+	ErrDuplicateContract = errors.New("contract identity already activated")
+	// ErrDuplicateProject 表示同一租户下的合同身份已经有项目：
+	// 手动新建项目没有合同激活那样的幂等回读，唯一键冲突会以 MySQL 1062 冒到接口层，
+	// 若原样兜底就只剩「服务暂不可用」。
+	ErrDuplicateProject = errors.New("project already exists for the contract identity")
 	ErrForbidden        = errors.New("operation is outside the authorized project scope")
 	// ErrServiceTimeout 表示同步等待后端工作流在约定时间内没有完成。
 	// 前端应提示用户稍后重试，而不是让网关吞掉请求并返回 504。
@@ -97,9 +99,9 @@ type Repository interface {
 	Dashboard(context.Context, platform.ScopeFilter) (domain.Dashboard, error)
 }
 
-// ProjectServiceCreator keeps manual project creation atomic with its initial
-// service-item decomposition. Repositories that do not implement it remain
-// compatible with the legacy project-only API.
+// ProjectServiceCreator 保证人工建项与初始服务项
+// 拆解的原子性。不实现该接口的仓储仍
+// 兼容旧版仅建项目 API。
 type ProjectServiceCreator interface {
 	CreateProjectWithServiceItems(context.Context, domain.Project, []domain.ServiceItem) error
 }
@@ -108,18 +110,22 @@ type ExistingContractReferenceCounter interface {
 	CountExistingContractReferences(context.Context, string, []platform.ApprovedContract) (int, error)
 }
 
-// AvailableApprovedContractFilter removes contract versions that are already
-// bound to any project in the tenant. This must use tenant-wide data rather
-// than the caller's project data scope, otherwise a restricted user could see
-// and select a contract whose project is owned by another team.
+// AvailableApprovedContractFilter 移除已绑定到租户内任一项目的
+// 合同（身份为合同 ID；旧版空 ID 回退到
+// 合同编号，普通行版本不参与）。必须使用
+// 租户全范围数据，而非调用方项目数据范围，否则受限
+// 用户可能看到并选择已被其他团队项目占用的
+// 合同。
 type AvailableApprovedContractFilter interface {
 	FilterUnreferencedApprovedContracts(context.Context, string, []platform.ApprovedContract) ([]platform.ApprovedContract, error)
 }
 
 type Service struct {
-	// CheckBusinessLicense is called again at asynchronous business side effects.
+	// CheckBusinessLicense 在异步业务副作用处再次调用。
 	CheckBusinessLicense func(context.Context) error
-	Repo                 Repository
+	// freeze 是人员交接冻结检查器；未接线时保持既有行为。
+	freeze FreezeChecker
+	Repo   Repository
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
 	// ErrPersonnelUnavailable，不影响其余项目功能。
 	Personnel platform.OwnerDirectory
@@ -131,6 +137,50 @@ type Service struct {
 	// Logger 可选。派生事件（自动化/预警）是主事件提交后的 best-effort 副作用：
 	// 写入失败不会回滚主流程，但必须留下可观测痕迹，否则"配置触发了但没落库"无人知晓。
 	Logger *slog.Logger
+	// AuditStore 支持管理员检查或重试终态审计投递
+	// 失败。运维端点在其为 nil 时安全拒绝。
+	AuditStore *auditoutbox.GORMStore
+}
+
+type FailedAuditEntry struct {
+	ID           string `json:"id"`
+	EventID      string `json:"event_id"`
+	Action       string `json:"action"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	RequestID    string `json:"request_id"`
+	LastError    string `json:"last_error"`
+	Attempts     uint   `json:"attempts"`
+	CreatedAt    string `json:"created_at"`
+}
+
+func (s *Service) ListFailedAuditEvents(ctx context.Context, p platform.Principal, limit int) ([]FailedAuditEntry, error) {
+	if s.AuditStore == nil || !p.Has("project_rule.manage") {
+		return nil, ErrForbidden
+	}
+	rows, err := s.AuditStore.ListFailed(ctx, p.TenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FailedAuditEntry, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, FailedAuditEntry{ID: row.ID, EventID: row.EventID, Action: row.Action, ResourceType: row.ResourceType, ResourceID: row.ResourceID, RequestID: row.RequestID, LastError: row.LastError, Attempts: row.Attempts, CreatedAt: row.CreatedAt.Format(time.RFC3339)})
+	}
+	return out, nil
+}
+
+func (s *Service) RetryFailedAuditEvent(ctx context.Context, p platform.Principal, id string) error {
+	if s.AuditStore == nil || !p.Has("project_rule.manage") || strings.TrimSpace(id) == "" {
+		return ErrForbidden
+	}
+	ok, err := s.AuditStore.RetryFailed(ctx, p.TenantID, id, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListProjects 返回全量（不分页）项目列表，供监控聚合等内部调用复用。
@@ -206,9 +256,9 @@ func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principa
 	return available, nil
 }
 
-// ListApprovedContractServiceItems returns the authoritative, project-facing
-// service scope for one approved contract. The browser never calls Contract
-// Management directly and receives no contract text, price, contact or file.
+// ListApprovedContractServiceItems 返回单个已审批合同面向项目的
+// 权威服务范围。浏览器不直接调用合同
+// 管理，也不接收合同正文、价格、联系人或文件。
 func (s *Service) ListApprovedContractServiceItems(ctx context.Context, p platform.Principal, contractID string) (platform.ApprovedContractServiceCatalog, error) {
 	if !mayCreateProject(p) {
 		return platform.ApprovedContractServiceCatalog{}, ErrForbidden
@@ -256,9 +306,9 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 	return result, nil
 }
 
-// populatePendingProjectCreation enriches the dashboard without making the
-// project list depend on Contract Management availability. The boolean field
-// lets the UI distinguish a true zero from a temporarily unavailable metric.
+// populatePendingProjectCreation 补全看板，不让
+// 项目列表依赖合同管理可用性。布尔字段
+// 使 UI 可区分真实零值与暂时不可用的指标。
 func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID string, result *domain.Dashboard) {
 	counter, ok := s.Repo.(ExistingContractReferenceCounter)
 	if s.Contracts == nil || !ok {
@@ -509,24 +559,26 @@ func (s *Service) CreateProject(ctx context.Context, p platform.Principal, input
 	return s.CreateProjectWithServiceItems(ctx, p, input, nil)
 }
 
-// DuplicateProjectError 把"同一合同版本已有项目"表达成可执行提示：
+// DuplicateProjectError 把"同一合同已有项目"表达成可执行提示：
 // 带上已存在项目编号，并指引用拆解调整（走补充协议）而不是重复新建。
+// 合同状态变化会递增普通行版本，但不会释放重复建项。
 func DuplicateProjectError(existingID string) error {
 	if strings.TrimSpace(existingID) == "" {
-		return ReasonError{Kind: ErrDuplicateProject, Reason: "该合同版本已存在项目，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解。"}
+		return ReasonError{Kind: ErrDuplicateProject, Reason: "该合同已存在项目，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解。"}
 	}
-	return ReasonError{Kind: ErrDuplicateProject, Reason: fmt.Sprintf("该合同版本已存在项目 %s，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解（走补充协议）。", existingID)}
+	return ReasonError{Kind: ErrDuplicateProject, Reason: fmt.Sprintf("该合同已存在项目 %s，不能重复创建；如需调整服务内容请在「服务项拆解确认」中调整拆解（走补充协议）。", existingID)}
 }
 
-// findExistingProjectByContract 按租户边界查找同合同同版本的项目编号（空表示不存在）。
+// findExistingProjectByContract 按租户边界查找同合同的项目编号（空表示不存在）。
+// 建项身份是稳定的合同 ID（历史空 ID 回退合同号），普通合同版本变化不会释放重复建项。
 // 用租户边界而不是调用者数据范围：唯一键冲突本身是租户级的，范围过滤会让预检漏判、
 // 随后仍然撞库并报 500。
-func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, contract, version string) (string, error) {
+func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, contractID, contractNumber string) (string, error) {
 	deliveryRepo, ok := s.Repo.(DeliveryRepository)
-	if !ok || strings.TrimSpace(contract) == "" {
+	if !ok || (strings.TrimSpace(contractID) == "" && strings.TrimSpace(contractNumber) == "") {
 		return "", nil
 	}
-	existing, err := deliveryRepo.FindProjectByContractVersion(ctx, platform.ScopeFilter{TenantID: tenantID, AllowAll: true}, contract, version)
+	existing, err := deliveryRepo.FindProjectByContract(ctx, platform.ScopeFilter{TenantID: tenantID, AllowAll: true}, contractID, contractNumber)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return "", nil
@@ -537,6 +589,10 @@ func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, c
 }
 
 func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
+	// 交接冻结：被冻结的用户不得承接新项目责任（创建即指派项目经理）。
+	if err := s.ensureManagerNotFrozen(ctx, p.TenantID, input.ManagerIdentityID); err != nil {
+		return domain.Project{}, err
+	}
 	if !mayCreateProject(p) {
 		return input, ErrForbidden
 	}
@@ -546,6 +602,18 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	}
 	if strings.TrimSpace(input.Name) == "" {
 		return input, ErrValidation
+	}
+	if err := validateProjectTextLength(input.Name, 255, "项目名称"); err != nil {
+		return input, err
+	}
+	if err := validateProjectTextLength(input.Team, 128, "团队"); err != nil {
+		return input, err
+	}
+	if err := validateProjectTextLength(input.Manager, 128, "项目经理"); err != nil {
+		return input, err
+	}
+	if err := validateProjectTextLength(input.Due, 64, "项目期限"); err != nil {
+		return input, err
 	}
 	input.ContractID = strings.TrimSpace(input.ContractID)
 	if input.ContractID == "" {
@@ -581,11 +649,15 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if err != nil {
 		return input, err
 	}
+	if err := validateContractServiceTexts(requested); err != nil {
+		return input, err
+	}
 	categories := make([]string, 0, len(requested))
 	for _, item := range requested {
 		categories = append(categories, item.Category)
 	}
-	if err := s.validateControlledDetectionCategories(ctx, p.TenantID, categories); err != nil {
+	categoryBaselines, err := s.detectionCategoryBaselines(ctx, p.TenantID, categories)
+	if err != nil {
 		return input, err
 	}
 	// 合同编号、版本与客户资料只能来自合同管理系统。浏览器提交的同名字段即使被
@@ -597,7 +669,7 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	input.ContractVersion = strconv.FormatUint(approved.Version, 10)
 	// 提前判重：唯一键只会以 MySQL 1062 的形式暴露，落到接口就是 500「服务暂不可用」，
 	// 用户完全不知道是自己重复建了项目。这里先查一次，给出带项目编号的可执行提示。
-	if existingID, findErr := s.findExistingProjectByContract(ctx, p.TenantID, strings.TrimSpace(input.Contract), strings.TrimSpace(input.ContractVersion)); findErr != nil {
+	if existingID, findErr := s.findExistingProjectByContract(ctx, p.TenantID, strings.TrimSpace(approved.ID), strings.TrimSpace(approved.Number)); findErr != nil {
 		return input, findErr
 	} else if existingID != "" {
 		return input, DuplicateProjectError(existingID)
@@ -656,7 +728,9 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 			ProjectID: input.ID, SourceServiceID: firstNonEmpty(source.SourceID, fmt.Sprintf("MANUAL-%03d", index+1)),
 			Batch: strings.TrimSpace(source.Batch), Site: strings.TrimSpace(source.Site), SiteCode: strings.TrimSpace(source.SiteCode), Category: strings.TrimSpace(source.Category),
 			Requirement: strings.TrimSpace(source.Requirement), System: strings.TrimSpace(source.System), SystemLevel: strings.TrimSpace(source.SystemLevel), Special: yesNo(mode == "PENETRATION"), TestMode: mode,
-			Status: "待确认", ConflictStatus: "UNCHECKED",
+			// 必检能力码来自检测类别域（与自动拆解同一解析）；人工清单不能削减该基线。
+			RequiredCodes: categoryBaselines[splitCategoryKey(strings.TrimSpace(source.Category))],
+			Status:        "待确认", ConflictStatus: "UNCHECKED",
 		})
 	}
 	input.Services = len(items)
@@ -669,10 +743,10 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	return input, errors.New("project repository does not support atomic service-item creation")
 }
 
-// approvedContractServices resolves browser selections against the latest
-// approved contract catalog. Only source_id and the project-specific site
-// supplement are accepted from the browser; contract-owned fields are rebuilt
-// from the authoritative catalog to prevent scope spoofing.
+// approvedContractServices 根据最新已审批合同目录解析
+// 浏览器选择。仅接受浏览器提供的 source_id 和项目专用现场
+// 补充；合同所属字段从权威目录重建，
+// 防止范围伪造。
 func approvedContractServices(requested []domain.ContractService, catalog []platform.ApprovedContractService) ([]domain.ContractService, error) {
 	byID := make(map[string]platform.ApprovedContractService, len(catalog))
 	for _, item := range catalog {
@@ -713,9 +787,9 @@ func approvedContractServices(requested []domain.ContractService, catalog []plat
 	return result, nil
 }
 
-// resolveActiveSite keeps implementation locations as free text for current clients. Legacy
-// callers may still send a site code; when they do, preserve the historical relationship only
-// after validating that it names an active row in the same tenant.
+// resolveActiveSite 为当前客户端保留自由文本实施地点。旧版
+// 调用方仍可发送地点编码；此时须先确认其指向同一租户的有效行，
+// 才保留历史关联。
 func (s *Service) resolveActiveSite(ctx context.Context, tenantID, name, code string) (string, string, error) {
 	name, code = strings.TrimSpace(name), strings.TrimSpace(code)
 	if code == "" {
@@ -748,9 +822,9 @@ func mayCreateProject(p platform.Principal) bool {
 	return false
 }
 
-// mayViewPendingProjectCreation separates management visibility from the high-impact
-// project creation action. Technical directors need the tenant-wide backlog metric for
-// delivery governance, but must not gain project.create or the approved-contract picker.
+// mayViewPendingProjectCreation 将管理可见性与高影响的
+// 建项操作分离。技术总监需租户全范围积压指标来治理交付，
+// 但不能因此获得 project.create 或已审批合同选择器。
 func mayViewPendingProjectCreation(p platform.Principal) bool {
 	for _, role := range p.Roles {
 		switch strings.ToLower(strings.TrimSpace(role)) {

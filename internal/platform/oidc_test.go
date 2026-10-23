@@ -256,8 +256,8 @@ func TestAuthorizationRefreshPersistsNewRevisionAcrossAuthenticatorRestart(t *te
 		t.Fatalf("principal=%+v error=%v stored=%+v updated=%v", principal, err, store.session, store.updated)
 	}
 
-	// A new authenticator represents a restarted or different API instance. It
-	// reads the same persistent store rather than an in-process session cache.
+	// 新认证器代表重启或不同 API 实例。
+	// 它读取相同持久存储，而非进程内会话缓存。
 	second := &OIDCAuthenticator{options: first.options, store: store, now: func() time.Time { return now.Add(30 * time.Second) }}
 	principal, err = second.Authenticate(context.Background(), request)
 	if err != nil || principal.AuthorizationRevision != 8 || !principal.Has("project.create") || principal.Has("project.read") {

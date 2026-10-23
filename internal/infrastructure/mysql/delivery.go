@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/auditctx"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
@@ -20,16 +23,36 @@ import (
 )
 
 // isDuplicateKey 识别 MySQL 唯一键冲突（错误码 1062），把驱动的底层错误翻译成业务哨兵。
+func isDeadlock(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1213
+}
+
 func isDuplicateKey(err error) bool {
 	var mysqlErr *mysql.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
 
-func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter platform.ScopeFilter, contractID, version string) (domain.Project, error) {
+// FindProjectByContract 按稳定合同身份查找项目。唯一性口径是「租户 + 合同身份」：
+// contract_id 非空时以它为准，历史空 contract_id 行回退合同展示号（与迁移生成的
+// contract_identity_key 完全一致）；普通合同版本只用于并发/审计，不参与查找或唯一性。
+func (r *Repository) FindProjectByContract(ctx context.Context, filter platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
+	identities := make([]string, 0, 2)
+	seen := map[string]bool{}
+	for _, value := range []string{contractID, contractNumber} {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		identities = append(identities, value)
+	}
+	if len(identities) == 0 {
+		return domain.Project{}, application.ErrNotFound
+	}
 	var record projectRecord
-	// 当前数据以稳定 contract_id 幂等；迁移前的历史行可能只把同一个值写在
-	// contract 展示列，因此保留 contract 回退以支持滚动发布和存量数据。
-	err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Where("(contract_id = ? OR contract = ?) AND contract_version = ?", contractID, contractID, version).First(&record).Error
+	err := projectContractIdentityQuery(r.db.WithContext(ctx), filter, identities).
+		Order("created_at ASC, id ASC").Take(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
@@ -45,12 +68,19 @@ func (r *Repository) FindProjectByContractVersion(ctx context.Context, filter pl
 	return project, nil
 }
 
+// projectContractIdentityQuery 是建项身份的唯一 SQL 口径：contract_id 非空取它，
+// 历史空 ID 回退合同展示号；普通行版本不参与。与迁移生成的 contract_identity_key 一致。
+func projectContractIdentityQuery(db *gorm.DB, filter platform.ScopeFilter, identities []string) *gorm.DB {
+	return applyProjectScope(db.Model(&projectRecord{}), filter, "pm_project").
+		Where("(CASE WHEN contract_id <> '' THEN contract_id ELSE contract END) IN ?", identities)
+}
+
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
-			// 同一 (tenant_id, contract_id, contract_version) 并发激活时，唯一键
-			// uq_pm_project_contract_version 会让后到的事务失败；这里翻译成语义哨兵，
+			// 同一 (tenant_id, 合同身份) 并发激活时，唯一键
+			// uq_pm_project_contract_identity 会让后到的事务失败；这里翻译成语义哨兵，
 			// 由应用层回读已存在项目并按幂等成功返回。
 			if isDuplicateKey(err) {
 				return application.ErrDuplicateContract
@@ -104,14 +134,17 @@ func (r *Repository) EnqueueNotification(ctx context.Context, tenantID string, m
 	return result.RowsAffected == 1, result.Error
 }
 
-func (r *Repository) ClaimNotificationOutbox(ctx context.Context, workerID string, limit int, now time.Time) ([]domain.NotificationOutboxItem, error) {
+func (r *Repository) ClaimNotificationOutbox(ctx context.Context, tenantID, workerID string, limit int, now time.Time) ([]domain.NotificationOutboxItem, error) {
+	if err := application.ValidateOutboxIdentity(tenantID, workerID); err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	var claimed []notificationOutboxRecord
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status IN ? AND (next_retry_at IS NULL OR next_retry_at <= ?) AND (locked_until IS NULL OR locked_until < ?)", []string{"PENDING", "RETRY_WAIT", "PROCESSING"}, now, now).
+			Where("tenant_id = ? AND status IN ? AND (next_retry_at IS NULL OR next_retry_at <= ?) AND (locked_until IS NULL OR locked_until <= ?)", tenantID, []string{"PENDING", "RETRY_WAIT", "PROCESSING"}, now, now).
 			Order("created_at ASC").Limit(limit).Find(&claimed).Error; err != nil {
 			return err
 		}
@@ -122,7 +155,7 @@ func (r *Repository) ClaimNotificationOutbox(ctx context.Context, workerID strin
 		for _, row := range claimed {
 			ids = append(ids, row.ID)
 		}
-		return tx.Model(&notificationOutboxRecord{}).Where("id IN ?", ids).Updates(map[string]any{
+		return tx.Model(&notificationOutboxRecord{}).Where("tenant_id = ? AND id IN ?", tenantID, ids).Updates(map[string]any{
 			"status": "PROCESSING", "locked_by": workerID, "locked_until": now.Add(2 * time.Minute),
 		}).Error
 	})
@@ -135,14 +168,19 @@ func (r *Repository) ClaimNotificationOutbox(ctx context.Context, workerID strin
 		if err := json.Unmarshal(row.Payload, &message); err != nil {
 			return nil, err
 		}
+		// The persisted key includes the producer fallback when the JSON key was empty.
+		message.IdempotencyKey = row.IdempotencyKey
 		items = append(items, domain.NotificationOutboxItem{ID: row.ID, Message: message, RetryCount: row.RetryCount})
 	}
 	return items, nil
 }
 
-func (r *Repository) MarkNotificationOutboxSent(ctx context.Context, id uint64, workerID string, now time.Time) error {
+func (r *Repository) MarkNotificationOutboxSent(ctx context.Context, tenantID string, id uint64, workerID string, now time.Time) error {
+	if err := application.ValidateOutboxIdentity(tenantID, workerID); err != nil {
+		return err
+	}
 	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
-		Where("id=? AND status='PROCESSING' AND locked_by=?", id, workerID).
+		Where("tenant_id=? AND id=? AND status='PROCESSING' AND locked_by=? AND locked_until > ?", tenantID, id, workerID, now).
 		Updates(map[string]any{"status": "SENT", "sent_at": now, "locked_by": "", "locked_until": nil, "last_error_summary": ""})
 	if result.Error != nil {
 		return result.Error
@@ -153,13 +191,16 @@ func (r *Repository) MarkNotificationOutboxSent(ctx context.Context, id uint64, 
 	return nil
 }
 
-func (r *Repository) MarkNotificationOutboxRetry(ctx context.Context, id uint64, workerID string, next time.Time, dead bool) error {
+func (r *Repository) MarkNotificationOutboxRetry(ctx context.Context, tenantID string, id uint64, workerID string, now, next time.Time, dead bool) error {
+	if err := application.ValidateOutboxIdentity(tenantID, workerID); err != nil {
+		return err
+	}
 	status := "RETRY_WAIT"
 	if dead {
 		status = "DEAD_LETTER"
 	}
 	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
-		Where("id=? AND status='PROCESSING' AND locked_by=?", id, workerID).
+		Where("tenant_id=? AND id=? AND status='PROCESSING' AND locked_by=? AND locked_until > ?", tenantID, id, workerID, now).
 		Updates(map[string]any{"status": status, "retry_count": gorm.Expr("retry_count + 1"), "next_retry_at": next, "locked_by": "", "locked_until": nil})
 	if result.Error != nil {
 		return result.Error
@@ -174,8 +215,8 @@ func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
-			// 手动创建没有合同激活那样的幂等回读：撞唯一键 uq_pm_project_contract_version
-			// 说明同合同同版本已有项目，翻译成语义哨兵交由应用层给出可执行提示，
+			// 手动创建没有合同激活那样的幂等回读：撞唯一键 uq_pm_project_contract_identity
+			// 说明同一合同已有项目，翻译成语义哨兵交由应用层给出可执行提示，
 			// 而不是让 MySQL 1062 一路兜底成 500「服务暂不可用」。
 			if isDuplicateKey(err) {
 				return application.ErrDuplicateProject
@@ -300,7 +341,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["project_manager_id"] = ""
 		updates["engineer_ids"] = jsonValue([]string{})
 		updates["equipment_ids"] = jsonValue([]string{})
-		updates["required_codes"] = jsonValue([]string{})
+		// required_codes 是服务项的必检能力基线（来自检测类别配置），撤销分配只是解除人员/设备，
+		// 不能把它一起清空：否则重新分配时应用层只能拿到客户端追加要求，
+		// 可以把任务分给不具备必备资质的人员（资质校验被绕过）。
 		updates["conflict_status"] = "UNCHECKED"
 	case application.EventDecompositionReturned:
 		if item.Status != "待分配" {
@@ -335,7 +378,7 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["project_manager_id"] = ""
 		updates["engineer_ids"] = jsonValue([]string{})
 		updates["equipment_ids"] = jsonValue([]string{})
-		updates["required_codes"] = jsonValue([]string{})
+		// 同上：撤销执行分配不得清空必检能力基线。
 		updates["conflict_status"] = "UNCHECKED"
 	case application.EventImplementationPlanned:
 		// 与 PlanImplementation 共用同一套前置规则：行锁内复查可覆盖读后状态变化的竞态，
@@ -433,6 +476,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if !canStartPreparation(item.Status) {
 			return application.ErrValidation
 		}
+		if err := syncEquipmentReservations(tx, item, event); err != nil {
+			return err
+		}
 		if err := updateImplPlanEquipment(tx, item, event); err != nil {
 			return err
 		}
@@ -440,6 +486,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 	case application.EventPreparationRevoked:
 		if item.Status != "实施准备中" {
 			return application.ErrValidation
+		}
+		if err := deleteEquipmentReservations(tx, item.TenantID, item.ID, ""); err != nil {
+			return err
 		}
 		if err := clearImplPlan(tx, item, event, false); err != nil {
 			return err
@@ -459,8 +508,14 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			if item.Status != "现场实施完成" || (item.ReportStatus != "COMPILING" && item.ReportStatus != "REVIEWED") {
 				return application.ErrValidation
 			}
+			// 报告返工：把当前修订标记为 SUPERSEDED（保留其文件与审批证据），并开一个新修订，
+			// 否则重新编制时 lockReportRevision 会发现旧修订仍停在 COMPILING/REVIEWED 而返回冲突。
+			if err := reworkReportRevision(tx, item, event); err != nil {
+				return err
+			}
 			updates["status"] = "实施中"
 			updates["report_status"] = "NONE"
+			updates["report_revision"] = item.ReportRevision + 1
 			updates["report_updated_at"] = event.CreatedAt
 			updates["report_updated_by"] = event.ActorUserID
 		default:
@@ -540,6 +595,37 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 	case application.EventDeviationReviewed:
+		// 评审必须绑定「当前待处理的偏离实例」：
+		//   1) 被评审的偏离必须仍是该服务项最新上报的那一个（旧偏离的评审不能作用于新异常）；
+		//   2) 同一偏离重复评审只做幂等返回，不再改变服务项状态。
+		reviewedDeviationID := stringValue(event.Payload, "deviation_id")
+		if reviewedDeviationID == "" {
+			return application.ErrValidation
+		}
+		var latestReported deliveryEventRecord
+		if err := tx.Where("tenant_id=? AND service_item_id=? AND event_type=?", event.TenantID, event.ServiceItemID, application.EventDeviationReported).
+			Order("created_at DESC, id DESC").First(&latestReported).Error; err != nil {
+			return mapNotFound(err)
+		}
+		var reportedPayload map[string]any
+		if err := json.Unmarshal(latestReported.Payload, &reportedPayload); err != nil {
+			return err
+		}
+		if stringValue(reportedPayload, "deviation_id") != reviewedDeviationID {
+			// 历史偏离：已不是当前异常，拒绝而不是放行/终止当前服务项。
+			return application.ErrConflict
+		}
+		var alreadyReviewed int64
+		if err := tx.Model(&deliveryEventRecord{}).
+			Where("tenant_id=? AND service_item_id=? AND event_type=? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.deviation_id'))=?",
+				event.TenantID, event.ServiceItemID, application.EventDeviationReviewed, reviewedDeviationID).
+			Count(&alreadyReviewed).Error; err != nil {
+			return err
+		}
+		if alreadyReviewed > 0 {
+			// 幂等：同一偏离的重复评审不再改变状态。
+			return nil
+		}
 		if item.Status != "异常处理中" {
 			return application.ErrValidation
 		}
@@ -548,6 +634,11 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 		updates["status"] = status
+		if status == domain.ProjectStatusTerminated {
+			if err := deleteEquipmentReservations(tx, item.TenantID, item.ID, ""); err != nil {
+				return err
+			}
+		}
 	default:
 		// 审计类事件只留痕、不改服务项状态。其余未知类型必须显式拒绝：
 		// 静默成功会让未接线的新事件在接口层返回成功、审计流显示「已发生」，
@@ -720,7 +811,7 @@ func serviceItemSequence(itemID string) int {
 }
 
 // syncProjectStatusColumn 在事件事务提交前按派生规则重算并回写 pm_project.status。
-// 与读侧（ListProjects/GetProject/Dashboard/FindProjectByContractVersion）共用
+// 与读侧（ListProjects/GetProject/Dashboard/FindProjectByContract）共用
 // domain.DeriveProjectStatus 单一口径，保证存储列永不分叉：服务项状态推进到哪，
 // 项目状态缓存就立刻对齐到哪，不再依赖某条事件手工设置项目状态。
 func syncProjectStatusColumn(tx *gorm.DB, tenantID, projectID string) error {
@@ -841,9 +932,9 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	}
 	rec := capabilityRecord{ID: item.ID, TenantID: item.TenantID, ResourceType: item.ResourceType, ResourceID: item.ResourceID, ResourceName: item.ResourceName, UserID: strings.TrimSpace(item.UserID), CapabilityCodes: codes, ValidFrom: timePtr(item.ValidFrom), ValidUntil: timePtr(item.ValidUntil), Status: item.Status, UsageScope: firstValue(item.UsageScope, domain.EquipmentUsageAny), IdentityStatus: identityStatus, UpdatedAt: item.UpdatedAt, UpdatedBy: actor}
 	if item.ResourceType == "PERSON" {
-		// An application-side ownership check cannot prevent simultaneous imports
-		// from choosing the same generated number. Lock existing rows and never
-		// turn a conflicting insert into an unconditional identity overwrite.
+		// 应用层归属检查无法防止并发导入
+		// 选择同一生成编号。锁定既有行，绝不能
+		// 将冲突插入转为无条件身份覆盖。
 		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var current capabilityRecord
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND resource_type=? AND resource_id=?", item.TenantID, "PERSON", item.ResourceID).Take(&current).Error
@@ -872,8 +963,8 @@ func (r *Repository) UpsertCapability(ctx context.Context, item domain.Capabilit
 	return item, err
 }
 
-// CreateEquipmentForImport refuses a number claimed since preview. An import
-// creation must never become an update of an unrelated concurrent creation.
+// CreateEquipmentForImport 拒绝预览后已被占用的编号。导入
+// 创建绝不能变成对无关并发创建记录的更新。
 func (r *Repository) CreateEquipmentForImport(ctx context.Context, item domain.Capability, actor string) (domain.Capability, error) {
 	if item.ResourceType != "EQUIPMENT" || item.TenantID == "" || item.ResourceID == "" {
 		return item, application.ErrValidation
@@ -888,19 +979,65 @@ func (r *Repository) CreateEquipmentForImport(ctx context.Context, item domain.C
 	return item, err
 }
 
-// DeleteEquipment 物理删除设备主数据。业务历史使用的是实施计划和交付事件中的设备快照，
-// 因而不会随着目录记录删除而丢失；活动占用的保护由应用层在同一租户边界内先行校验。
+// DeleteEquipment 与预留写入方共享设备主记录锁。
+// 取得锁后读取有效 JSON 计划：旧计划可能早于每日
+// 预留索引。历史或已归还快照保留为不可变证据。
 func (r *Repository) DeleteEquipment(ctx context.Context, tenantID, resourceID string) error {
-	result := r.db.WithContext(ctx).
-		Where("tenant_id = ? AND resource_type = ? AND resource_id = ?", tenantID, "EQUIPMENT", strings.TrimSpace(resourceID)).
-		Delete(&capabilityRecord{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return application.ErrNotFound
-	}
-	return nil
+	resourceID = strings.TrimSpace(resourceID)
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		locked, err := lockEquipmentResources(tx, tenantID, []string{resourceID})
+		if err != nil {
+			return err
+		}
+		master, exists := locked[strings.ToLower(resourceID)]
+		if !exists {
+			return application.ErrNotFound
+		}
+		var plans []struct {
+			ServiceItemID string
+			Equipment     []byte
+		}
+		returned := map[string]bool{}
+		if err := tx.Table("pm_impl_plan AS plan").Select("plan.service_item_id, plan.equipment").
+			Joins("JOIN pm_service_item AS item ON item.tenant_id=plan.tenant_id AND item.id=plan.service_item_id").
+			Where("plan.tenant_id=? AND plan.equipment IS NOT NULL AND item.status IN ?", tenantID, []string{domain.ProjectStatusPreparing, domain.ProjectStatusInProgress, domain.ProjectStatusException, domain.ProjectStatusFieldCompleted}).
+			Scan(&plans).Error; err != nil {
+			return err
+		}
+		for _, plan := range plans {
+			var resources []domain.PlanResource
+			if err := json.Unmarshal(plan.Equipment, &resources); err != nil {
+				return application.ConflictError("活动实施计划设备快照异常，请先核对占用")
+			}
+			for _, resource := range resources {
+				if !strings.EqualFold(strings.TrimSpace(resource.ResourceID), master.ResourceID) {
+					continue
+				}
+				if strings.TrimSpace(resource.ReturnedAt) == "" {
+					return application.ConflictError("设备仍被服务项「" + plan.ServiceItemID + "」占用，请先归还设备或撤销实施准备后再删除")
+				}
+				returned[plan.ServiceItemID] = true
+			}
+		}
+		var indexed []equipmentReservationRecord
+		if err := tx.Table("pm_equipment_reservation AS reservation").Select("reservation.*").
+			Joins("LEFT JOIN pm_service_item AS item ON item.tenant_id=reservation.tenant_id AND item.id=reservation.service_item_id").
+			Where("reservation.tenant_id=? AND reservation.resource_id=? AND (item.id IS NULL OR item.status IN ?)", tenantID, master.ResourceID, []string{domain.ProjectStatusPreparing, domain.ProjectStatusInProgress, domain.ProjectStatusException, domain.ProjectStatusFieldCompleted}).
+			Scan(&indexed).Error; err != nil {
+			return err
+		}
+		for _, row := range indexed {
+			if !returned[row.ServiceItemID] {
+				return application.ConflictError("设备仍有活动占用，请先归还设备或核对实施计划后再删除")
+			}
+		}
+		// 旧版归还或终止命令留下的行仅是索引；
+		// 检查权威计划后删除主记录时，它们不得继续存在。
+		if err := tx.Where("tenant_id=? AND resource_id=?", tenantID, master.ResourceID).Delete(&equipmentReservationRecord{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("tenant_id=? AND id=?", tenantID, master.ID).Delete(&capabilityRecord{}).Error
+	})
 }
 
 func (r *Repository) ListCapabilities(ctx context.Context, tenant, typ string) ([]domain.Capability, error) {
@@ -964,7 +1101,22 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 		value := *event.CapturedAt
 		capturedAt = &value
 	}
-	return tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, ClientOperationID: operationID, CapturedAt: capturedAt, Payload: payload, CreatedAt: event.CreatedAt}).Error
+	if err := tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, ClientOperationID: operationID, CapturedAt: capturedAt, Payload: payload, CreatedAt: event.CreatedAt}).Error; err != nil {
+		return err
+	}
+	if err := createDeliveryEffects(tx, event); err != nil {
+		return err
+	}
+	// AUD-IP-2026 / 批次 2：审计事件与交付事件同事务落库，平台不可用时由投递器重试，
+	// 不再出现"业务已提交、审计同步发送失败返 503"的不一致。
+	meta := auditctx.FromContext(tx.Statement.Context)
+	return tx.Create(&auditOutboxRecord{
+		ID: ulid.Make().String(), TenantID: event.TenantID, EventID: ulid.Make().String(),
+		ActorID: actorPointer(event.ActorUserID), Action: "PROJECT_MANAGEMENT:" + string(event.Type),
+		ResourceType: "project", ResourceID: event.ProjectID,
+		LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
+		Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+	}).Error
 }
 
 // upsertImplPlan 把实施计划（含渗透测试专项合规要素）落到 pm_impl_plan，与服务项 1:1。
@@ -1000,6 +1152,21 @@ func markEquipmentReturned(tx *gorm.DB, item *serviceItemRecord, event domain.De
 	if resourceID == "" {
 		return application.ErrValidation
 	}
+	locked, err := lockItemEquipment(tx, item.TenantID, item.ID, nil)
+	if err != nil {
+		return err
+	}
+	// SQL 资源 ID 使用 MySQL 大小写及重音不敏感排序规则，
+	// 而不可变 JSON 快照使用精确字符串。匹配快照或释放
+	// 任何预留前，先解析规范主记录身份。
+	var master capabilityRecord
+	err = tx.Where("tenant_id=? AND resource_type=? AND resource_id=?", item.TenantID, "EQUIPMENT", resourceID).Take(&master).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	var record implPlanRecord
 	if err := tx.Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).Take(&record).Error; err != nil {
 		return mapNotFound(err)
@@ -1013,7 +1180,7 @@ func markEquipmentReturned(tx *gorm.DB, item *serviceItemRecord, event domain.De
 	updated := make([]domain.PlanResource, 0, len(resources))
 	changed := false
 	for _, resource := range resources {
-		if resource.ResourceID == resourceID && strings.TrimSpace(resource.ReturnedAt) == "" {
+		if resource.ResourceID == master.ResourceID && strings.TrimSpace(resource.ReturnedAt) == "" {
 			resource.ReturnedAt = event.CreatedAt.Format(time.RFC3339)
 			changed = true
 		}
@@ -1022,12 +1189,25 @@ func markEquipmentReturned(tx *gorm.DB, item *serviceItemRecord, event domain.De
 	if !changed {
 		return nil
 	}
+	masterLocked := false
+	for _, row := range locked {
+		if row.ID == master.ID {
+			masterLocked = true
+			break
+		}
+	}
+	if !masterLocked {
+		return application.ErrConflict
+	}
 	encoded, err := json.Marshal(updated)
 	if err != nil {
 		return err
 	}
-	return tx.Model(&implPlanRecord{}).Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).
-		Updates(map[string]any{"equipment": encoded, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error
+	if err := tx.Model(&implPlanRecord{}).Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).
+		Updates(map[string]any{"equipment": encoded, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error; err != nil {
+		return err
+	}
+	return deleteEquipmentReservationRows(tx, item.TenantID, item.ID, master.ResourceID)
 }
 
 // updateImplPlanEquipment 把实施准备阶段确定的设备清单写回计划行。设备清单与人员清单
@@ -1037,13 +1217,208 @@ func updateImplPlanEquipment(tx *gorm.DB, item *serviceItemRecord, event domain.
 	if len(equipment) == 0 {
 		return nil
 	}
-	return tx.Model(&implPlanRecord{}).
+	result := tx.Model(&implPlanRecord{}).
 		Where("tenant_id = ? AND service_item_id = ?", item.TenantID, item.ID).
-		Updates(map[string]any{"equipment": equipment, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}).Error
+		Updates(map[string]any{"equipment": equipment, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		// 相同快照可能导致 MySQL 报告零行变更。应拒绝
+		// 缺失计划，但不能将未变化的有效计划误判为冲突。
+		var count int64
+		if err := tx.Model(&implPlanRecord{}).Where("tenant_id=? AND service_item_id=?", item.TenantID, item.ID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return application.ErrConflict
+		}
+	}
+	return nil
 }
 
 // clearImplPlan 只清除当前有效计划行，完整旧计划/设备快照仍保留在产生它的交付事件中。
 // 计划撤销清空人员与合规要素；准备撤销仅释放设备预约，允许在同一计划上重新准备。
+func deleteEquipmentReservations(tx *gorm.DB, tenantID, serviceItemID, resourceID string) error {
+	if _, err := lockItemEquipment(tx, tenantID, serviceItemID, nil); err != nil {
+		return err
+	}
+	return deleteEquipmentReservationRows(tx, tenantID, serviceItemID, resourceID)
+}
+
+func deleteEquipmentReservationRows(tx *gorm.DB, tenantID, serviceItemID, resourceID string) error {
+	query := tx.Where("tenant_id = ? AND service_item_id = ?", tenantID, serviceItemID)
+	if resourceID != "" {
+		query = query.Where("resource_id = ?", resourceID)
+	}
+	return query.Delete(&equipmentReservationRecord{}).Error
+}
+
+type equipmentReservationRecord struct {
+	TenantID      string    `gorm:"column:tenant_id;primaryKey"`
+	ResourceID    string    `gorm:"column:resource_id;primaryKey"`
+	UseDate       time.Time `gorm:"column:use_date;primaryKey"`
+	ServiceItemID string    `gorm:"column:service_item_id"`
+	WindowStart   time.Time `gorm:"column:window_start"`
+	WindowEnd     time.Time `gorm:"column:window_end"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+}
+
+func (equipmentReservationRecord) TableName() string { return "pm_equipment_reservation" }
+
+// lockEquipmentResources 是删除及所有预留变更的
+// 公共边界。所有调用方在访问每日记录或计划快照前，
+// 均按相同顺序锁主记录；删除绝不锁服务项。
+func lockEquipmentResources(tx *gorm.DB, tenantID string, ids []string) (map[string]capabilityRecord, error) {
+	lookup := map[string]bool{}
+	keys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" && !lookup[id] {
+			keys = append(keys, id)
+			lookup[id] = true
+		}
+	}
+	locked := make(map[string]capabilityRecord, len(keys))
+	if len(keys) == 0 {
+		return locked, nil
+	}
+	if len(keys) == 1 {
+		// 删除仅涉及一个资源，立即执行当前锁定读取，
+		// 不能在等待并发准备提交计划及每日记录前，
+		// 先创建可重复读快照。
+		var row capabilityRecord
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND resource_type=? AND resource_id=?", tenantID, "EQUIPMENT", keys[0]).Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return locked, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		locked[strings.ToLower(keys[0])] = row
+		return locked, nil
+	}
+	// 加锁前解析规范主键。若仅排序请求字符串，
+	// 在 MySQL 大小写及重音不敏感资源 ID 排序规则下，
+	// 等价别名可能产生相反锁顺序。
+	var candidates []capabilityRecord
+	if err := tx.Where("tenant_id=? AND resource_type=? AND resource_id IN ?", tenantID, "EQUIPMENT", keys).Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	for _, candidate := range candidates {
+		var row capabilityRecord
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND resource_type=? AND id=?", tenantID, "EQUIPMENT", candidate.ID).Take(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		locked[strings.ToLower(row.ResourceID)] = row
+	}
+	return locked, nil
+}
+
+func lockItemEquipment(tx *gorm.DB, tenantID, serviceItemID string, incoming []domain.PlanResource) (map[string]capabilityRecord, error) {
+	var plan implPlanRecord
+	err := tx.Where("tenant_id=? AND service_item_id=?", tenantID, serviceItemID).Take(&plan).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	var resources []domain.PlanResource
+	if len(plan.Equipment) > 0 {
+		if err := json.Unmarshal(plan.Equipment, &resources); err != nil {
+			return nil, err
+		}
+	}
+	resources = append(resources, incoming...)
+	var ids []string
+	for _, row := range resources {
+		ids = append(ids, row.ResourceID)
+	}
+	var previous []equipmentReservationRecord
+	if err := tx.Where("tenant_id=? AND service_item_id=?", tenantID, serviceItemID).Find(&previous).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range previous {
+		ids = append(ids, row.ResourceID)
+	}
+	return lockEquipmentResources(tx, tenantID, ids)
+}
+
+// syncEquipmentReservations 在与删除共用的锁下重检当前主状态，
+// 再原子替换按日预留索引。
+func syncEquipmentReservations(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	encoded := jsonBytes(event.Payload, "equipment")
+	// 显式 [] 表示释放设备。缺失快照不能在
+	// 保留原有效计划的同时释放索引。
+	if len(encoded) == 0 {
+		return application.ErrValidation
+	}
+	var resources []domain.PlanResource
+	if len(encoded) > 0 {
+		if err := json.Unmarshal(encoded, &resources); err != nil {
+			return err
+		}
+	}
+	locked, err := lockItemEquipment(tx, item.TenantID, item.ID, resources)
+	if err != nil {
+		return err
+	}
+	if err := deleteEquipmentReservationRows(tx, item.TenantID, item.ID, ""); err != nil {
+		return err
+	}
+	for _, resource := range resources {
+		if strings.TrimSpace(resource.ReturnedAt) != "" || strings.TrimSpace(resource.ResourceID) == "" {
+			continue
+		}
+		start, end, err := equipmentWindow(item, resource)
+		if err != nil {
+			return err
+		}
+		master, exists := locked[strings.ToLower(strings.TrimSpace(resource.ResourceID))]
+		if !exists || master.Status != "ACTIVE" || master.UsageScope == domain.EquipmentUsageCompanyOnly ||
+			(master.ValidFrom != nil && dayOnly(*master.ValidFrom).After(start)) ||
+			(master.ValidUntil != nil && dayOnly(*master.ValidUntil).Before(end)) {
+			return fmt.Errorf("%w: 设备「%s」已删除、停用或不再适用于使用时段，请重新选择设备", application.ErrConflict, resource.ResourceID)
+		}
+		for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
+			row := &equipmentReservationRecord{TenantID: item.TenantID, ResourceID: master.ResourceID, UseDate: day, ServiceItemID: item.ID, WindowStart: start, WindowEnd: end, CreatedAt: event.CreatedAt}
+			if err := tx.Create(row).Error; err != nil {
+				if isDuplicateKey(err) || isDeadlock(err) {
+					return fmt.Errorf("%w: 设备 %s 在 %s 已被其他服务项占用", application.ErrConflict, resource.ResourceID, day.Format("2006-01-02"))
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func equipmentWindow(item *serviceItemRecord, resource domain.PlanResource) (time.Time, time.Time, error) {
+	startText, endText := strings.TrimSpace(resource.WindowStart), strings.TrimSpace(resource.WindowEnd)
+	if startText == "" || endText == "" {
+		if item.PlannedStart == nil || item.PlannedEnd == nil {
+			return time.Time{}, time.Time{}, application.ErrValidation
+		}
+		return dayOnly(*item.PlannedStart), dayOnly(*item.PlannedEnd), nil
+	}
+	start, err := time.Parse("2006-01-02", startText)
+	if err != nil {
+		return time.Time{}, time.Time{}, application.ErrValidation
+	}
+	end, err := time.Parse("2006-01-02", endText)
+	if err != nil || end.Before(start) || end.Sub(start) > 366*24*time.Hour {
+		return time.Time{}, time.Time{}, application.ErrValidation
+	}
+	return start, end, nil
+}
+
+func dayOnly(value time.Time) time.Time {
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+}
+
 func clearImplPlan(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent, clearPlan bool) error {
 	updates := map[string]any{"equipment": nil, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}
 	if clearPlan {
@@ -1418,4 +1793,81 @@ func (r *Repository) UpdateCapabilityIdentities(ctx context.Context, tenantID st
 		}
 		return nil
 	})
+}
+
+// auditOutboxRecord 是交付事件事务内写下的审计事件（批次 2）。
+type auditOutboxRecord struct {
+	ID             string     `gorm:"column:id;primaryKey"`
+	TenantID       string     `gorm:"column:tenant_id"`
+	EventID        string     `gorm:"column:event_id"`
+	ActorID        *string    `gorm:"column:actor_id"`
+	Action         string     `gorm:"column:action"`
+	ResourceType   string     `gorm:"column:resource_type"`
+	ResourceID     string     `gorm:"column:resource_id"`
+	LoginIP        []byte     `gorm:"column:login_ip"`
+	ClientIP       []byte     `gorm:"column:client_ip"`
+	IPSource       string     `gorm:"column:ip_source"`
+	Result         string     `gorm:"column:result"`
+	DeliveryStatus string     `gorm:"column:delivery_status"`
+	Attempts       uint       `gorm:"column:attempts"`
+	NextAttemptAt  time.Time  `gorm:"column:next_attempt_at"`
+	LockedAt       *time.Time `gorm:"column:locked_at"`
+	DeliveredAt    *time.Time `gorm:"column:delivered_at"`
+	LastError      *string    `gorm:"column:last_error"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+}
+
+func (auditOutboxRecord) TableName() string { return "prj_audit_outbox" }
+
+func actorPointer(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+func auditIPBytes(value string) []byte {
+	parsed := net.ParseIP(strings.TrimSpace(value))
+	if parsed == nil {
+		return nil
+	}
+	if ipv4 := parsed.To4(); ipv4 != nil {
+		return append([]byte(nil), ipv4...)
+	}
+	return append([]byte(nil), parsed.To16()...)
+}
+
+func auditIPSource(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "DIRECT", "TRUSTED_PROXY", "LEGACY_PROTOCOL", "UNKNOWN":
+		return strings.ToUpper(strings.TrimSpace(value))
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// reworkReportRevision 处理“报告回退现场”的修订规则：
+//  1. 当前修订置为 SUPERSEDED，保留原文件与审批证据，便于追溯；
+//  2. 为下一个修订号创建 ACTIVE/NONE 的空修订，供重新编制使用（幂等）。
+func reworkReportRevision(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	if err := tx.Model(&reportRevisionRecord{}).
+		Where("tenant_id=? AND subject_type=? AND subject_id=? AND revision=? AND validity_status=?",
+			item.TenantID, "SERVICE_ITEM", item.ID, item.ReportRevision, "ACTIVE").
+		Updates(map[string]any{"validity_status": "SUPERSEDED", "updated_at": event.CreatedAt}).Error; err != nil {
+		return err
+	}
+	var count int64
+	if err := tx.Model(&reportRevisionRecord{}).
+		Where("tenant_id=? AND subject_type=? AND subject_id=? AND revision=?",
+			item.TenantID, "SERVICE_ITEM", item.ID, item.ReportRevision+1).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	return tx.Create(&reportRevisionRecord{
+		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID,
+		Revision: item.ReportRevision + 1, Status: "NONE", ValidityStatus: "ACTIVE",
+		CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
+	}).Error
 }

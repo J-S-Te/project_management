@@ -14,13 +14,8 @@ x-project-environment: &project-environment
     OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
-    TEMPORAL_TASK_QUEUE: project-management
-    TEMPORAL_WORKER_DEPLOYMENT_NAME: ${PROJECT_TEMPORAL_WORKER_DEPLOYMENT_NAME:-project-management}
-    TEMPORAL_WORKER_BUILD_ID: ${PROJECT_TEMPORAL_WORKER_BUILD_ID:-project-worker-v1}
-    TEMPORAL_WORKER_VERSIONING_ENABLED: ${PROJECT_TEMPORAL_WORKER_VERSIONING_ENABLED:-true}
-    TEMPORAL_WORKER_VERSIONING_POLICY: ${PROJECT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
-    TEMPORAL_METRICS_ADDRESS: :9092
-    PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}
+    # 不可变 Build 从 runtime env_file 读取，避免空宿主插值覆盖有效配置。
+    PROJECT_RUN_WORKER_WITH_API: "false"
     GIN_MODE: release
 
 services:
@@ -102,18 +97,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  worker:
-    profiles: ["split-runtime"]
+  sla-notifier:
     <<: *project-environment
     image: project-management:local
-    entrypoint: ["/usr/local/bin/project-worker"]
+    entrypoint: ["/usr/local/bin/sla-notifier"]
     depends_on:
       migrate:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
-    expose:
-      - "9092"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$${PROJECT_BACKGROUND_HEALTH_ADDRESS:-127.0.0.1:9093}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    stop_grace_period: 420s
     restart: unless-stopped
 
   temporal-ui:

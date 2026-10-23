@@ -299,9 +299,9 @@ type penetrationMutation func(*gorm.DB, *penetrationWorkPackageRecord) (map[stri
 
 func (r *Repository) mutatePenetrationPackage(ctx context.Context, tenantID, itemID string, expectedVersion uint64, idempotencyKey, eventType, actor string, payload any, now time.Time, mutate penetrationMutation) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Serialize commands for the same work package before checking the idempotency
-		// ledger. A retry that arrives while the first transaction is committing must
-		// observe the committed event instead of failing on the now-stale version.
+		// 检查幂等台账前，将同一工作包命令串行化。
+		// 首次事务提交期间到达的重试必须
+		// 看到已提交事件，不能因版本已过期而失败。
 		var row penetrationWorkPackageRecord
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND parent_service_item_id=?", tenantID, itemID).Take(&row).Error; err != nil {
 			return mapNotFound(err)

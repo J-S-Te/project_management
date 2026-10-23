@@ -159,7 +159,12 @@ func TestWarningRulesConsumeCheckTypeAndThreshold(t *testing.T) {
 	t.Run("check_type 限定类别，不匹配则不告警", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Name: "场地冲突预警", CheckType: "场地冲突"}}}
 		service := Service{Repo: repo}
-		service.fireConflictWarning(context.Background(), principal, "SI-1", conflicts)
+		effects := SnapshotDeliveryEffects(deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned, map[string]any{"conflicts": conflicts}), nil, repo.rules)
+		events, _, err := service.buildDeliveryEffects(context.Background(), effects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo.events = events
 		if len(repo.events) != 0 {
 			t.Fatalf("non-matching check_type must not warn: %+v", repo.events)
 		}
@@ -168,7 +173,12 @@ func TestWarningRulesConsumeCheckTypeAndThreshold(t *testing.T) {
 	t.Run("check_type 命中类别才告警，并带出规则名", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Name: "资质能力预警", CheckType: "资质能力冲突"}}}
 		service := Service{Repo: repo}
-		service.fireConflictWarning(context.Background(), principal, "SI-1", conflicts)
+		effects := SnapshotDeliveryEffects(deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned, map[string]any{"conflicts": conflicts}), nil, repo.rules)
+		events, _, err := service.buildDeliveryEffects(context.Background(), effects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo.events = events
 		if len(repo.events) != 1 || repo.events[0].Type != EventWarningTriggered {
 			t.Fatalf("matching check_type must warn once: %+v", repo.events)
 		}
@@ -186,7 +196,12 @@ func TestWarningRulesConsumeCheckTypeAndThreshold(t *testing.T) {
 	t.Run("threshold 高于命中数量时不告警", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Name: "连续三项", Threshold: "连续 3 项冲突"}}}
 		service := Service{Repo: repo}
-		service.fireConflictWarning(context.Background(), principal, "SI-1", conflicts)
+		effects := SnapshotDeliveryEffects(deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned, map[string]any{"conflicts": conflicts}), nil, repo.rules)
+		events, _, err := service.buildDeliveryEffects(context.Background(), effects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo.events = events
 		if len(repo.events) != 0 {
 			t.Fatalf("threshold 3 with 2 conflicts must not warn: %+v", repo.events)
 		}
@@ -195,7 +210,12 @@ func TestWarningRulesConsumeCheckTypeAndThreshold(t *testing.T) {
 	t.Run("threshold 达到时告警并回填阈值", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Name: "任意两项", Threshold: "2"}}}
 		service := Service{Repo: repo}
-		service.fireConflictWarning(context.Background(), principal, "SI-1", conflicts)
+		effects := SnapshotDeliveryEffects(deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned, map[string]any{"conflicts": conflicts}), nil, repo.rules)
+		events, _, err := service.buildDeliveryEffects(context.Background(), effects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo.events = events
 		if len(repo.events) != 1 {
 			t.Fatalf("threshold 2 with 2 conflicts must warn: %+v", repo.events)
 		}
@@ -207,7 +227,12 @@ func TestWarningRulesConsumeCheckTypeAndThreshold(t *testing.T) {
 	t.Run("停用的规则不参与判定", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: false, Name: "停用"}}}
 		service := Service{Repo: repo}
-		service.fireConflictWarning(context.Background(), principal, "SI-1", conflicts)
+		effects := SnapshotDeliveryEffects(deliveryEvent(principal, "PJ-1", "SI-1", EventExecutionTeamAssigned, map[string]any{"conflicts": conflicts}), nil, repo.rules)
+		events, _, err := service.buildDeliveryEffects(context.Background(), effects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo.events = events
 		if len(repo.events) != 0 {
 			t.Fatalf("disabled rule must not warn: %+v", repo.events)
 		}

@@ -48,9 +48,9 @@ jobs:
           : "${ACR_PULL_REGISTRY:?missing ACR_PULL_REGISTRY}"
           : "${ACR_NAMESPACE:?missing ACR_NAMESPACE}"
           : "${ACR_REPOSITORY:?missing ACR_REPOSITORY}"
-          # docker/login-action accepts a registry host only. Allow existing
-          # repository variables that accidentally include an image path, but
-          # never pass that path to the registry authentication endpoint.
+          # docker/login-action 只接受镜像仓库主机名。兼容既有变量中
+          # 误带镜像路径的情况，但不得将该路径
+          # 传给仓库认证端点。
           push_registry="${ACR_PUSH_REGISTRY#https://}"
           push_registry="${push_registry#http://}"
           push_registry="${push_registry%%/*}"

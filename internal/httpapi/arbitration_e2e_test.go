@@ -36,10 +36,10 @@ type arbEnv struct {
 	handler http.Handler
 }
 
-// staticRolePersonnelDirectory represents the platform-side effective role
-// assignments used by database E2E fixtures. Capability rows alone must not
-// make an arbitrary identifier assignable: both the platform role directory
-// and an active project capability are required.
+// staticRolePersonnelDirectory 表示数据库 E2E 夹具使用的
+// 平台有效角色分配。仅有能力记录不能使
+// 任意标识可被指派：必须同时具备平台角色目录
+// 记录及有效项目能力。
 type staticRolePersonnelDirectory map[string][]platform.OwnerDirectoryUser
 
 func (d staticRolePersonnelDirectory) List(_ context.Context, query platform.OwnerDirectoryQuery) (platform.OwnerDirectoryPage, error) {

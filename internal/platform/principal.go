@@ -31,9 +31,9 @@ type Principal struct {
 
 func (p Principal) Has(permission string) bool { return p.Permissions[permission] }
 
-// HasFullDataScope is for tenant-wide master data that cannot safely be
-// filtered by an individual project, organization or person. A non-empty
-// narrow scope is not an application grant.
+// HasFullDataScope 用于无法安全按单个项目、组织
+// 或人员筛选的租户全范围主数据。非空的
+// 窄范围不代表应用授权。
 func (p Principal) HasFullDataScope() bool {
 	for _, scope := range p.DataScopes {
 		switch scope.ScopeType {
@@ -44,11 +44,11 @@ func (p Principal) HasFullDataScope() bool {
 	return false
 }
 
-// HasOrganizationalScope reports whether the principal holds an organization-wide
-// grant (application, environment, tenant, or organization). Directory master
-// data such as capability/equipment records may be read by any organizational
-// role; per-project or per-person scopes stay excluded to avoid exposing
-// tenant-wide master data to narrow scopes.
+// HasOrganizationalScope 判断主体是否持有组织级
+// 授权（应用、环境、租户或组织）。能力或设备等目录主
+// 数据允许任一组织级角色读取；
+// 项目或个人范围仍排除在外，防止向窄范围
+// 暴露租户全范围主数据。
 func (p Principal) HasOrganizationalScope() bool {
 	for _, scope := range p.DataScopes {
 		switch scope.ScopeType {
@@ -59,10 +59,10 @@ func (p Principal) HasOrganizationalScope() bool {
 	return false
 }
 
-// ScopeFilter is the only business-data boundary accepted by repositories.
-// The platform currently exposes a tenant-wide application grant as
-// APPLICATION and an environment-wide grant as ENVIRONMENT, so both are
-// explicit full-data scopes after the authorization-context binding checks.
+// ScopeFilter 是仓储接受的唯一业务数据边界。
+// 平台当前以 APPLICATION 暴露租户全应用授权，
+// 以 ENVIRONMENT 暴露环境全范围授权，因此在授权上下文
+// 绑定检查后，两者均为显式全数据范围。
 type ScopeFilter struct {
 	TenantID        string
 	IdentityID      string
@@ -71,9 +71,9 @@ type ScopeFilter struct {
 	ProjectIDs      []string
 	AllowAll        bool
 	AllowSelf       bool
-	// AssignedItemsOnly is an application-level business rule for operational
-	// assignees. It prevents a broad platform application scope from turning a
-	// team lead, project manager or engineer into a tenant-wide project reader.
+	// AssignedItemsOnly 是面向操作受理人的应用级业务规则，
+	// 防止宽泛的平台应用范围使组长、
+	// 项目经理或工程师成为租户全范围项目读取者。
 	AssignedItemsOnly bool
 }
 
