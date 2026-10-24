@@ -708,10 +708,10 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 	return result, nil
 }
 
-// CountExistingContractReferences matches the stable contract ID written by
-// current integrations and the (number, version) key retained by legacy/manual
-// projects. This makes the KPI agree with the new-project selector while old
-// rows are being backfilled with contract_id.
+// CountExistingContractReferences 匹配当前集成写入的稳定合同 ID，
+// 以及旧版或人工项目保留的（编号、版本）键。
+// 这使旧行回填 contract_id 期间，
+// KPI 仍与新建项目选择器一致。
 func (r *Repository) CountExistingContractReferences(ctx context.Context, tenantID string, references []platform.ApprovedContract) (int, error) {
 	if len(references) == 0 {
 		return 0, nil
@@ -723,10 +723,10 @@ func (r *Repository) CountExistingContractReferences(ctx context.Context, tenant
 	return len(matchedContractReferenceKeys(records, references)), nil
 }
 
-// FilterUnreferencedApprovedContracts is the authoritative source for the new
-// project picker. It intentionally ignores the current user's project scope:
-// contract-to-project uniqueness is tenant-wide, so projects hidden from the
-// caller must still remove their contracts from the selectable list.
+// FilterUnreferencedApprovedContracts 是新建项目选择器的
+// 权威来源，有意忽略当前用户项目范围：
+// 合同到项目的唯一性为租户全范围，因此对调用方隐藏的
+// 项目也必须使其合同从可选列表移除。
 func (r *Repository) FilterUnreferencedApprovedContracts(ctx context.Context, tenantID string, references []platform.ApprovedContract) ([]platform.ApprovedContract, error) {
 	if len(references) == 0 {
 		return []platform.ApprovedContract{}, nil
@@ -769,29 +769,37 @@ func countMatchedContractReferences(records []projectRecord, references []platfo
 	return len(matchedContractReferenceKeys(records, references))
 }
 
+// approvedContractReferenceKey 返回建项身份：稳定合同 ID；历史数据没有 ID 时回退合同号。
+// 普通行版本不参与，状态变化递增 version 不会让同一合同重新变成"未建项"。
 func approvedContractReferenceKey(reference platform.ApprovedContract) string {
-	return strings.TrimSpace(reference.ID) + "\x1f" + strconv.FormatUint(reference.Version, 10)
+	if id := strings.TrimSpace(reference.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(reference.Number)
 }
 
+// matchedContractReferenceKeys 按 projectRecord 的合同身份（contract_id，空则 contract）
+// 匹配引用。合同号也作为别名登记，兼容生产历史中把编号写进 contract_id 的行。
 func matchedContractReferenceKeys(records []projectRecord, references []platform.ApprovedContract) map[string]bool {
-	referenceByID := make(map[string]string, len(references))
-	referenceByLegacyKey := make(map[string]string, len(references))
+	referenceByIdentity := make(map[string]string, len(references)*2)
 	for _, reference := range references {
-		id := strings.TrimSpace(reference.ID)
-		if id == "" {
+		key := approvedContractReferenceKey(reference)
+		if key == "" {
 			continue
 		}
-		key := approvedContractReferenceKey(reference)
-		referenceByID[id+"\x1f"+strconv.FormatUint(reference.Version, 10)] = key
-		referenceByLegacyKey[strings.TrimSpace(reference.Number)+"\x1f"+strconv.FormatUint(reference.Version, 10)] = key
+		for _, value := range []string{reference.ID, reference.Number} {
+			if value = strings.TrimSpace(value); value != "" {
+				referenceByIdentity[value] = key
+			}
+		}
 	}
 	matched := make(map[string]bool, len(references))
 	for _, record := range records {
-		if key := referenceByID[strings.TrimSpace(record.ContractID)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; key != "" {
-			matched[key] = true
-			continue
+		identity := strings.TrimSpace(record.ContractID)
+		if identity == "" {
+			identity = strings.TrimSpace(record.Contract)
 		}
-		if key := referenceByLegacyKey[strings.TrimSpace(record.Contract)+"\x1f"+strings.TrimSpace(record.ContractVersion)]; key != "" {
+		if key := referenceByIdentity[identity]; key != "" {
 			matched[key] = true
 		}
 	}

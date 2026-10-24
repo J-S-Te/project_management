@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func TestDeliveryEffectsMigrationKeepsIntentAndRecoveryBoundaries(t *testing.T) {
+	body, err := Files.ReadFile("000028_delivery_effects_outbox.sql")
+	if err != nil { t.Fatal(err) }
+	for _, expected := range []string{"CREATE TABLE IF NOT EXISTS pm_delivery_effects_outbox", "UNIQUE KEY uq_pm_effects_source (tenant_id, source_event_id)", "payload JSON NOT NULL", "idx_pm_effects_claim", "locked_until", "last_error_summary", "completed_at"} {
+		if !strings.Contains(string(body), expected) { t.Fatalf("missing durable boundary %q", expected) }
+	}
+	if strings.Contains(string(body), "INSERT INTO") { t.Fatal("historical events must not be retroactively replayed") }
+}
+
 func TestIncomeContractCategoriesOnlyAddMissingTenantEntries(t *testing.T) {
 	body, err := Files.ReadFile("000027_income_contract_service_categories.sql")
 	if err != nil {
@@ -224,6 +233,61 @@ func TestContractIdentityMigrationUsesStableIDForIdempotency(t *testing.T) {
 		if !strings.Contains(sql, required) {
 			t.Fatalf("contract identity migration missing %q", required)
 		}
+	}
+}
+
+// A04：普通行版本只用于并发/审计，建项唯一性改为「租户 + 合同身份」。
+// 迁移必须 失败时安全拒绝：存量已有同合同多项目时以明确错误停止，绝不删除/合并历史项目。
+func TestContractProjectIdentityMigrationFailsClosedOnExistingDuplicates(t *testing.T) {
+	body, err := Files.ReadFile("000033_contract_project_identity.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"DROP INDEX uq_pm_project_contract_version",
+		"ADD UNIQUE KEY uq_pm_project_contract_identity (tenant_id, contract_identity_key)",
+		"GROUP BY tenant_id, contract_identity_key",
+		// 历史行把合同编号写进 contract_id、新行写稳定 ID 时，按权威合同号再查一次。
+		"WHERE contract <> ''",
+		"UNION ALL",
+		"HAVING COUNT(*) > 1",
+		"SIGNAL SQLSTATE '45000'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("contract project identity migration missing %q", required)
+		}
+	}
+	upper := strings.ToUpper(sql)
+	for _, forbidden := range []string{"DELETE FROM", "UPDATE PM_PROJECT", "DROP TABLE", "TRUNCATE"} {
+		if strings.Contains(upper, forbidden) {
+			t.Fatalf("fail-closed migration must not rewrite historical projects, found %q", forbidden)
+		}
+	}
+	if !strings.Contains(sql, "-- 只读预检") {
+		t.Fatal("migration must document the read-only precheck query")
+	}
+	// 守卫必须先于唯一键变更执行：存量冲突时不得先改结构再报错。
+	guard, alter := strings.Index(sql, "CALL pm_guard_contract_project_identity();"), strings.Index(sql, "ALTER TABLE pm_project")
+	if guard < 0 || alter < 0 || guard > alter {
+		t.Fatalf("fail-closed guard must run before the unique-key change: guard=%d alter=%d", guard, alter)
+	}
+}
+
+// 原生结构守卫；执行及中断恢复仍须隔离 MySQL。
+func TestContractProjectIdentityMigrationCanResumeAfterDDLBeforeLedger(t *testing.T) {
+	body, err := Files.ReadFile("000033_contract_project_identity.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, guard := range []string{"information_schema.statistics", "IF identity_index_count = 0 THEN", "IF version_index_count > 0 THEN", "identity_index_columns <> 'tenant_id,contract_identity_key'", "index definition mismatch"} {
+		if !strings.Contains(sql, guard) {
+			t.Fatalf("DDL interruption recovery missing %q", guard)
+		}
+	}
+	if strings.Index(sql, "IF duplicate_groups > 0 THEN") > strings.Index(sql, "IF identity_index_count = 0 THEN") {
+		t.Fatal("duplicate preflight must run before any index DDL, including retries")
 	}
 }
 

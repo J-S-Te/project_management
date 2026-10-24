@@ -1,10 +1,11 @@
 package httpapi_test
 
-// 同一合同 + 同一版本重复新建项目必须有明确业务提示，而不是 500「服务暂不可用」。
+// 同一合同重复新建项目必须有明确业务提示，而不是 500「服务暂不可用」。
 //
 // 现场现象：业务管理员在项目列表重复选同一份已审批合同新建项目，连续三次都提示
-// 「服务暂不可用」。根因是唯一键 uq_pm_project_contract_version 冲突（MySQL 1062）
-// 未在应用层翻译，被 writeServiceError 兜底成 PM_INTERNAL_ERROR。
+// 「服务暂不可用」。根因是唯一键冲突（MySQL 1062）未在应用层翻译，被
+// writeServiceError 兜底成 PM_INTERNAL_ERROR。A04 后建项身份是合同 ID（历史空 ID
+// 回退合同号），合同状态流转递增普通行版本不再释放重复建项。
 
 import (
 	"context"
@@ -25,38 +26,32 @@ import (
 	"gorm.io/gorm"
 )
 
-type duplicateContractVerifier struct{}
+// duplicateContractVerifier 模拟合同系统：同一合同 ID 在状态流转后返回递增的
+// 普通行版本（version 只用于并发/审计，不参与建项唯一性）。
+type duplicateContractVerifier struct{ version uint64 }
 
-func (duplicateContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+func (*duplicateContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return nil, nil
 }
 
-func (duplicateContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (*duplicateContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", nil
 }
 
-func (duplicateContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
-	version := uint64(1)
-	if id == "approved-dup-v2" {
-		version = 2
-	}
+func (v *duplicateContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{
-		ID: id, Number: "HT-DUP-1", CustomerName: "走查客户", Version: version,
-		Status: "approved", ApprovalPassed: true,
+		ID: id, Number: "HT-DUP-1", CustomerName: "走查客户", Version: v.version,
+		Status: "in_progress", ApprovalPassed: true,
 	}, nil
 }
 
-func (duplicateContractVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
-	version := uint64(1)
-	if id == "approved-dup-v2" {
-		version = 2
-	}
-	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: version, ServiceItems: []platform.ApprovedContractService{{
+func (v *duplicateContractVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: v.version, ServiceItems: []platform.ApprovedContractService{{
 		SourceID: "SVC-1", Name: "等保测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", TestMode: "STANDARD",
 	}}}, nil
 }
 
-func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
+func TestDuplicateContractAfterVersionChangeReportsExecutableError(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
 		t.Skip("set PM_TEST_DSN to exercise duplicate project creation")
@@ -75,7 +70,8 @@ func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	repository := store.NewRepository(db)
-	service := &application.Service{Repo: repository, Contracts: duplicateContractVerifier{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	verifier := &duplicateContractVerifier{version: 1}
+	service := &application.Service{Repo: repository, Contracts: verifier, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	handler := httpapi.NewRouter(service, switchIdentityFor(tenant), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	body := `{"name":"走查重复项目","contract_id":"approved-dup-v1",
@@ -105,10 +101,11 @@ func TestDuplicateContractVersionReportsExecutableError(t *testing.T) {
 	if !strings.Contains(response, created.Data.ID) || !strings.Contains(response, "调整拆解") {
 		t.Fatalf("提示应包含已存在项目编号与替代动作：%s", response)
 	}
-	// 换一个版本号可以正常创建：同一合同的后续版本是合法业务场景。
-	nextVersion := strings.Replace(body, `"contract_id":"approved-dup-v1"`, `"contract_id":"approved-dup-v2"`, 1)
-	status, response = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", nextVersion)
-	if status != http.StatusCreated {
-		t.Fatalf("同合同新版本应可创建：HTTP %d %s", status, response)
+	// 合同正常状态流转会把普通行版本从 1 递增到 2；同一合同再次建项仍必须被拒。
+	verifier.version = 2
+	status, response = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/projects", body)
+	t.Logf("合同版本变化后重复创建 -> HTTP %d %s", status, response)
+	if status != http.StatusConflict || !strings.Contains(response, "PM_DUPLICATE_PROJECT") {
+		t.Fatalf("合同版本变化不得释放重复建项：HTTP %d %s", status, response)
 	}
 }

@@ -2,8 +2,8 @@ package domain
 
 import "time"
 
-// ProjectMonitoringQuery is the server-owned filter contract for the in-flight console.
-// Pagination is applied after every business filter so totals and pages describe one snapshot.
+// ProjectMonitoringQuery 是服务端定义的在途控制台筛选契约。
+// 全部业务筛选之后再分页，使总数和分页描述同一快照。
 type ProjectMonitoringQuery struct {
 	Page             int
 	PageSize         int
@@ -65,9 +65,9 @@ type ProjectMonitoringSnapshot struct {
 	SnapshotVersion   string              `json:"snapshot_version"`
 }
 
-// ProjectMonitoringPageData is the repository-to-application projection for one database page.
-// Only the projects on the requested page carry service/SLA/event detail; totals and facets are
-// computed by MySQL from the complete authorization-scoped filtered set.
+// ProjectMonitoringPageData 是单个数据库页的仓储到应用投影。
+// 仅请求页的项目携带服务、SLA 和事件详情；总数及分面由
+// MySQL 从授权范围内完整筛选结果计算。
 type ProjectMonitoringPageData struct {
 	Projects          []Project
 	ServiceItems      []ServiceItem

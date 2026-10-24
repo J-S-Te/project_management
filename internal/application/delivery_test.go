@@ -3,6 +3,9 @@ package application
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +44,19 @@ func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) 
 	}{
 		{name: "same as original", id: "CONTRACT-1", want: ErrValidation, messagePart: "不能与原合同相同"},
 		{name: "not approved", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "draft"}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		// ApprovalPassed 只是对端的审批标记，不能代替状态资格：终止/归档/审批中的合同
+		// 即使历史审批通过，也不能作为补充协议调整依据。
+		{name: "pending despite approval flag", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "pending", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		{name: "in progress is not an approved supplement", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "in_progress", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		{name: "terminated", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "terminated", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		{name: "archived", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "archived", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "尚未审批通过"},
+		{name: "active without approval flag", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "active"}, want: ErrPrecondition, messagePart: "尚未审批通过"},
 		{name: "missing customer identity", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerName: "示例客户", Status: "approved", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "同一客户"},
 		{name: "other customer", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-2", Status: "approved", ApprovalPassed: true}, want: ErrPrecondition, messagePart: "同一客户"},
 		{name: "approved supplement", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "approved", ApprovalPassed: true}},
+		// 正常审批会在一笔事务里把 pending 推进到 approved 再到 active；
+		// 项目接收方必须接受最终持久化的 active，而不是只认过程态 approved。
+		{name: "active supplement after normal approval", id: "SUP-1", contract: platform.ApprovedContract{ID: "SUP-1", CustomerID: "CUSTOMER-1", Status: "active", ApprovalPassed: true}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -60,12 +73,50 @@ func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) 
 			}
 		})
 	}
+	t.Run("legacy project contract number is still the original contract", func(t *testing.T) {
+		service := &Service{Contracts: supplementContractVerifier{contract: platform.ApprovedContract{ID: "HT-LEGACY-1", CustomerName: "示例客户", Status: "active", ApprovalPassed: true}}}
+		err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Contract: "HT-LEGACY-1", Customer: "示例客户"}, "HT-LEGACY-1")
+		if !errors.Is(err, ErrValidation) || !strings.Contains(UserMessage(err), "不能与原合同相同") {
+			t.Fatalf("legacy original contract accepted as supplement: %v", err)
+		}
+	})
 	t.Run("legacy project matches authoritative customer name", func(t *testing.T) {
 		service := &Service{Contracts: supplementContractVerifier{contract: platform.ApprovedContract{ID: "SUP-1", CustomerName: "示例客户", Status: "approved", ApprovalPassed: true}}}
 		if err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Customer: "示例客户"}, "SUP-1"); err != nil {
 			t.Fatalf("legacy project supplement rejected: %v", err)
 		}
 	})
+}
+
+// 契约测试：走项目侧真实的机器身份客户端，读取合同系统正常审批后的持久化响应。
+// 合同系统在审批完成事务里把状态推进到 active，并且路由原样返回持久化状态；
+// 这里不复用任何本地桩，确保接收方接受对端真实返回的 active + approval_passed。
+func TestActiveSupplementContractFromContractServiceIsAccepted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_, _ = io.WriteString(w, `{"access_token":"machine-token","token_type":"Bearer","expires_in":3600,"scope":"contract.approved.internal.read"}`)
+		case "/internal/v1/project/approved-contracts/SUP-1":
+			if r.Header.Get("Authorization") != "Bearer machine-token" {
+				t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+			}
+			_, _ = io.WriteString(w, `{"code":"OK","data":{"id":"SUP-1","contract_number":"HT-SUP-1","title":"补充协议","customer_id":"CUSTOMER-1","customer_name":"示例客户","version":3,"status":"active","approval_passed":true}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	verifier := platform.NewApprovedContractVerifier(server.URL, server.URL+"/internal/v1/project/approved-contracts", "project-client", "secret", "")
+	if verifier == nil {
+		t.Fatal("approved contract verifier not configured")
+	}
+	service := &Service{Contracts: verifier}
+	project := domain.Project{ContractID: "CONTRACT-1", CustomerID: "CUSTOMER-1", Customer: "示例客户"}
+	if err := service.verifyApprovedSupplementContract(context.Background(), project, "SUP-1"); err != nil {
+		t.Fatalf("contract management persists active after normal approval; project rejected it: %v", err)
+	}
 }
 
 func TestNormalizeTravelArrangementUsesBusinessModesInsteadOfFreeTextIDs(t *testing.T) {
@@ -596,12 +647,14 @@ type duplicateContractRepository struct {
 	synced    bool
 	activated []string
 	// duplicate 为 true 时 ActivateContract 撞唯一键（模拟后到请求）。
-	duplicate       bool
-	findContractIDs []string
+	duplicate           bool
+	findContractIDs     []string
+	findContractNumbers []string
 }
 
-func (r *duplicateContractRepository) FindProjectByContractVersion(_ context.Context, _ platform.ScopeFilter, contractID, _ string) (domain.Project, error) {
+func (r *duplicateContractRepository) FindProjectByContract(_ context.Context, _ platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
 	r.findContractIDs = append(r.findContractIDs, contractID)
+	r.findContractNumbers = append(r.findContractNumbers, contractNumber)
 	if r.missOnce {
 		r.missOnce = false
 		return domain.Project{}, ErrNotFound
@@ -655,7 +708,7 @@ func (r *duplicateContractRepository) UpdateCapabilityIdentities(context.Context
 	return nil
 }
 
-// 重复激活同一合同版本不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
+// 重复激活同一合同不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
 func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *testing.T) {
 	principal := principalWith("project.contract.import", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION", ScopeID: "app-1"})
 	activeRepo := &duplicateContractRepository{}
@@ -675,7 +728,7 @@ func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *
 		t.Fatalf("first activation should insert project once, got %d", len(activeRepo.activated))
 	}
 
-	// 第二次请求并发到达：它的 pre-check find 与首次插入同时进行（miss），写库时撞唯一键。
+	// 第二次请求并发到达：它的 预检查询 与首次插入同时进行（未命中），写库时撞唯一键。
 	activeRepo.missOnce = true
 	activeRepo.duplicate = true
 	second, err := service.ActivateContract(context.Background(), principal, activation())
@@ -701,15 +754,164 @@ func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *
 	}
 }
 
+// A04：建项身份是稳定的合同 ID，普通行版本只用于并发/审计。
+// 合同从 active 变为 in_progress 等状态会递增 version，但不得因此允许再建一个项目。
+func TestContractActivationWithNewContractVersionReturnsExistingProject(t *testing.T) {
+	principal := principalWith("project.contract.import", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION", ScopeID: "app-1"})
+	repo := &versionAwareContractRepository{existing: domain.Project{
+		ID: "PJ-EXISTING", TenantID: "tenant-1", ContractID: "CT-001", Contract: "HT-2026-001", ContractVersion: "1",
+	}}
+	service := &Service{Repo: repo}
+	activation := domain.ContractActivation{
+		ContractID: "CT-001", ContractNumber: "HT-2026-001", ContractVersion: "2", Customer: "客户A", EffectiveAt: time.Now().UTC(),
+		Services: []domain.ContractService{{SourceID: "S1", Site: "北京", Batch: "B1", Category: "渗透测试", TestMode: "PENETRATION"}},
+	}
+	project, err := service.ActivateContract(context.Background(), principal, activation)
+	if err != nil {
+		t.Fatalf("activation after contract version change failed: %v", err)
+	}
+	if project.ID != "PJ-EXISTING" {
+		t.Fatalf("contract version change created a second project %q, want existing PJ-EXISTING", project.ID)
+	}
+	if len(repo.activated) != 0 {
+		t.Fatalf("contract version change must not insert another project, got %d inserts", len(repo.activated))
+	}
+	if !repo.synced {
+		t.Fatal("existing project should still receive the stamped-contract sync")
+	}
+}
+
+// A04：人工建项按合同身份预判重。合同版本从 N 变到 N+1 后再次建项仍必须被拒绝，
+// 而不是把版本当成业务身份、放出第二套项目/服务项。
+func TestManualProjectCreationRejectsContractAfterVersionChange(t *testing.T) {
+	repository := &versionAwareManualRepository{existing: domain.Project{
+		ID: "PJ-EXISTING", TenantID: "tenant-1", ContractID: "C-1", Contract: "HT-1", ContractVersion: "1",
+	}}
+	service := &Service{Repo: repository, Contracts: versionedContractVerifier{version: 2}}
+	principal := principalWith("project.create", platform.DataScope{RoleCode: "business_admin", ScopeType: "SELF", ScopeID: "identity-1"})
+	_, err := service.CreateProjectWithServiceItems(context.Background(), principal,
+		domain.Project{Name: "项目", Customer: "客户", Contract: "HT-1", ContractID: "C-1"},
+		[]domain.ContractService{{SourceID: "S1", Site: "杭州机房"}})
+	if !errors.Is(err, ErrDuplicateProject) {
+		t.Fatalf("error=%v, want ErrDuplicateProject after contract version change", err)
+	}
+	if !strings.Contains(UserMessage(err), "PJ-EXISTING") {
+		t.Fatalf("duplicate message %q must name the existing project", UserMessage(err))
+	}
+	if repository.createdManual {
+		t.Fatal("contract version change must not create another project")
+	}
+}
+
+// A04：补充协议用于调整既有项目的服务范围，不是新建项目的依据；
+// 调整成功只应产生拆解调整事件，不得创建项目或触发合同激活投递。
+func TestSupplementAdjustmentUpdatesExistingProjectWithoutCreatingAnother(t *testing.T) {
+	repository := &adjustmentRepository{project: domain.Project{
+		ID: "PJ-1", TenantID: "tenant-1", ContractID: "CT-1", CustomerID: "CUSTOMER-1", Customer: "示例客户",
+	}}
+	service := &Service{Repo: repository, Contracts: supplementContractVerifier{contract: platform.ApprovedContract{
+		ID: "SUP-1", CustomerID: "CUSTOMER-1", CustomerName: "示例客户", Status: "active", ApprovalPassed: true,
+	}}}
+	principal := principalWith("project.decomposition.manage", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION"})
+	err := service.AdjustDecomposition(context.Background(), principal, "PJ-1", domain.DecompositionAdjustmentInput{
+		Reason: "客户追加范围", SupplementContractID: "SUP-1",
+		Items: []domain.ContractService{{SourceID: "S1", Site: "杭州机房", Batch: "第一批", Category: "等保测评", TestMode: "STANDARD"}},
+	})
+	if err != nil {
+		t.Fatalf("supplement adjustment failed: %v", err)
+	}
+	if repository.created.ID != "" {
+		t.Fatalf("supplement adjustment must not create a project, got %+v", repository.created)
+	}
+	if len(repository.events) != 1 || repository.events[0].Type != EventDecompositionAdjusted || repository.events[0].ProjectID != "PJ-1" {
+		t.Fatalf("expected exactly one DECOMPOSITION_ADJUSTED event on the existing project, got %+v", repository.events)
+	}
+	if got := repository.events[0].Payload["supplement_contract_id"]; got != "SUP-1" {
+		t.Fatalf("adjustment event supplement_contract_id=%v, want SUP-1", got)
+	}
+}
+
+// versionAwareContractRepository 模拟真实仓储按合同+版本命中：
+// 旧规则下版本变化后 find 未命中，自动投递会再建一个项目。
+type versionAwareContractRepository struct {
+	duplicateContractRepository
+	existing domain.Project
+}
+
+func (r *versionAwareContractRepository) FindProjectByContract(_ context.Context, _ platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
+	r.findContractIDs = append(r.findContractIDs, contractID)
+	r.findContractNumbers = append(r.findContractNumbers, contractNumber)
+	if r.existing.ID != "" && strings.TrimSpace(r.existing.ContractID) == contractID {
+		return r.existing, nil
+	}
+	return domain.Project{}, ErrNotFound
+}
+
+// versionAwareManualRepository 同时满足 Repository / DeliveryRepository / ProjectServiceCreator，
+// 复现人工建项在旧规则下按版本预判重、版本不一致时放开创建的行为。
+type versionAwareManualRepository struct {
+	capabilityRepository
+	existing      domain.Project
+	createdManual bool
+	items         []domain.ServiceItem
+}
+
+func (r *versionAwareManualRepository) FindProjectByContract(_ context.Context, _ platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
+	if r.existing.ID != "" && strings.TrimSpace(r.existing.ContractID) == contractID {
+		return r.existing, nil
+	}
+	return domain.Project{}, ErrNotFound
+}
+
+func (r *versionAwareManualRepository) CreateProjectWithServiceItems(_ context.Context, project domain.Project, items []domain.ServiceItem) error {
+	r.createdManual = true
+	r.created = project
+	r.items = items
+	return nil
+}
+
+// versionedContractVerifier 返回合同状态变化后的版本 N+1，服务目录与合同版本保持一致。
+type versionedContractVerifier struct{ version uint64 }
+
+func (v versionedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: v.version, Status: "in_progress", ApprovalPassed: true}}, nil
+}
+func (v versionedContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", nil
+}
+func (v versionedContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	return platform.ApprovedContract{ID: id, Number: "HT-1", CustomerName: "客户", Version: v.version, Status: "in_progress", ApprovalPassed: true}, nil
+}
+func (v versionedContractVerifier) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: "C-1", ContractVersion: v.version, ServiceItems: []platform.ApprovedContractService{
+		{SourceID: "S1", Name: "等保测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", TestMode: "STANDARD"},
+	}}, nil
+}
+
+// adjustmentRepository 复用 hookRepository 的投递事件记录，并返回一个带合同/客户身份的项目。
+type adjustmentRepository struct {
+	hookRepository
+	project domain.Project
+}
+
+func (r *adjustmentRepository) GetProject(_ context.Context, filter platform.ScopeFilter, id string) (domain.Project, error) {
+	project := r.project
+	project.ID = id
+	project.TenantID = filter.TenantID
+	return project, nil
+}
+
 // hookRepository 同时充当 Repository 与 DeliveryRepository，记录派生事件并保留规则/超期数据，
 // 供 automations / warning-rules / sla 钩子测试使用。
 type hookRepository struct {
 	capabilityRepository
-	rules    []domain.Rule
-	events   []domain.DeliveryEvent
-	overdue  []domain.SlaOverdueItem
-	enqueued []domain.NotificationMessage
-	applyErr error
+	rules     []domain.Rule
+	events    []domain.DeliveryEvent
+	overdue   []domain.SlaOverdueItem
+	enqueued  []domain.NotificationMessage
+	applyErr  error
+	effects   []domain.DeliveryEffectsItem
+	nextRetry map[uint64]time.Time
 }
 
 func (r *hookRepository) ListRules(context.Context, string, string) ([]domain.Rule, error) {
@@ -720,6 +922,46 @@ func (r *hookRepository) ApplyDeliveryEvent(_ context.Context, event domain.Deli
 		return r.applyErr
 	}
 	r.events = append(r.events, event)
+	effects := SnapshotDeliveryEffects(event, r.rules, r.rules)
+	if len(effects.Targets) > 0 || effects.WarningPayload != nil || effects.RoleNotification != nil {
+		r.effects = append(r.effects, domain.DeliveryEffectsItem{ID: uint64(len(r.effects) + 1), TenantID: event.TenantID, Effects: effects})
+	}
+	return nil
+}
+
+func (r *hookRepository) ClaimDeliveryEffects(_ context.Context, tenantID, _ string, limit int, now time.Time) ([]domain.DeliveryEffectsItem, error) {
+	items := []domain.DeliveryEffectsItem{}
+	for _, item := range r.effects {
+		if item.TenantID == tenantID && !r.nextRetry[item.ID].After(now) {
+			items = append(items, item)
+			if len(items) >= limit {
+				break
+			}
+		}
+	}
+	return items, nil
+}
+func (r *hookRepository) CompleteDeliveryEffects(_ context.Context, _ string, id uint64, _ string, events []domain.DeliveryEvent, messages []domain.NotificationMessage, _ time.Time) error {
+	r.events = append(r.events, events...)
+	r.enqueued = append(r.enqueued, messages...)
+	for i, item := range r.effects {
+		if item.ID == id {
+			r.effects = append(r.effects[:i], r.effects[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+func (r *hookRepository) RetryDeliveryEffects(_ context.Context, _ string, id uint64, _ string, _ time.Time, next time.Time, _ string) error {
+	if r.nextRetry == nil {
+		r.nextRetry = map[uint64]time.Time{}
+	}
+	r.nextRetry[id] = next
+	for i := range r.effects {
+		if r.effects[i].ID == id {
+			r.effects[i].RetryCount++
+		}
+	}
 	return nil
 }
 func (r *hookRepository) ListSlaOverdue(_ context.Context, filter platform.ScopeFilter) ([]domain.SlaOverdueItem, error) {
@@ -1251,10 +1493,16 @@ func TestApplyEventFiresAutomationEventOnlyWhenRuleMatches(t *testing.T) {
 
 	t.Run("enabled matching rule appends AUTOMATION_TRIGGERED", func(t *testing.T) {
 		repo := &hookRepository{rules: []domain.Rule{{Enabled: true, Trigger: "DEVIATION_REPORTED", Target: "technical_director"}}}
-		service := Service{Repo: repo}
+		service := Service{Repo: repo, Personnel: roleDirectoryStub{byRole: map[string][]string{"technical_director": {"u-director"}}}}
 		err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"}))
 		if err != nil {
 			t.Fatalf("applyEvent failed: %v", err)
+		}
+		if len(repo.events) != 1 || len(repo.effects) != 1 {
+			t.Fatal("producer must persist intent, not execute effects in request")
+		}
+		if _, err := service.DispatchDeliveryEffects(context.Background(), "t1", "worker", 50, time.Now().UTC()); err != nil {
+			t.Fatal(err)
 		}
 		if len(repo.events) != 2 || repo.events[1].Type != EventAutomationTriggered {
 			t.Fatalf("expected source + one AUTOMATION_TRIGGERED event, got %+v", repo.events)
@@ -1462,6 +1710,9 @@ func TestAutomationNotificationResolvesMultipleRoleTargets(t *testing.T) {
 	if err := service.applyEvent(context.Background(), deliveryEvent(principal, "PJ-1", "SI-1", "DEVIATION_REPORTED", map[string]any{"severity": "HIGH"})); err != nil {
 		t.Fatalf("applyEvent failed: %v", err)
 	}
+	if _, err := service.DispatchDeliveryEffects(context.Background(), "t1", "worker", 50, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if len(repo.enqueued) != 1 {
 		t.Fatalf("expected one durable notification, got %+v", repo.enqueued)
 	}
@@ -1474,9 +1725,8 @@ func TestAutomationNotificationResolvesMultipleRoleTargets(t *testing.T) {
 	}
 }
 
-// 未开通站内信集成、目录不可用或角色下无人时静默跳过：通知是派生副作用，
-// 既不能回滚主事件，也不应因此丢失派生事件本身。
-func TestAutomationNotificationDegradesQuietly(t *testing.T) {
+// 目录失败不回滚已接受命令，必须保留意图以供恢复。
+func TestAutomationNotificationRetainsIntentWhenDirectoryUnavailable(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
 		service *Service
@@ -1492,6 +1742,13 @@ func TestAutomationNotificationDegradesQuietly(t *testing.T) {
 		if repository, ok := testCase.service.Repo.(*hookRepository); ok && len(repository.enqueued) != 0 {
 			t.Fatalf("%s: must not enqueue: %+v", testCase.name, repository.enqueued)
 		}
+		if _, err := testCase.service.DispatchDeliveryEffects(context.Background(), "t1", "worker", 50, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		repository := testCase.service.Repo.(*hookRepository)
+		if len(repository.effects) != 1 || repository.effects[0].RetryCount != 1 || len(repository.events) != 1 {
+			t.Fatalf("%s: lost recovery intent", testCase.name)
+		}
 	}
 }
 
@@ -1505,7 +1762,7 @@ func (stub roleDirectoryStub) List(_ context.Context, query platform.OwnerDirect
 			items = append(items, platform.OwnerDirectoryUser{UserID: userID, DisplayName: userID})
 		}
 	}
-	return platform.OwnerDirectoryPage{Items: items, Page: 1, PageSize: len(items)}, nil
+	return platform.OwnerDirectoryPage{Items: items, Page: query.Page, PageSize: query.PageSize, Total: int64(len(items))}, nil
 }
 
 // 指派类事件必须给「被指派人」发站内提醒：提醒要发给需要行动的人，而不是操作者本人。

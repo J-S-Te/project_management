@@ -10,7 +10,7 @@ import (
 )
 
 // maxAuditBufferBytes 是强制审计模式下允许缓冲的响应体上限（对齐 platform 修复口径的 64KiB）。
-// 超过上限的响应（大体积流式导出等）降级为 write-through：响应照常送达客户端，
+// 超过上限的响应（大体积流式导出等）降级为 直接透传写入：响应照常送达客户端，
 // 但审计失败无法再用 503 撤回数据，只能靠日志事后追溯（取舍见 auditWrites 的注释）。
 const maxAuditBufferBytes = 64 * 1024
 
@@ -27,7 +27,7 @@ type auditBuffer struct {
 	body    bytes.Buffer
 	status  int
 	size    int
-	// degraded 表示响应体超过 maxAuditBufferBytes 后已切换为 write-through：
+	// degraded 表示响应体超过 maxAuditBufferBytes 后已切换为 直接透传写入：
 	// 后续写入直接到达真实连接，flushTo 不再重复提交。
 	degraded bool
 }
@@ -36,7 +36,7 @@ func newAuditBuffer(orig gin.ResponseWriter) *auditBuffer {
 	return &auditBuffer{orig: orig, headers: make(http.Header), status: http.StatusOK, size: -1}
 }
 
-// Degraded 报告该响应是否已超限降级为 write-through。
+// Degraded 报告该响应是否已超限降级为 直接透传写入。
 func (b *auditBuffer) Degraded() bool { return b.degraded }
 
 // degrade 把已缓冲的响应头、状态码与响应体提交到真实连接，并把后续写入直通。
@@ -68,7 +68,7 @@ func (b *auditBuffer) commitTo(dst gin.ResponseWriter) {
 }
 
 // flushTo 在审计上报成功后把缓冲的响应提交到真实连接。
-// 已降级（write-through）的响应早已提交，这里不再重复写出。
+// 已降级（直接透传写入）的响应早已提交，这里不再重复写出。
 func (b *auditBuffer) flushTo(dst gin.ResponseWriter) {
 	if b.degraded {
 		return
@@ -102,7 +102,7 @@ func (b *auditBuffer) Write(p []byte) (int, error) {
 	n, err := b.body.Write(p)
 	b.size += n
 	if b.body.Len() > maxAuditBufferBytes {
-		// 超限：把已缓冲内容（含本次写入）提交到真实连接，之后全部 write-through。
+		// 超限：把已缓冲内容（含本次写入）提交到真实连接，之后全部 直接透传写入。
 		b.degrade()
 	}
 	return n, err
@@ -129,7 +129,7 @@ func (b *auditBuffer) Written() bool { return b.size != -1 }
 
 // Flush 只标记“已写”，不能把半成品响应提前提交到真实连接，
 // 否则审计失败时将无法撤回，拒绝语义会被破坏。
-// 已降级为 write-through 后响应已在流式发送，Flush 透传到真实连接。
+// 已降级为 直接透传写入 后响应已在流式发送，Flush 透传到真实连接。
 func (b *auditBuffer) Flush() {
 	if b.degraded {
 		b.orig.Flush()

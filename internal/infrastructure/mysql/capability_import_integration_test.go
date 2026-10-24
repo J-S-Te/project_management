@@ -93,9 +93,9 @@ func TestCapabilityImportCannotRebindConcurrentNumber(t *testing.T) {
 	}
 }
 
-// AutoMigrate only sees ORM tags, while the production uniqueness constraint
-// comes from migrations/000002_delivery_execution.sql. Reproduce and assert it
-// explicitly so concurrency tests exercise the actual deployed schema.
+// AutoMigrate 仅识别 ORM 标签，生产唯一性约束
+// 来自 migrations/000002_delivery_execution.sql。显式复现并断言，
+// 确保并发测试验证实际部署结构。
 func ensureCapabilityImportProductionUniqueIndex(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	const index = "uq_pm_capability_resource"

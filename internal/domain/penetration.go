@@ -1,8 +1,8 @@
 package domain
 
-// PenetrationWorkPackage is an optional penetration-testing engagement embedded in an
-// equal-protection service item. It is deliberately not a ServiceItem: project progress,
-// contract decomposition and settlement continue to count only the parent service item.
+// PenetrationWorkPackage 是可选渗透测试任务，嵌入
+// 等保服务项。它有意不作为 ServiceItem：项目进度、
+// 合同拆解及结算始终只计父服务项。
 type PenetrationWorkPackage struct {
 	ID                   string   `json:"id"`
 	ProjectID            string   `json:"project_id"`

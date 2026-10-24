@@ -17,9 +17,9 @@ type ProjectMonitoringRepository interface {
 	LoadProjectMonitoringPage(context.Context, platform.ScopeFilter, domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error)
 }
 
-// MonitorProjects returns one authorization-consistent monitoring snapshot. Projects, service
-// items, SLA decisions and events all pass through their existing scoped and field-masked read
-// paths; the browser never rebuilds the tenant/role boundary from a general project list.
+// MonitorProjects 返回授权一致的监控快照。项目、服务
+// 项、SLA 决策和事件均经过已有范围限定及字段脱敏读取
+// 路径；浏览器不得根据普通项目列表重建租户和角色边界。
 func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
 	if _, err := authorizeProjectScope(p, "project.read"); err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
@@ -71,7 +71,7 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 		slaByProject[item.ProjectID] = append(slaByProject[item.ProjectID], item)
 	}
 	latestEventByProject := map[string]domain.DeliveryEvent{}
-	for _, event := range events { // repository order is newest first
+	for _, event := range events { // 仓储按最新记录优先排序。
 		if _, exists := latestEventByProject[event.ProjectID]; !exists {
 			latestEventByProject[event.ProjectID] = event
 		}

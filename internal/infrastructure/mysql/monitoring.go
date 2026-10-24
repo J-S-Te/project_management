@@ -11,9 +11,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// LoadProjectMonitoringPage performs filtering, counting, faceting and pagination in MySQL. Detail
-// rows are then loaded only for the selected project page, preventing the monitoring endpoint from
-// hydrating every project, service item, SLA candidate and event in the tenant on each refresh.
+// LoadProjectMonitoringPage 在 MySQL 中完成筛选、计数、分面及分页。之后
+// 仅为选中项目页加载详情，防止监控端点
+// 每次刷新都补全租户全部项目、服务项、SLA 候选及事件。
 func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platform.ScopeFilter, input domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error) {
 	page, pageSize := input.Page, input.PageSize
 	if page < 1 {

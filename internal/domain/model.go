@@ -73,9 +73,9 @@ type ServiceItem struct {
 	ReportIssuedBy     string              `json:"report_issued_by,omitempty"`
 	Status             string              `json:"status"`
 	ImplementationPlan *ImplementationPlan `json:"implementation_plan,omitempty"`
-	// PenetrationWorkPackage is an embedded delivery work package. It is exposed with
-	// the parent item for a consistent cross-role projection, but is never counted as
-	// an independent contract service item.
+	// PenetrationWorkPackage 是内嵌交付工作包，随
+	// 父项公开以提供跨角色一致投影，但绝不计为
+	// 独立合同服务项。
 	PenetrationWorkPackage *PenetrationWorkPackage `json:"penetration_work_package,omitempty"`
 
 	// Version 是服务项状态版本：每次状态变更自增。读取方据此识别自己拿到的是不是最新一版，
@@ -83,8 +83,8 @@ type ServiceItem struct {
 	Version uint64 `json:"version"`
 }
 
-// ReportRevision is an immutable report-version ledger projection. The row is retained after a
-// correction; validity_status=VOID prevents new downloads while the old audit/download history stays intact.
+// ReportRevision 是不可变报告版本台账投影。更正后仍保留该行；
+// validity_status=VOID 阻止新下载，同时完整保留旧审计和下载历史。
 type ReportRevision struct {
 	ID                  uint64 `json:"id"`
 	ServiceItemID       string `json:"service_item_id"`
@@ -151,9 +151,9 @@ type Dashboard struct {
 	ProjectCount     int    `json:"project_count"`
 	InFlightProjects int    `json:"in_flight_projects"`
 	RiskProjects     int    `json:"risk_projects"`
-	// PendingProjectCreation is tenant-wide and shown only to project creators and
-	// technical directors. Available=false means the contract dependency could not
-	// be queried; zero remains a real, distinguishable business result.
+	// PendingProjectCreation 为租户全范围，仅向项目创建者和
+	// 技术总监展示。Available=false 表示无法查询合同依赖；
+	// 零仍是可区分的真实业务结果。
 	PendingProjectCreation          int  `json:"pending_project_creation"`
 	PendingProjectCreationAvailable bool `json:"pending_project_creation_available"`
 	// UnknownStatusItems 是无法识别的服务项状态数量（数据异常）。

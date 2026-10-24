@@ -210,7 +210,7 @@
           const tr = cb.closest('tr');
           tr?.classList.toggle('selected');
           cb.classList.toggle('checked');
-          // update check-all state
+          // 同步全选复选框状态。
           if (checkAll) {
             const all = table.querySelectorAll('tbody .checkbox');
             const checked = table.querySelectorAll('tbody .checkbox.checked');

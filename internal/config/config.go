@@ -24,6 +24,8 @@ type Config struct {
 	TemporalWorkerVersioningPolicy string
 	TemporalMetricsAddress         string
 	RunWorkerWithAPI               bool
+	Background                     BackgroundConfig
+	Snapshot                       ProjectSnapshotConfig
 	PlatformBaseURL                string
 	OIDCIssuer                     string
 	OIDCBackchannelBaseURL         string
@@ -56,24 +58,36 @@ type Config struct {
 	NotificationEnabled bool
 	// SLA 扫描：SLA 超期/临近的主动提醒需要周期任务；租户列表显式给出，
 	// 避免一条命令扫全库（系统侧任务不代替用户授权，必须限定范围）。
-	SlaScanTenants                         []string
-	SlaScanInterval                        time.Duration
-	PlatformNotificationURL                string
-	PlatformNotificationClientID           string
-	PlatformNotificationSecret             string
-	PlatformNotificationScope              string
-	PlatformCatalogSync                    bool
-	PlatformCatalogClientID                string
-	PlatformCatalogClientSecret            string
-	ContractIntegrationEnabled             bool
-	ContractIntegrationRequireBearer       bool
-	ContractIntegrationClientID            string
-	ContractIntegrationAudience            string
-	ContractIntegrationIssuer              string
-	ContractIntegrationPublicKeyPath       string
-	ContractIntegrationCallerApp           string
-	ContractIntegrationCallerEnv           string
-	ContractIntegrationScope               string
+	SlaScanTenants                   []string
+	SlaScanInterval                  time.Duration
+	NotificationDispatchInterval     time.Duration
+	PlatformNotificationURL          string
+	PlatformNotificationClientID     string
+	PlatformNotificationSecret       string
+	PlatformNotificationScope        string
+	PlatformCatalogSync              bool
+	PlatformCatalogClientID          string
+	PlatformCatalogClientSecret      string
+	ContractIntegrationEnabled       bool
+	ContractIntegrationRequireBearer bool
+	ContractIntegrationClientID      string
+	ContractIntegrationAudience      string
+	ContractIntegrationIssuer        string
+	ContractIntegrationPublicKeyPath string
+	ContractIntegrationCallerApp     string
+	ContractIntegrationCallerEnv     string
+	ContractIntegrationScope         string
+
+	// HandoverIntegration 是基础平台人员交接机器协议的入站配置。
+	HandoverIntegrationEnabled             bool
+	HandoverIntegrationRequireBearer       bool
+	HandoverIntegrationClientID            string
+	HandoverIntegrationAudience            string
+	HandoverIntegrationIssuer              string
+	HandoverIntegrationPublicKeyPath       string
+	HandoverIntegrationCallerApp           string
+	HandoverIntegrationCallerEnv           string
+	HandoverIntegrationScope               string
 	ContractApprovalValidationEnabled      bool
 	ContractApprovalValidationURL          string
 	ContractApprovalValidationClientID     string
@@ -126,6 +140,13 @@ func Load() (Config, error) {
 		ContractIntegrationCallerApp:           env("CONTRACT_INTEGRATION_CALLER_APPLICATION_CODE", "contract_management"),
 		ContractIntegrationCallerEnv:           env("CONTRACT_INTEGRATION_CALLER_ENVIRONMENT_CODE", strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE"))),
 		ContractIntegrationScope:               env("CONTRACT_INTEGRATION_REQUIRED_SCOPE", "project.contract.import"),
+		HandoverIntegrationClientID:            strings.TrimSpace(os.Getenv("HANDOVER_INTEGRATION_CLIENT_ID")),
+		HandoverIntegrationAudience:            strings.TrimSpace(os.Getenv("HANDOVER_INTEGRATION_AUDIENCE")),
+		HandoverIntegrationIssuer:              env("HANDOVER_INTEGRATION_ISSUER", "basic-platform"),
+		HandoverIntegrationPublicKeyPath:       env("HANDOVER_INTEGRATION_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem"),
+		HandoverIntegrationCallerApp:           env("HANDOVER_INTEGRATION_CALLER_APPLICATION_CODE", "basic-platform"),
+		HandoverIntegrationCallerEnv:           env("HANDOVER_INTEGRATION_CALLER_ENVIRONMENT_CODE", strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE"))),
+		HandoverIntegrationScope:               env("HANDOVER_INTEGRATION_REQUIRED_SCOPE", "handover.machine"),
 		ContractApprovalValidationURL:          strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_URL")),
 		ContractApprovalValidationClientID:     strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_ID")),
 		ContractApprovalValidationClientSecret: os.Getenv("CONTRACT_APPROVAL_VALIDATION_CLIENT_SECRET"),
@@ -174,6 +195,12 @@ func Load() (Config, error) {
 	if c.SlaScanInterval <= 0 {
 		return c, fmt.Errorf("SLA_SCAN_INTERVAL must be positive")
 	}
+	if c.NotificationDispatchInterval, err = time.ParseDuration(env("NOTIFICATION_DISPATCH_INTERVAL", "15s")); err != nil {
+		return c, fmt.Errorf("NOTIFICATION_DISPATCH_INTERVAL: %w", err)
+	}
+	if c.NotificationDispatchInterval <= 0 {
+		return c, fmt.Errorf("NOTIFICATION_DISPATCH_INTERVAL must be positive")
+	}
 	c.SlaScanTenants = splitList(os.Getenv("SLA_SCAN_TENANTS"))
 	if c.OwnerDirectoryEnabled, err = strconv.ParseBool(env("OWNER_DIRECTORY_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("OWNER_DIRECTORY_ENABLED: %w", err)
@@ -189,6 +216,12 @@ func Load() (Config, error) {
 	}
 	if c.ContractIntegrationEnabled, err = strconv.ParseBool(env("CONTRACT_INTEGRATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_INTEGRATION_ENABLED: %w", err)
+	}
+	if c.HandoverIntegrationEnabled, err = strconv.ParseBool(env("HANDOVER_INTEGRATION_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("HANDOVER_INTEGRATION_ENABLED: %w", err)
+	}
+	if c.HandoverIntegrationRequireBearer, err = strconv.ParseBool(env("HANDOVER_INTEGRATION_REQUIRE_BEARER", "true")); err != nil {
+		return c, fmt.Errorf("HANDOVER_INTEGRATION_REQUIRE_BEARER: %w", err)
 	}
 	if c.ContractApprovalValidationEnabled, err = strconv.ParseBool(env("CONTRACT_APPROVAL_VALIDATION_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("CONTRACT_APPROVAL_VALIDATION_ENABLED: %w", err)
@@ -206,6 +239,9 @@ func Load() (Config, error) {
 	}
 	if c.DashboardMachineRequireBearer, err = strconv.ParseBool(env("DASHBOARD_MACHINE_REQUIRE_BEARER", "false")); err != nil {
 		return c, fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER: %w", err)
+	}
+	if err := c.loadFeatures(); err != nil {
+		return c, err
 	}
 	return c, c.validate()
 }
@@ -324,6 +360,9 @@ func (c Config) validate() error {
 		}
 	}
 	// H4 修复：内部投递来源校验不可关闭。
+	if c.HandoverIntegrationEnabled && !c.HandoverIntegrationRequireBearer {
+		return fmt.Errorf("HANDOVER_INTEGRATION_REQUIRE_BEARER must be true when HANDOVER_INTEGRATION_ENABLED=true (internal delivery source verification is mandatory)")
+	}
 	if c.ContractIntegrationEnabled && !c.ContractIntegrationRequireBearer {
 		return fmt.Errorf("CONTRACT_INTEGRATION_REQUIRE_BEARER must be true when CONTRACT_INTEGRATION_ENABLED=true (internal delivery source verification is mandatory)")
 	}
@@ -380,7 +419,7 @@ func (c Config) validate() error {
 	if c.DashboardMachineEnabled && !c.DashboardMachineRequireBearer {
 		return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER must be true when DASHBOARD_MACHINE_ENABLED=true")
 	}
-	return nil
+	return c.validateFeatures()
 }
 
 func validHTTPURL(value string) bool {

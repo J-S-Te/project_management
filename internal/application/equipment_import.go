@@ -16,7 +16,7 @@ type EquipmentImportInput struct {
 	Errors     []string          `json:"errors"`
 }
 
-// CreateEquipmentForImport must perform a plain insert, never conflict-update.
+// CreateEquipmentForImport 必须执行普通插入，禁止冲突更新。
 type EquipmentImportCreator interface {
 	CreateEquipmentForImport(context.Context, domain.Capability, string) (domain.Capability, error)
 }
@@ -28,7 +28,7 @@ func (s *Service) ConfirmEquipmentImportRow(ctx context.Context, p platform.Prin
 	return s.upsertEquipment(ctx, p, row.Capability, row.Action == "CREATE")
 }
 
-// PreviewEquipmentImport validates the complete file without changing equipment.
+// PreviewEquipmentImport 校验整个文件，不修改设备。
 func (s *Service) PreviewEquipmentImport(ctx context.Context, p platform.Principal, inputs []EquipmentImportInput) (CapabilityImportPreview, error) {
 	result := CapabilityImportPreview{Rows: []CapabilityImportPreviewRow{}}
 	if err := requireApplicationAuthorization(p, "project.device.manage"); err != nil {
@@ -49,7 +49,7 @@ func (s *Service) PreviewEquipmentImport(ctx context.Context, p platform.Princip
 	if err != nil {
 		return result, err
 	}
-	// Reserve explicit numbers before allocating blank numbers, including later rows.
+	// 分配空白编号前先预留显式编号，包括后续行中的编号。
 	allocated := append([]domain.Capability(nil), known...)
 	for _, input := range inputs {
 		if id := strings.TrimSpace(input.Capability.ResourceID); id != "" {
