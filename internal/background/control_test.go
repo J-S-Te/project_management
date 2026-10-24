@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -272,7 +273,7 @@ func TestPauseAllowsAlreadyAdmittedActivityToFinishAndAcknowledge(t *testing.T) 
 }
 
 func TestUnavailableControlNeverReportsZeroActivitiesOrLeases(t *testing.T) {
-	s, e := SendControl(context.Background(), "/private/tmp/project-background-absent/control.sock", ControlRequest{Action: "inspect"})
+	s, e := SendControl(context.Background(), filepath.Join(t.TempDir(), "absent.sock"), ControlRequest{Action: "inspect"})
 	if e == nil || s.ActiveActivities != -1 || s.ActiveLeases != -1 {
 		t.Fatalf("unavailable endpoint invented counts %+v %v", s, e)
 	}

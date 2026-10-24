@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -102,7 +103,11 @@ func (w *recordWorker) Stop() { w.stopped = true }
 func testRuntime(t *testing.T) (*Runtime, *memorySchedules, *recordWorker) {
 	t.Helper()
 	o := validOptions()
-	root, e := os.MkdirTemp("/private/tmp", "pm-t3-")
+	base := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		base = "/private/tmp"
+	}
+	root, e := os.MkdirTemp(base, "pm-t3-")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -219,10 +224,15 @@ func TestControlPauseSurvivesRestartAndRestoresOperatorPause(t *testing.T) {
 	}
 }
 func TestControlRejectsForeignOrUnsafeSocket(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	base := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		base = "/private/tmp"
+	}
+	root, err := os.MkdirTemp(base, "pm-socket-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(root) })
 	private := filepath.Join(root, "private")
 	if e := os.Mkdir(private, 0700); e != nil {
 		t.Fatal(e)
