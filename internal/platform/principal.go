@@ -21,6 +21,7 @@ type Principal struct {
 	IdentityID            string
 	PersonID              string
 	UserID                string
+	Username              string
 	DisplayName           string
 	Roles                 []string
 	Permissions           map[string]bool

@@ -45,7 +45,7 @@ type oidcClaims struct {
 }
 
 type compactIdentity struct {
-	Subject, IdentityID, TenantID, PersonID, DisplayName string
+	Subject, IdentityID, TenantID, PersonID, DisplayName, Username string
 }
 
 type OIDCAuthenticator struct {
@@ -330,6 +330,9 @@ func (a *OIDCAuthenticator) refreshStoredSession(ctx context.Context, stored Sto
 		return stored, Principal{}, err
 	}
 	oldPrincipal, decodeErr := decodePrincipal(stored.PrincipalJSON)
+	if decodeErr == nil && principal.Username == "" {
+		principal.Username = oldPrincipal.Username
+	}
 	if decodeErr == nil && principal.DisplayName == "" {
 		principal.DisplayName = oldPrincipal.DisplayName
 	}
@@ -405,7 +408,26 @@ func (a *OIDCAuthenticator) verifyIDToken(ctx context.Context, token *oauth2.Tok
 		return "", nil, oidcClaims{}, compactIdentity{}, err
 	}
 	identity, err := validateCompactIDTokenClaims(claims, nonce, a.options.TenantID)
-	return raw, idToken, claims, identity, err
+	if err != nil {
+		return raw, idToken, claims, identity, err
+	}
+	if strings.TrimSpace(claims.PreferredUsername) == "" {
+		info, profileErr := a.provider.UserInfo(oidc.ClientContext(ctx, a.httpClient), oauth2.StaticTokenSource(token))
+		if profileErr != nil {
+			return "", nil, oidcClaims{}, compactIdentity{}, profileErr
+		}
+		var profile struct {
+			Subject  string `json:"sub"`
+			Username string `json:"preferred_username"`
+		}
+		if profileErr = info.Claims(&profile); profileErr != nil || profile.Subject != claims.Subject {
+			return "", nil, oidcClaims{}, compactIdentity{}, errors.New("OIDC UserInfo subject mismatch")
+		}
+		claims.PreferredUsername = strings.TrimSpace(profile.Username)
+	}
+
+	identity.Username = strings.TrimSpace(claims.PreferredUsername)
+	return raw, idToken, claims, identity, nil
 }
 
 func validateCompactIDTokenClaims(claims oidcClaims, expectedNonce, expectedTenant string) (compactIdentity, error) {
@@ -432,7 +454,7 @@ func validateCompactIDTokenClaims(claims oidcClaims, expectedNonce, expectedTena
 	if displayName == "" {
 		displayName = claims.Subject
 	}
-	return compactIdentity{Subject: claims.Subject, IdentityID: claims.IdentityID, TenantID: claims.TenantID, PersonID: claims.PersonID, DisplayName: displayName}, nil
+	return compactIdentity{Subject: claims.Subject, IdentityID: claims.IdentityID, TenantID: claims.TenantID, PersonID: claims.PersonID, DisplayName: displayName, Username: strings.TrimSpace(claims.PreferredUsername)}, nil
 }
 
 func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity, value AuthorizationContext) (Principal, error) {
@@ -454,7 +476,7 @@ func (a *OIDCAuthenticator) principalFromAuthorization(identity compactIdentity,
 	if personID == "" {
 		personID = identity.PersonID
 	}
-	return Principal{Subject: identity.Subject, TenantID: value.TenantID, IdentityID: subjectID, PersonID: personID, UserID: subjectID, DisplayName: identity.DisplayName, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
+	return Principal{Subject: identity.Subject, TenantID: value.TenantID, IdentityID: subjectID, PersonID: personID, UserID: subjectID, DisplayName: identity.DisplayName, Username: identity.Username, Roles: append([]string(nil), value.Roles...), Permissions: permissions, DataScopes: append([]DataScope(nil), value.DataScopes...), AuthorizationRevision: value.AuthorizationRevision, CatalogVersion: a.catalog.Version}, nil
 }
 
 func canonicalSubjectID(subjectID, identityID string) (string, error) {

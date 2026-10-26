@@ -669,7 +669,7 @@ func (h *Handler) me(c *gin.Context) {
 		}
 	}
 	sort.Strings(permissions)
-	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
+	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "username": p.Username, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
 }
 
 // navigation 是服务端定义的工作台契约。浏览器可以隐藏或排序
