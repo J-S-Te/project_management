@@ -176,6 +176,8 @@ func main() {
 	}
 	// 写路径冻结覆盖：交接中的用户不得再被指派为项目经理。
 	service.UseFreezeChecker(handoverRepository)
+	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
+	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
 		CommercialLicense: commercialGate,
 		PendingMigrations: pendingMigrations,

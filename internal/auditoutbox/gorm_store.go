@@ -25,6 +25,7 @@ type outboxRow struct {
 	TenantID       string     `gorm:"column:tenant_id"`
 	EventID        string     `gorm:"column:event_id"`
 	ActorID        *string    `gorm:"column:actor_id"`
+	ActorType      string     `gorm:"column:actor_type"`
 	Action         string     `gorm:"column:action"`
 	ResourceType   string     `gorm:"column:resource_type"`
 	ResourceID     string     `gorm:"column:resource_id"`
@@ -86,7 +87,7 @@ func (s *GORMStore) Claim(ctx context.Context, workerID string, limit int, now t
 	entries := make([]Entry, 0, len(rows))
 	for _, row := range rows {
 		entries = append(entries, Entry{
-			ID: row.ID, TenantID: row.TenantID, EventID: row.EventID, ActorID: deref(row.ActorID),
+			ID: row.ID, TenantID: row.TenantID, EventID: row.EventID, ActorID: deref(row.ActorID), ActorType: row.ActorType,
 			Action: row.Action, ResourceType: row.ResourceType, ResourceID: row.ResourceID, RequestID: deref(row.RequestID),
 			LoginIP: ipString(row.LoginIP), ClientIP: ipString(row.ClientIP), IPSource: row.IPSource,
 			Result: row.Result, Attempts: row.Attempts,

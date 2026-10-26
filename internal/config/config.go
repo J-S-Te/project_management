@@ -11,7 +11,9 @@ import (
 )
 
 type Config struct {
-	HTTPAddress                    string
+	HTTPAddress string
+	// TrustedProxies 是唯一允许采信 X-Real-IP / X-Forwarded-For 的直接对端集合。
+	TrustedProxies                 []string
 	MySQLDSN                       string
 	TemporalAddress                string
 	TemporalNamespace              string
@@ -113,6 +115,7 @@ type Config struct {
 func Load() (Config, error) {
 	c := Config{
 		HTTPAddress: env("PM_HTTP_ADDR", ":8082"), MySQLDSN: os.Getenv("MYSQL_DSN"),
+		TrustedProxies:  splitList(env("APP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")),
 		TemporalAddress: env("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: env("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: env("TEMPORAL_TASK_QUEUE", "project-management"), TemporalAPIKey: os.Getenv("TEMPORAL_API_KEY"),
 		TemporalWorkerBuildID: env("TEMPORAL_WORKER_BUILD_ID", "project-worker-v1"), TemporalWorkerDeploymentName: env("TEMPORAL_WORKER_DEPLOYMENT_NAME", "project-management"),
 		TemporalWorkerVersioningPolicy: strings.ToUpper(env("TEMPORAL_WORKER_VERSIONING_POLICY", "PINNED")), TemporalMetricsAddress: env("TEMPORAL_METRICS_ADDRESS", ":9092"),

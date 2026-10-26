@@ -1,4 +1,4 @@
-FROM golang:1.25.4-alpine@sha256:d3f0cf7723f3429e3f9ed846243970b20a2de7bae6a5b66fc5914e228d831bbb AS builder
+FROM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY third_party/license-core ./third_party/license-core

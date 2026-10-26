@@ -14,9 +14,9 @@ import (
 
 // Entry 是一条待投递的审计事件。
 type Entry struct {
-	ID, TenantID, EventID, ActorID, Action, ResourceType, ResourceID, RequestID string
-	LoginIP, ClientIP, IPSource, Result                                         string
-	Attempts                                                                    uint
+	ID, TenantID, EventID, ActorID, ActorType, Action, ResourceType, ResourceID, RequestID string
+	LoginIP, ClientIP, IPSource, Result                                                    string
+	Attempts                                                                               uint
 }
 
 // Store 负责领取与回写；实现必须用租约保证同一事件只被一个 worker 投递。
@@ -69,7 +69,7 @@ func (d *Dispatcher) deliverOnce(ctx context.Context) {
 	}
 	for _, entry := range entries {
 		event := platform.AuditEvent{
-			ActorID: entry.ActorID, Action: entry.Action,
+			ActorID: entry.ActorID, ActorType: entry.ActorType, Action: entry.Action,
 			ResourceType: entry.ResourceType, ResourceID: entry.ResourceID,
 			RequestID: entry.RequestID, CorrelationID: entry.RequestID,
 			Result: entry.Result, LoginIP: entry.LoginIP, ClientIP: entry.ClientIP, IPSource: entry.IPSource,

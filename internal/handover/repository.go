@@ -6,9 +6,13 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
+	"net"
 	"strings"
 	"time"
+
+	"github.com/j-s-te/project-management/internal/auditctx"
+	"github.com/oklog/ulid/v2"
+	"gorm.io/gorm"
 )
 
 // GORMRepository 是交接协议的持久化实现（项目管理）。
@@ -230,12 +234,78 @@ func (repository *GORMRepository) TransferOwnership(ctx context.Context, in Tran
 		if update.RowsAffected != 1 {
 			return writeReceipt(tx, in, now, ReceiptRejected, 0, versionConflictReason, "", &outcome)
 		}
-		return writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:project:"+in.ResourceID, &outcome)
+		if err := writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:project:"+in.ResourceID, &outcome); err != nil {
+			return err
+		}
+		return writeHandoverAudit(tx, in)
 	})
 	if err != nil {
 		return Receipt{}, err
 	}
 	return outcome, nil
+}
+
+// writeHandoverAudit 记录离职交接对项目责任的变更。
+// 交接由平台交接批次驱动（机器主体），但必须能追溯到原负责人、承接人与批次。
+func writeHandoverAudit(tx *gorm.DB, in TransferInput) error {
+	if in.ResourceType != ResourceProject {
+		return nil
+	}
+	meta := auditctx.FromContext(tx.Statement.Context)
+	actor := meta.ActorID
+	if actor == "" {
+		actor = "SYSTEM"
+	}
+	now := time.Now().UTC()
+	return tx.Create(&handoverAuditRow{
+		ID: ulid.Make().String(), TenantID: in.TenantID, EventID: ulid.Make().String(),
+		ActorID: &actor, ActorType: "SYSTEM",
+		Action:       "PROJECT_MANAGEMENT:HANDOVER_TRANSFERRED",
+		ResourceType: "project", ResourceID: in.ResourceID,
+		LoginIP: auditIP(meta.LoginIP), ClientIP: auditIP(meta.ClientIP), IPSource: auditSource(meta.IPSource),
+		Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: now, CreatedAt: now,
+	}).Error
+}
+
+// handoverAuditRow 直接映射 prj_audit_outbox，供交接事务内写审计使用。
+type handoverAuditRow struct {
+	ID             string    `gorm:"column:id;primaryKey"`
+	TenantID       string    `gorm:"column:tenant_id"`
+	EventID        string    `gorm:"column:event_id"`
+	ActorID        *string   `gorm:"column:actor_id"`
+	ActorType      string    `gorm:"column:actor_type"`
+	Action         string    `gorm:"column:action"`
+	ResourceType   string    `gorm:"column:resource_type"`
+	ResourceID     string    `gorm:"column:resource_id"`
+	LoginIP        []byte    `gorm:"column:login_ip"`
+	ClientIP       []byte    `gorm:"column:client_ip"`
+	IPSource       string    `gorm:"column:ip_source"`
+	Result         string    `gorm:"column:result"`
+	DeliveryStatus string    `gorm:"column:delivery_status"`
+	NextAttemptAt  time.Time `gorm:"column:next_attempt_at"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+}
+
+func (handoverAuditRow) TableName() string { return "prj_audit_outbox" }
+
+// auditIP 把文本地址转换为二进制列；空值或非法值保持 NULL。
+func auditIP(value string) []byte {
+	parsed := net.ParseIP(strings.TrimSpace(value))
+	if parsed == nil {
+		return nil
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4
+	}
+	return parsed.To16()
+}
+
+func auditSource(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "DIRECT", "TRUSTED_PROXY", "LEGACY_PROTOCOL", "UNKNOWN":
+		return strings.ToUpper(strings.TrimSpace(value))
+	}
+	return "UNKNOWN"
 }
 
 // FindReceipt 按幂等键查询既有回执。

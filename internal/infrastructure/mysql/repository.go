@@ -10,8 +10,10 @@ import (
 
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/auditctx"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
+	"github.com/oklog/ulid/v2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -207,7 +209,29 @@ func projectStatusInputQuery(db *gorm.DB, tenantID string, projectIDs []string) 
 		Where("tenant_id = ? AND project_id IN ?", tenantID, projectIDs)
 }
 func (r *Repository) CreateProject(ctx context.Context, item domain.Project) error {
-	err := r.db.WithContext(ctx).Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractID: item.ContractID, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := r.createProjectRecord(tx, item); err != nil {
+			return err
+		}
+		// 建项是关键业务变更：与项目行同事务写审计 outbox。
+		// outbox 只承载定位字段（项目/租户/操作者/来源），不落合同正文或客户联系方式。
+		meta := auditctx.FromContext(ctx)
+		actor := meta.ActorID
+		if actor == "" {
+			actor = "SYSTEM"
+		}
+		return tx.Create(&auditOutboxRecord{
+			ID: ulid.Make().String(), TenantID: item.TenantID, EventID: ulid.Make().String(),
+			ActorID: actorPointer(actor), ActorType: "USER", Action: "PROJECT_MANAGEMENT:PROJECT_CREATED",
+			ResourceType: "project", ResourceID: item.ID,
+			LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
+			Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
+		}).Error
+	})
+}
+
+func (r *Repository) createProjectRecord(tx *gorm.DB, item domain.Project) error {
+	err := tx.Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractID: item.ContractID, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 	if err != nil && isDuplicateKey(err) {
 		// 无服务项的手动创建同样受唯一键约束，理由见 CreateProjectWithServiceItems。
 		return application.ErrDuplicateProject

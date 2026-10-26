@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/j-s-te/project-management/internal/application"
@@ -48,8 +49,8 @@ type RouterOptions struct {
 	ContractIntegration *ContractIntegrationOptions
 	HandoverIntegration *HandoverIntegrationOptions
 	// HandoverService 是人员交接协议的领域服务；与 HandoverIntegration 一并注入。
-	HandoverService      *handover.Service
-	DashboardIntegration *DashboardIntegrationOptions
+	HandoverService       *handover.Service
+	DashboardIntegration  *DashboardIntegrationOptions
 	ProjectSnapshotLimits application.ProjectSnapshotLimits
 	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
 	// 就绪检查直接判为 not_ready，避免带着缺失的列/表对外提供写服务（写路径只会报 500）。
@@ -434,7 +435,7 @@ func (h *Handler) auditWrites() gin.HandlerFunc {
 		// AUD-IP-2026：交付事件在业务事务内写审计时读同一份来源信息。
 		clientIP, ipSource := requestClientIP(c.Request), requestIPSource(c.Request)
 		c.Request = c.Request.WithContext(auditctx.WithMeta(c.Request.Context(), auditctx.Meta{
-			ClientIP: clientIP, IPSource: ipSource,
+			ClientIP: clientIP, IPSource: ipSource, RequestID: requestID, ActorID: p.UserID,
 		}))
 		event := platform.AuditEvent{ActorID: p.UserID, ActorName: p.DisplayName, Action: "PROJECT_MANAGEMENT:" + c.Request.Method + ":" + strings.ReplaceAll(strings.Trim(c.Request.URL.Path, "/"), "/", "."), ResourceType: auditResource(c.Request.URL.Path), ResourceID: c.Param("id"), RequestID: requestID, Result: auditResult(status), RiskLevel: auditRiskLevel(c.Request.Method, c.Request.URL.Path, status), ReasonCode: strconv.Itoa(status), ClientIP: clientIP, IPSource: ipSource}
 		if err := h.audit.Report(c.Request.Context(), event); err != nil {
@@ -527,57 +528,120 @@ func sensitiveRead(path string) bool {
 	return containsAnyAudit(lowered, "embed", "download", "export")
 }
 
-// requestClientIP 从受管前端代理提取公开客户端
-// 地址。X-Real-IP 为权威值，最右侧 XFF 值作为
-// 回退，防止客户端提供的最左值伪造审计记录。
-// 仅在直接对端是可信反向代理时信任转发头，
-// 确保可直接访问的服务不会被客户端请求头
-// 伪造审计源地址。
-func requestClientIP(request *http.Request) string {
-	if request == nil {
-		return ""
-	}
-	if trustedProxyPeer(request.RemoteAddr) {
-		if ip := publicClientIP(request.Header.Get("X-Real-IP")); ip != nil {
-			return ip.String()
-		}
-		values := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
-		for i := len(values) - 1; i >= 0; i-- {
-			if ip := publicClientIP(values[i]); ip != nil {
-				return ip.String()
-			}
-		}
-	}
-	remote := strings.TrimSpace(request.RemoteAddr)
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
-	}
-	if ip := publicClientIP(remote); ip != nil {
-		return ip.String()
-	}
-	return ""
+// 显式可信代理列表：只有列入该列表的直接对端才允许提供 X-Real-IP / X-Forwarded-For。
+// 由组合根在启动时通过 ConfigureTrustedProxies 注入（默认仅回环）。
+var trustedProxies atomic.Value
+
+// ConfigureTrustedProxies 由组合根注入可信代理（CIDR 或单地址）。
+func ConfigureTrustedProxies(values []string) {
+	trustedProxies.Store(parseTrustedProxies(values))
 }
 
-// trustedProxyPeer 判断直接对端地址是否属于
-// 可信反向代理（回环或私有、链路本地 Docker 网关）。
-// 公网对端表示服务可被直接访问，因此不能信任
-// 客户端提供的转发头。
+func currentTrustedProxies() []netip.Prefix {
+	if value, ok := trustedProxies.Load().([]netip.Prefix); ok {
+		return value
+	}
+	return parseTrustedProxies(nil)
+}
+
+func parseTrustedProxies(values []string) []netip.Prefix {
+	if len(values) == 0 {
+		values = []string{"127.0.0.1/32", "::1/128"}
+	}
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			prefixes = append(prefixes, prefix)
+			continue
+		}
+		if address, err := netip.ParseAddr(value); err == nil {
+			prefixes = append(prefixes, netip.PrefixFrom(address, address.BitLen()))
+		}
+	}
+	return prefixes
+}
+
 func trustedProxyPeer(remoteAddr string) bool {
+	peer := peerAddress(remoteAddr)
+	if peer == "" {
+		return false
+	}
+	address, err := netip.ParseAddr(peer)
+	if err != nil {
+		return false
+	}
+	for _, prefix := range currentTrustedProxies() {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveClientIP 返回本次请求的操作地址与来源（DIRECT / TRUSTED_PROXY / UNKNOWN）。
+func resolveClientIP(request *http.Request) (string, string) {
+	if request == nil {
+		return "", "UNKNOWN"
+	}
+	peer := peerAddress(request.RemoteAddr)
+	if peer == "" {
+		return "", "UNKNOWN"
+	}
+	if !trustedProxyPeer(request.RemoteAddr) {
+		return peer, "DIRECT"
+	}
+	if ip := clientIPAddress(request.Header.Get("X-Real-IP")); ip != nil {
+		if value := ip.String(); value != peer {
+			return value, "TRUSTED_PROXY"
+		}
+	}
+	values := strings.Split(request.Header.Get("X-Forwarded-For"), ",")
+	for index := len(values) - 1; index >= 0; index-- {
+		ip := clientIPAddress(values[index])
+		if ip == nil {
+			continue
+		}
+		value := ip.String()
+		if trustedProxyPeer(value) {
+			continue
+		}
+		if value != peer {
+			return value, "TRUSTED_PROXY"
+		}
+	}
+	return peer, "DIRECT"
+}
+
+func requestClientIP(request *http.Request) string {
+	clientIP, _ := resolveClientIP(request)
+	return clientIP
+}
+
+func requestIPSource(request *http.Request) string {
+	_, source := resolveClientIP(request)
+	return source
+}
+
+func peerAddress(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
 	if err != nil {
 		host = strings.TrimSpace(remoteAddr)
 	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
+	address, err := netip.ParseAddr(host)
+	if err != nil || address.IsUnspecified() || address.IsMulticast() {
+		return ""
 	}
-	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	return address.String()
 }
 
 func publicClientIP(value string) *netip.Addr { return clientIPAddress(value) }
 
 // clientIPAddress 接受任意合法单播地址（含办公网/VPN/回环）。
-// AUD-IP-2026：按地址段过滤会把真实办公网地址丢掉，审计只能显示"未采集"。
+// AUD-IP-2026：按地址段过滤会把真实办公网地址丢掉；是否可信由获取链路决定。
 func clientIPAddress(value string) *netip.Addr {
 	addr, err := netip.ParseAddr(strings.TrimSpace(value))
 	if err != nil || addr.IsUnspecified() || addr.IsMulticast() {
@@ -586,19 +650,6 @@ func clientIPAddress(value string) *netip.Addr {
 	return &addr
 }
 
-// requestIPSource 标记操作地址的来源：经可信代理解析还是直连观察。
-func requestIPSource(request *http.Request) string {
-	if request == nil {
-		return "UNKNOWN"
-	}
-	if trustedProxyPeer(request.RemoteAddr) {
-		return "TRUSTED_PROXY"
-	}
-	if requestClientIP(request) != "" {
-		return "DIRECT"
-	}
-	return "UNKNOWN"
-}
 func auditResource(path string) string {
 	if strings.Contains(path, "service-items") {
 		return "SERVICE_ITEM"

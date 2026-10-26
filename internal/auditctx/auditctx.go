@@ -4,7 +4,11 @@ package auditctx
 import "context"
 
 // Meta 是本次请求的登录地址、操作地址与来源标记。
-type Meta struct{ LoginIP, ClientIP, IPSource string }
+type Meta struct {
+	LoginIP, ClientIP, IPSource, RequestID string
+	// ActorID 是当前请求的稳定操作者 ID；仓储层在缺少显式入参时用它写审计。
+	ActorID string
+}
 
 type metaKey struct{}
 

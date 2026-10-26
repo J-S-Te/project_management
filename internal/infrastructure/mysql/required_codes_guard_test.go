@@ -14,7 +14,11 @@ func TestDeliveryRepoNeverClearsRequiredCodesOnRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read delivery.go: %v", err)
 	}
-	source := string(content)
+	events, err := os.ReadFile("delivery_events.go")
+	if err != nil {
+		t.Fatalf("read delivery_events.go: %v", err)
+	}
+	source := string(content) + string(events)
 	forbidden := "updates[\"required_codes\"] = jsonValue([]string{})"
 	if strings.Contains(source, forbidden) {
 		t.Fatal("delivery.go must not clear required_codes on revoke events: it is the service item capability baseline")
