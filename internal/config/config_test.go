@@ -210,3 +210,14 @@ func TestLoadRequiresCompleteFileGatewayConfiguration(t *testing.T) {
 		t.Fatal("file gateway should be enabled")
 	}
 }
+
+// TestSettlementReferenceRequiresIndependentMachineConfig 验证启用引用时不能使用缺失机器身份。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestSettlementReferenceRequiresIndependentMachineConfig(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("SETTLEMENT_REFERENCE_ENABLED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SETTLEMENT_REFERENCE") {
+		t.Fatalf("缺失机器配置未拒绝：%v", err)
+	}
+}

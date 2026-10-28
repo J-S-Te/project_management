@@ -23,6 +23,9 @@ import (
 	"github.com/j-s-te/project-management/migrations"
 )
 
+// main 装配项目API、可信集成与后台生命周期。
+// 参数：无。
+// 返回值：无；启动失败终止进程。
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -68,6 +71,17 @@ func main() {
 	if err != nil {
 		logger.Error("initialize platform OIDC", "error", err)
 		os.Exit(1)
+	}
+	var settlementReferenceBearer platform.ClientCredentialsTokenVerifier
+	if cfg.SettlementReferenceEnabled {
+		settlementReferenceBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
+			Issuer: cfg.SettlementReferenceIssuer, Audience: cfg.SettlementReferenceAudience, PublicKeyPath: cfg.SettlementReferencePublicKeyPath,
+			ClientID: cfg.SettlementReferenceClientID, TenantID: cfg.OIDCTenantID, CallerApplicationCode: "settlement", CallerEnvironmentCode: cfg.SettlementReferenceCallerEnv, RequiredScope: "settlement.project_reference.read",
+		})
+		if err != nil {
+			logger.Error("initialize settlement reference verifier", "error", err)
+			os.Exit(1)
+		}
 	}
 	var contractBearer platform.ClientCredentialsTokenVerifier
 	if cfg.ContractIntegrationEnabled {
@@ -179,8 +193,9 @@ func main() {
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
-		CommercialLicense: commercialGate,
-		PendingMigrations: pendingMigrations,
+		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
+		CommercialLicense:   commercialGate,
+		PendingMigrations:   pendingMigrations,
 		ProjectSnapshotLimits: application.ProjectSnapshotLimits{
 			BatchSize: 200, MaxProjects: cfg.Snapshot.MaxProjects,
 			MaxServiceItems: cfg.Snapshot.MaxServiceItems,

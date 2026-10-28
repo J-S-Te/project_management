@@ -70,6 +70,12 @@ type Config struct {
 	PlatformCatalogSync              bool
 	PlatformCatalogClientID          string
 	PlatformCatalogClientSecret      string
+	SettlementReferenceEnabled       bool
+	SettlementReferenceClientID      string
+	SettlementReferenceAudience      string
+	SettlementReferenceIssuer        string
+	SettlementReferencePublicKeyPath string
+	SettlementReferenceCallerEnv     string
 	ContractIntegrationEnabled       bool
 	ContractIntegrationRequireBearer bool
 	ContractIntegrationClientID      string
@@ -112,6 +118,9 @@ type Config struct {
 	DashboardMachineScope                  string
 }
 
+// Load 加载并校验项目运行配置和独立机器集成边界。
+// 参数：无。
+// 返回值：配置及缺失或非法配置错误。
 func Load() (Config, error) {
 	c := Config{
 		HTTPAddress: env("PM_HTTP_ADDR", ":8082"), MySQLDSN: os.Getenv("MYSQL_DSN"),
@@ -136,6 +145,11 @@ func Load() (Config, error) {
 		PlatformNotificationClientID:           strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_CLIENT_ID")),
 		PlatformNotificationSecret:             os.Getenv("PLATFORM_NOTIFICATION_CLIENT_SECRET"),
 		PlatformNotificationScope:              strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
+		SettlementReferenceClientID:            strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_CLIENT_ID")),
+		SettlementReferenceAudience:            strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_AUDIENCE")),
+		SettlementReferenceIssuer:              strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_ISSUER")),
+		SettlementReferencePublicKeyPath:       strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH")),
+		SettlementReferenceCallerEnv:           strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE")),
 		ContractIntegrationClientID:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_CLIENT_ID")),
 		ContractIntegrationAudience:            strings.TrimSpace(os.Getenv("CONTRACT_INTEGRATION_AUDIENCE")),
 		ContractIntegrationIssuer:              env("CONTRACT_INTEGRATION_ISSUER", "basic-platform"),
@@ -168,6 +182,9 @@ func Load() (Config, error) {
 		DashboardMachineScope:                  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
+	if c.SettlementReferenceEnabled, err = strconv.ParseBool(env("SETTLEMENT_REFERENCE_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("SETTLEMENT_REFERENCE_ENABLED: %w", err)
+	}
 	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
 		return c, err
 	}
@@ -249,6 +266,9 @@ func Load() (Config, error) {
 	return c, c.validate()
 }
 
+// validate 检查运行配置和集成门禁。
+// 参数：c 为待使用的配置。
+// 返回值：配置不满足契约时返回错误。
 func (c Config) validate() error {
 	if strings.TrimSpace(c.HTTPAddress) == "" {
 		return fmt.Errorf("PM_HTTP_ADDR must not be empty")
@@ -421,6 +441,13 @@ func (c Config) validate() error {
 	// 项目汇总包含全租户数据，机器接口启用后必须校验调用方身份。
 	if c.DashboardMachineEnabled && !c.DashboardMachineRequireBearer {
 		return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER must be true when DASHBOARD_MACHINE_ENABLED=true")
+	}
+	if c.SettlementReferenceEnabled {
+		for name, value := range map[string]string{"CLIENT_ID": c.SettlementReferenceClientID, "AUDIENCE": c.SettlementReferenceAudience, "ISSUER": c.SettlementReferenceIssuer, "PUBLIC_KEY_PATH": c.SettlementReferencePublicKeyPath, "CALLER_ENVIRONMENT_CODE": c.SettlementReferenceCallerEnv} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("SETTLEMENT_REFERENCE_%s is required when reference integration is enabled", name)
+			}
+		}
 	}
 	return c.validateFeatures()
 }

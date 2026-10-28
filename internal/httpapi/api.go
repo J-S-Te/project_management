@@ -45,6 +45,7 @@ type Handler struct {
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
 type RouterOptions struct {
+	SettlementReference *SettlementReferenceOptions
 	CommercialLicense   CommercialLicenseGate
 	ContractIntegration *ContractIntegrationOptions
 	HandoverIntegration *HandoverIntegrationOptions
@@ -57,6 +58,9 @@ type RouterOptions struct {
 	PendingMigrations []string
 }
 
+// NewRouter 构造业务和受控机器接口的HTTP路由。
+// 参数：service 为业务服务，identity 为用户身份，audit 为审计，logger 为日志，options 为机器/许可选项。
+// 返回值：装配完成的Gin路由。
 func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, options ...RouterOptions) *gin.Engine {
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
 	if len(options) > 0 {
@@ -100,6 +104,11 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		}
 		writeData(c, status, body)
 	})
+	if integration := routerOptions.SettlementReference; integration != nil && integration.Enabled {
+		internal := router.Group("/internal/v1/settlement")
+		internal.Use(h.authenticateSettlementReference(*integration))
+		internal.GET("/project-references/:projectID", h.settlementProjectReference)
+	}
 	if integration := routerOptions.ContractIntegration; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1")
 		internal.Use(h.authenticateContractIntegration(*integration), h.auditWrites())
