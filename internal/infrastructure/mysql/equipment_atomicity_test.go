@@ -19,6 +19,9 @@ import (
 
 // 此处使用 SQLite 验证事务回滚及持久化业务不变量；
 // InnoDB 行锁调度由另行显式启用的 MySQL 测试覆盖。
+// equipmentAtomicityDB 创建本地事务夹具并纳入导入关系查询所需表。
+// 参数：t 为测试上下文。
+// 返回值：SQLite隔离连接。
 func equipmentAtomicityDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
@@ -30,7 +33,7 @@ func equipmentAtomicityDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.AutoMigrate(&capabilityRecord{}, &equipmentReservationRecord{}, &implPlanRecord{}, &serviceItemRecord{}, &projectRecord{}); err != nil {
+	if err := db.AutoMigrate(&capabilityRecord{}, &equipmentReservationRecord{}, &implPlanRecord{}, &serviceItemRecord{}, &projectRecord{}, &contractImportBindingRecord{}, &contractIdentityGuardRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec("CREATE UNIQUE INDEX uq_pm_capability_resource ON pm_capability (tenant_id, resource_type, resource_id)").Error; err != nil {

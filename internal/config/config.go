@@ -86,6 +86,13 @@ type Config struct {
 	ContractIntegrationCallerEnv     string
 	ContractIntegrationScope         string
 
+	ProjectContractImportEnabled       bool
+	ProjectContractImportClientID      string
+	ProjectContractImportAudience      string
+	ProjectContractImportIssuer        string
+	ProjectContractImportPublicKeyPath string
+	ProjectContractImportCallerEnv     string
+
 	// HandoverIntegration 是基础平台人员交接机器协议的入站配置。
 	HandoverIntegrationEnabled             bool
 	HandoverIntegrationRequireBearer       bool
@@ -145,6 +152,11 @@ func Load() (Config, error) {
 		PlatformNotificationClientID:           strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_CLIENT_ID")),
 		PlatformNotificationSecret:             os.Getenv("PLATFORM_NOTIFICATION_CLIENT_SECRET"),
 		PlatformNotificationScope:              strings.TrimSpace(os.Getenv("PLATFORM_NOTIFICATION_SCOPE")),
+		ProjectContractImportClientID:          strings.TrimSpace(os.Getenv("PROJECT_CONTRACT_IMPORT_CLIENT_ID")),
+		ProjectContractImportAudience:          strings.TrimSpace(os.Getenv("PROJECT_CONTRACT_IMPORT_AUDIENCE")),
+		ProjectContractImportIssuer:            strings.TrimSpace(os.Getenv("PROJECT_CONTRACT_IMPORT_ISSUER")),
+		ProjectContractImportPublicKeyPath:     strings.TrimSpace(os.Getenv("PROJECT_CONTRACT_IMPORT_PUBLIC_KEY_PATH")),
+		ProjectContractImportCallerEnv:         strings.TrimSpace(os.Getenv("PROJECT_CONTRACT_IMPORT_CALLER_ENVIRONMENT_CODE")),
 		SettlementReferenceClientID:            strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_CLIENT_ID")),
 		SettlementReferenceAudience:            strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_AUDIENCE")),
 		SettlementReferenceIssuer:              strings.TrimSpace(os.Getenv("SETTLEMENT_REFERENCE_ISSUER")),
@@ -182,6 +194,9 @@ func Load() (Config, error) {
 		DashboardMachineScope:                  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
+	if c.ProjectContractImportEnabled, err = strconv.ParseBool(env("PROJECT_CONTRACT_IMPORT_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("PROJECT_CONTRACT_IMPORT_ENABLED: %w", err)
+	}
 	if c.SettlementReferenceEnabled, err = strconv.ParseBool(env("SETTLEMENT_REFERENCE_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("SETTLEMENT_REFERENCE_ENABLED: %w", err)
 	}
@@ -446,6 +461,13 @@ func (c Config) validate() error {
 		for name, value := range map[string]string{"CLIENT_ID": c.SettlementReferenceClientID, "AUDIENCE": c.SettlementReferenceAudience, "ISSUER": c.SettlementReferenceIssuer, "PUBLIC_KEY_PATH": c.SettlementReferencePublicKeyPath, "CALLER_ENVIRONMENT_CODE": c.SettlementReferenceCallerEnv} {
 			if strings.TrimSpace(value) == "" || placeholder(value) {
 				return fmt.Errorf("SETTLEMENT_REFERENCE_%s is required when reference integration is enabled", name)
+			}
+		}
+	}
+	if c.ProjectContractImportEnabled || c.ProjectContractImportClientID != "" {
+		for name, value := range map[string]string{"CLIENT_ID": c.ProjectContractImportClientID, "AUDIENCE": c.ProjectContractImportAudience, "ISSUER": c.ProjectContractImportIssuer, "PUBLIC_KEY_PATH": c.ProjectContractImportPublicKeyPath, "CALLER_ENVIRONMENT_CODE": c.ProjectContractImportCallerEnv} {
+			if strings.TrimSpace(value) == "" || placeholder(value) {
+				return fmt.Errorf("PROJECT_CONTRACT_IMPORT_%s is required for import authentication", name)
 			}
 		}
 	}

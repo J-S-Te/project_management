@@ -27,9 +27,9 @@ func isDuplicateKey(err error) bool {
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
 
-// FindProjectByContract 按稳定合同身份查找项目。唯一性口径是「租户 + 合同身份」：
-// contract_id 非空时以它为准，历史空 contract_id 行回退合同展示号（与迁移生成的
-// contract_identity_key 完全一致）；普通合同版本只用于并发/审计，不参与查找或唯一性。
+// FindProjectByContract 按主合同或受控导入关系查询项目，保留租户及项目数据范围。
+// 参数：ctx 为请求，filter 为授权范围，contractID 和contractNumber 为稳定身份及历史编号。
+// 返回值：关联项目；无授权匹配时返回不存在，存储故障原样返回。
 func (r *Repository) FindProjectByContract(ctx context.Context, filter platform.ScopeFilter, contractID, contractNumber string) (domain.Project, error) {
 	identities := make([]string, 0, 2)
 	seen := map[string]bool{}
@@ -47,6 +47,12 @@ func (r *Repository) FindProjectByContract(ctx context.Context, filter platform.
 	var record projectRecord
 	err := projectContractIdentityQuery(r.db.WithContext(ctx), filter, identities).
 		Order("created_at ASC, id ASC").Take(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		bindings := r.db.WithContext(ctx).Model(&contractImportBindingRecord{}).
+			Select("project_id").Where("tenant_id=? AND source_application=? AND contract_id IN ? AND project_id<>''", filter.TenantID, "contract_management", identities)
+		err = applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").
+			Where("id IN (?)", bindings).Order("created_at ASC,id ASC").Take(&record).Error
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.Project{}, application.ErrNotFound
 	}
@@ -69,8 +75,17 @@ func projectContractIdentityQuery(db *gorm.DB, filter platform.ScopeFilter, iden
 		Where("(CASE WHEN contract_id <> '' THEN contract_id ELSE contract END) IN ?", identities)
 }
 
+// ActivateContract 在统一合同身份锁下幂等激活普通合同项目。
+// 参数：ctx为上下文，project/items为项目及服务项，event为来源事件。
+// 返回值：无错误表示已应用或相同事件重放，身份冲突时失败。
 func (r *Repository) ActivateContract(ctx context.Context, project domain.Project, items []domain.ServiceItem, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := claimContractProject(tx, project.TenantID, project.ContractID, project.Contract, project.ID, r.importCommandID); err != nil {
+			if errors.Is(err, application.ErrImportConflict) {
+				return application.ErrDuplicateContract
+			}
+			return err
+		}
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			// 同一 (tenant_id, 合同身份) 并发激活时，唯一键
@@ -94,8 +109,17 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 	})
 }
 
+// CreateProjectWithServiceItems 在合同归属约束下原子创建项目及服务项。
+// 参数：ctx为上下文，project/items为项目及服务项。
+// 返回值：授权数据或存储冲突时返回错误。
 func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project domain.Project, items []domain.ServiceItem) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := claimContractProject(tx, project.TenantID, project.ContractID, project.Contract, project.ID, r.importCommandID); err != nil {
+			if errors.Is(err, application.ErrImportConflict) {
+				return application.ErrDuplicateProject
+			}
+			return err
+		}
 		pr := projectRecord{ID: project.ID, TenantID: project.TenantID, OwnerOrgID: project.OwnerOrgID, Name: project.Name, Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID, ContractVersion: project.ContractVersion, SupplementStatus: project.SupplementStatus, Services: project.Services, Category: project.Category, Team: project.Team, Manager: project.Manager, OwnerIdentityID: project.OwnerIdentityID, ManagerIdentityID: project.ManagerIdentityID, Status: project.Status, Progress: project.Progress, Due: project.Due, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 		if err := tx.Create(&pr).Error; err != nil {
 			// 手动创建没有合同激活那样的幂等回读：撞唯一键 uq_pm_project_contract_identity
@@ -135,8 +159,18 @@ func (r *Repository) SyncContractStampStatus(ctx context.Context, project domain
 	})
 }
 
+// ApplyDeliveryEvent 应用合同交付事件，保留普通补充共享并拒绝历史独占冲突。
+// 参数：ctx为上下文，event为已校验的交付事件。
+// 返回值：事件应用或幂等重放结果，版本或归属冲突时返回错误。
 func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.DeliveryEvent) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if event.Type == application.EventDecompositionAdjusted {
+			if id := stringValue(event.Payload, "supplement_contract_id"); id != "" {
+				if err := checkOrdinarySupplementImport(tx, event.TenantID, id, event.ProjectID); err != nil {
+					return err
+				}
+			}
+		}
 		if event.Type == application.EventDeviationReviewed {
 			deviationID := stringValue(event.Payload, "deviation_id")
 			var reported deliveryEventRecord

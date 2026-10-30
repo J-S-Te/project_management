@@ -708,13 +708,16 @@ func (r *duplicateContractRepository) UpdateCapabilityIdentities(context.Context
 	return nil
 }
 
-// 重复激活同一合同不能 500：后到请求把唯一键冲突翻译成幂等成功并回读既有项目。
+// TestActivateContractDuplicateConcurrentActivationReturnsExistingProject 验证ActivateContractDuplicateConcurrentActivationReturnsExistingProject的业务约束与回归行为。
+// 参数：t为测试上下文，使用独立夹具。
+// 返回值：无；预期结果或状态不一致时测试失败。
 func TestActivateContractDuplicateConcurrentActivationReturnsExistingProject(t *testing.T) {
 	principal := principalWith("project.contract.import", platform.DataScope{RoleCode: "business_admin", ScopeType: "APPLICATION", ScopeID: "app-1"})
 	activeRepo := &duplicateContractRepository{}
 	service := &Service{Repo: activeRepo}
 	activation := func() domain.ContractActivation {
 		return domain.ContractActivation{
+			OriginKind: "NORMAL", ImportMode: "NORMAL", OriginImportItemID: "normal-batch-item",
 			ContractID: "CT-001", ContractNumber: "HT-2026-001", ContractVersion: "v1.0", Customer: "客户A", EffectiveAt: time.Now().UTC(),
 			Services: []domain.ContractService{{SourceID: "S1", Site: "北京", Batch: "B1", Category: "渗透测试", TestMode: "PENETRATION"}},
 		}

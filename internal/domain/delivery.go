@@ -4,7 +4,10 @@ import "time"
 
 // ContractActivation 是合同系统负责的幂等合同到项目交接。
 type ContractActivation struct {
-	ContractID string `json:"contract_id"`
+	OriginKind         string `json:"origin_kind,omitempty"`
+	ImportMode         string `json:"import_mode,omitempty"`
+	OriginImportItemID string `json:"origin_import_item_id,omitempty"`
+	ContractID         string `json:"contract_id"`
 	// ContractNumber 是面向用户展示的权威合同编号。滚动发布期间旧合同系统未携带时，
 	// 项目管理以 ContractID 回退展示；建项幂等身份使用稳定的 ContractID（历史空 ID 回退
 	// ContractNumber），ContractVersion 仅用于并发/审计与展示。

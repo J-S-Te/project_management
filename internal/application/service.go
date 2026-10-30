@@ -223,8 +223,9 @@ func (s *Service) GetProject(ctx context.Context, p platform.Principal, id strin
 	return masked[0], nil
 }
 
-// ListApprovedContracts 通过项目后端的机器身份读取当前租户已审批合同。
-// 浏览器只持有项目系统会话，不需要也不应跨子系统复用合同系统 Cookie。
+// ListApprovedContracts 返回允许普通人工建项且尚未引用的合同目录。
+// 参数：ctx 为请求，p 为用户主体，limit 为目录上限。
+// 返回值：校验后的业务数据或权限、依赖、校验错误。
 func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principal, limit int) ([]platform.ApprovedContract, error) {
 	if !mayCreateProject(p) {
 		return nil, ErrForbidden
@@ -241,7 +242,7 @@ func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principa
 	}
 	approved := make([]platform.ApprovedContract, 0, len(items))
 	for _, item := range items {
-		if item.ID != "" && item.ApprovalPassed {
+		if item.ID != "" && item.ApprovalPassed && platform.NormalProjectContract(item) {
 			approved = append(approved, item)
 		}
 	}
@@ -306,9 +307,9 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 	return result, nil
 }
 
-// populatePendingProjectCreation 补全看板，不让
-// 项目列表依赖合同管理可用性。布尔字段
-// 使 UI 可区分真实零值与暂时不可用的指标。
+// populatePendingProjectCreation 统计普通合同中尚未建项的引用，不重新激活导入来源。
+// 参数：ctx 为请求，tenantID 为可信租户，result 为待填充的看板。
+// 返回值：无；依赖失败保留不可用状态。
 func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID string, result *domain.Dashboard) {
 	counter, ok := s.Repo.(ExistingContractReferenceCounter)
 	if s.Contracts == nil || !ok {
@@ -323,6 +324,13 @@ func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID s
 			s.logPendingProjectCountError(tenantID, err)
 			return
 		}
+		normal := make([]platform.ApprovedContract, 0, len(references))
+		for _, reference := range references {
+			if platform.NormalProjectContract(reference) {
+				normal = append(normal, reference)
+			}
+		}
+		references = normal
 		existing, err := counter.CountExistingContractReferences(ctx, tenantID, references)
 		if err != nil {
 			s.logPendingProjectCountError(tenantID, err)
@@ -588,6 +596,9 @@ func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, c
 	return existing.ID, nil
 }
 
+// CreateProjectWithServiceItems 依据普通权威合同创建项目和服务范围，导入合同须走专用协议。
+// 参数：ctx 为请求，p 为用户主体，input 为项目输入，requested 为选择的服务项。
+// 返回值：创建的项目，或权限、政策、目录与持久化错误。
 func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
 	// 交接冻结：被冻结的用户不得承接新项目责任（创建即指派项目经理）。
 	if err := s.ensureManagerNotFrozen(ctx, p.TenantID, input.ManagerIdentityID); err != nil {
@@ -629,7 +640,7 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	if approvalErr != nil {
 		return input, fmt.Errorf("%w: %v", ErrContractUnavailable, approvalErr)
 	}
-	if !approved.ApprovalPassed {
+	if !approved.ApprovalPassed || !platform.NormalProjectContract(approved) {
 		return input, PreconditionError("所选合同尚未通过审批")
 	}
 	if strings.TrimSpace(approved.ID) == "" || strings.TrimSpace(approved.ID) != input.ContractID {
