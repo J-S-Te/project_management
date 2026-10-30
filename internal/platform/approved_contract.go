@@ -11,14 +11,17 @@ import (
 )
 
 type ApprovedContract struct {
-	ID             string `json:"id"`
-	Number         string `json:"contract_number"`
-	Title          string `json:"title"`
-	CustomerID     string `json:"customer_id"`
-	CustomerName   string `json:"customer_name"`
-	Version        uint64 `json:"version"`
-	Status         string `json:"status"`
-	ApprovalPassed bool   `json:"approval_passed"`
+	OriginKind         string `json:"origin_kind,omitempty"`
+	ImportMode         string `json:"import_mode,omitempty"`
+	OriginImportItemID string `json:"origin_import_item_id,omitempty"`
+	ID                 string `json:"id"`
+	Number             string `json:"contract_number"`
+	Title              string `json:"title"`
+	CustomerID         string `json:"customer_id"`
+	CustomerName       string `json:"customer_name"`
+	Version            uint64 `json:"version"`
+	Status             string `json:"status"`
+	ApprovalPassed     bool   `json:"approval_passed"`
 }
 
 // ApprovedContractService 是已审批合同面向项目的服务
@@ -235,4 +238,14 @@ func (c *approvedContractClient) GetServiceItems(ctx context.Context, contractID
 		return ApprovedContractServiceCatalog{}, fmt.Errorf("contract approval service returned invalid service items")
 	}
 	return envelope.Data, nil
+}
+
+// NormalProjectContract 仅允许普通来源沿用既有人工及自动建项路径。
+// 参数：contract 为合同服务的权威引用。
+// 返回值：普通兼容存量为真；已知导入或未知来源均为假。
+func NormalProjectContract(contract ApprovedContract) bool {
+	if contract.OriginImportItemID != "" {
+		return contract.OriginKind == "NORMAL" && contract.ImportMode == "NORMAL"
+	}
+	return (contract.OriginKind == "" || contract.OriginKind == "NORMAL") && (contract.ImportMode == "" || contract.ImportMode == "NORMAL")
 }

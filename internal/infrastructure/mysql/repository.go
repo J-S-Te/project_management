@@ -18,7 +18,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type Repository struct{ db *gorm.DB }
+type Repository struct {
+	db              *gorm.DB
+	importCommandID string
+}
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
@@ -230,7 +233,16 @@ func (r *Repository) CreateProject(ctx context.Context, item domain.Project) err
 	})
 }
 
+// createProjectRecord 按项目结构持久化新记录并校验合同身份归属。
+// 参数：tx为当前事务，item为待创建项目。
+// 返回值：数据库或合同归属冲突错误。
 func (r *Repository) createProjectRecord(tx *gorm.DB, item domain.Project) error {
+	if err := claimContractProject(tx, item.TenantID, item.ContractID, item.Contract, item.ID, r.importCommandID); err != nil {
+		if errors.Is(err, application.ErrImportConflict) {
+			return application.ErrDuplicateProject
+		}
+		return err
+	}
 	err := tx.Create(&projectRecord{ID: item.ID, TenantID: item.TenantID, OwnerOrgID: item.OwnerOrgID, Name: item.Name, Customer: item.Customer, CustomerID: item.CustomerID, Contract: item.Contract, ContractID: item.ContractID, ContractVersion: item.ContractVersion, SupplementStatus: firstValue(item.SupplementStatus, "NONE"), Services: item.Services, Category: item.Category, Team: item.Team, Manager: item.Manager, OwnerIdentityID: item.OwnerIdentityID, ManagerIdentityID: item.ManagerIdentityID, Status: item.Status, Progress: item.Progress, Due: item.Due, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}).Error
 	if err != nil && isDuplicateKey(err) {
 		// 无服务项的手动创建同样受唯一键约束，理由见 CreateProjectWithServiceItems。

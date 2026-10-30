@@ -543,6 +543,9 @@ func auditActorType(eventType string) string {
 	return "USER"
 }
 
+// createEvent 原子记录交付、派生任务及审计，并保留导入机器身份的真实类型。
+// 参数：tx 为当前业务事务，event 为已校验的交付事件。
+// 返回值：任一持久化失败返回错误并由调用事务回滚。
 func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 	payload, err := json.Marshal(event.Payload)
 	if err != nil {
@@ -567,9 +570,13 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 	// AUD-IP-2026 / 批次 2：审计事件与交付事件同事务落库，平台不可用时由投递器重试，
 	// 不再出现"业务已提交、审计同步发送失败返 503"的不一致。
 	meta := auditctx.FromContext(tx.Statement.Context)
+	actorType := auditActorType(event.Type)
+	if event.Payload["origin_kind"] == "IMPORTED" {
+		actorType = "SYSTEM"
+	}
 	return tx.Create(&auditOutboxRecord{
 		ID: ulid.Make().String(), TenantID: event.TenantID, EventID: ulid.Make().String(),
-		ActorID: actorPointer(event.ActorUserID), ActorType: auditActorType(event.Type),
+		ActorID: actorPointer(event.ActorUserID), ActorType: actorType,
 		Action:       "PROJECT_MANAGEMENT:" + string(event.Type),
 		ResourceType: "project", ResourceID: event.ProjectID,
 		LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),

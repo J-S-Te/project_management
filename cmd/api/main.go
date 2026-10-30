@@ -83,6 +83,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var contractImportBearer platform.ClientCredentialsTokenVerifier
+	if cfg.ProjectContractImportClientID != "" {
+		contractImportBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
+			Issuer: cfg.ProjectContractImportIssuer, Audience: cfg.ProjectContractImportAudience, PublicKeyPath: cfg.ProjectContractImportPublicKeyPath,
+			ClientID: cfg.ProjectContractImportClientID, TenantID: cfg.OIDCTenantID, CallerApplicationCode: "contract_management", CallerEnvironmentCode: cfg.ProjectContractImportCallerEnv, RequiredScope: "project.contract.import",
+		})
+		if err != nil {
+			logger.Error("initialize contract import verifier", "error", err)
+			os.Exit(1)
+		}
+	}
 	var contractBearer platform.ClientCredentialsTokenVerifier
 	if cfg.ContractIntegrationEnabled {
 		contractBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
@@ -193,6 +204,7 @@ func main() {
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
+		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
 		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
 		CommercialLicense:   commercialGate,
 		PendingMigrations:   pendingMigrations,

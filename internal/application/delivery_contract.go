@@ -62,7 +62,20 @@ const (
 	assignmentRoleDirectorySize  = 50
 )
 
+// ActivateContract 执行普通合同激活，禁止导入来源降级进入旧协议。
+// 参数：ctx 为请求，p 为已认证主体，input 为普通激活信息。
+// 返回值：项目；来源非法或业务校验失败时返回错误。
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
+	if !platform.NormalProjectContract(platform.ApprovedContract{OriginKind: input.OriginKind, ImportMode: input.ImportMode, OriginImportItemID: input.OriginImportItemID}) {
+		return domain.Project{}, ErrImportPolicy
+	}
+	return s.activateContract(ctx, p, input, false, nil)
+}
+
+// activateContract 复用合同拆解与项目事务，导入时强制人工确认服务范围。
+// 参数：ctx 为请求，p 为机器或用户主体，input 为激活信息，imported 表示导入，targetOwner 为受控负责人。
+// 返回值：已持久化项目或业务校验错误。
+func (s *Service) activateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation, imported bool, targetOwner *platform.OwnerDirectoryUser) (domain.Project, error) {
 	filter, scopeErr := authorizeProjectScope(p, "project.contract.import")
 	if scopeErr != nil {
 		return domain.Project{}, scopeErr
@@ -92,7 +105,7 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if err != nil {
 			return domain.Project{}, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
 		}
-		if strings.TrimSpace(contract.ID) != strings.TrimSpace(input.ContractID) || strings.TrimSpace(contract.Number) == "" || !contract.ApprovalPassed {
+		if strings.TrimSpace(contract.ID) != strings.TrimSpace(input.ContractID) || strings.TrimSpace(contract.Number) == "" || !contract.ApprovalPassed || !platform.NormalProjectContract(contract) {
 			return domain.Project{}, ErrContractUnavailable
 		}
 		input.ContractNumber = strings.TrimSpace(contract.Number)
@@ -101,6 +114,14 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		if resolvedNumber && strings.TrimSpace(existing.Contract) != input.ContractNumber {
 			return domain.Project{}, PreconditionError("历史项目合同身份无法安全映射，请核对权威合同编号")
 		}
+		if imported {
+			return domain.Project{}, ErrImportConflict
+		}
+		primaryIdentity := existing.ContractID == strings.TrimSpace(input.ContractID) ||
+			existing.Contract == strings.TrimSpace(input.ContractNumber)
+		if !primaryIdentity {
+			return domain.Project{}, ErrImportPolicy
+		}
 		return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
 	} else if !errors.Is(findErr, ErrNotFound) {
 		return domain.Project{}, findErr
@@ -108,7 +129,16 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 	now := time.Now().UTC()
 	ownerIdentityID := firstNonEmpty(p.IdentityID, p.UserID)
 	ownerOrgID := ""
-	if len(filter.OrganizationIDs) == 1 {
+	if targetOwner != nil {
+		ownerIdentityID = targetOwner.UserID
+		for _, org := range targetOwner.Organizations {
+			if org.IsPrimary {
+				ownerOrgID = org.OrganizationID
+				break
+			}
+		}
+	}
+	if targetOwner == nil && len(filter.OrganizationIDs) == 1 {
 		ownerOrgID = filter.OrganizationIDs[0]
 	}
 	if !filter.AllowAll && !filter.AllowSelf && ownerOrgID == "" {
@@ -153,8 +183,14 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 		// 必检能力码来自检测类别域：分配工程师时按此校验，留空则只保留渗透测试的固定要求。
 		items = append(items, domain.ServiceItem{TenantID: p.TenantID, ID: fmt.Sprintf("SI-%s-%03d", strings.TrimPrefix(project.ID, "PJ-"), index+1), ProjectID: project.ID, SourceServiceID: item.SourceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: outcome.SystemStandard, Special: outcome.Special, TestMode: outcome.TestMode, Status: outcome.Status, TechReviewStatus: techReview, RequiredCodes: outcome.RequiredCodes, ConflictStatus: "UNCHECKED"})
 	}
+	if imported {
+		for i := range items {
+			items[i].Status = domain.ServiceItemStatusPendingConfirm
+			items[i].TechReviewStatus = ""
+		}
+	}
 	project.Services = len(items)
-	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.ContractID, "contract_number": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection})
+	event := deliveryEvent(p, project.ID, "", EventContractActivated, map[string]any{"contract_id": project.ContractID, "contract_number": project.Contract, "contract_version": project.ContractVersion, "effective_at": input.EffectiveAt, "service_count": len(items), "stamped_contract_uploaded": input.StampedContractUploaded, "split_rule": splitPlanSummary(plan), "scope_snapshot": splitScopeSnapshot(items), "scope_change_detection": plan.ScopeChangeDetection, "origin_kind": input.OriginKind, "import_mode": input.ImportMode, "origin_import_item_id": input.OriginImportItemID})
 	if len(missingCategories) > 0 && plan.MissingRuleAction == domain.SplitMissingHumanConfirm {
 		event.RoleNotification = &domain.RoleNotification{Roles: []string{"business_admin"}, Message: domain.NotificationMessage{
 			EventID: ulid.Make().String(), EventType: "SPLIT_RULE_MISSING", Scope: platform.NotificationScopeCrossSystem, Priority: "HIGH",
@@ -173,6 +209,14 @@ func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, in
 			}
 			if resolvedNumber && strings.TrimSpace(existing.Contract) != input.ContractNumber {
 				return domain.Project{}, PreconditionError("历史项目合同身份无法安全映射，请核对权威合同编号")
+			}
+			if imported {
+				return domain.Project{}, ErrImportConflict
+			}
+			primaryIdentity := existing.ContractID == strings.TrimSpace(input.ContractID) ||
+				existing.Contract == strings.TrimSpace(input.ContractNumber)
+			if !primaryIdentity {
+				return domain.Project{}, ErrImportPolicy
 			}
 			return syncExistingContract(ctx, repo, p, existing, input.StampedContractUploaded)
 		}
@@ -294,6 +338,9 @@ func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project 
 	return validateSupplementContract(project, supplementContractID, supplement)
 }
 
+// validateSupplementContract 核对同客户普通补充合同身份与审批状态。
+// 参数：project 为目标项目，supplementContractID 为请求身份，supplement 为权威合同。
+// 返回值：合法时为空，否则返回业务前置错误。
 func validateSupplementContract(project domain.Project, supplementContractID string, supplement platform.ApprovedContract) error {
 	// 权威回读后统一比较稳定 ID 与历史编号；旧 contract_id 也可能保存编号。
 	for _, original := range []string{strings.TrimSpace(project.ContractID), strings.TrimSpace(project.Contract)} {
@@ -301,7 +348,7 @@ func validateSupplementContract(project domain.Project, supplementContractID str
 			return ValidationError("补充协议不能与原合同相同")
 		}
 	}
-	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !supplementContractApprovedStatus(supplement.Status) {
+	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !platform.NormalProjectContract(supplement) || !supplementContractApprovedStatus(supplement.Status) {
 		return PreconditionError("所选补充协议尚未审批通过")
 	}
 	projectCustomerID := strings.TrimSpace(project.CustomerID)

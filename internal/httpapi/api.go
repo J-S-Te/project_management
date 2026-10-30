@@ -47,6 +47,7 @@ type Handler struct {
 type RouterOptions struct {
 	SettlementReference *SettlementReferenceOptions
 	CommercialLicense   CommercialLicenseGate
+	ContractImport      *ContractImportOptions
 	ContractIntegration *ContractIntegrationOptions
 	HandoverIntegration *HandoverIntegrationOptions
 	// HandoverService 是人员交接协议的领域服务；与 HandoverIntegration 一并注入。
@@ -109,6 +110,15 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		internal.Use(h.authenticateSettlementReference(*integration))
 		internal.GET("/project-references/:projectID", h.settlementProjectReference)
 	}
+	importOptions := ContractImportOptions{}
+	if routerOptions.ContractImport != nil {
+		importOptions = *routerOptions.ContractImport
+	}
+	imports := router.Group("/internal/v1/contract-imports")
+	imports.Use(h.authenticateContractImport(importOptions), h.auditWrites())
+	imports.GET("/capabilities", func(c *gin.Context) { h.contractImportCapabilities(c, importOptions.Enabled) })
+	imports.POST("/project-bindings", func(c *gin.Context) { h.bindContractImport(c, importOptions.Enabled) })
+	imports.GET("/project-bindings/:origin_import_item_id", h.getContractImportBinding)
 	if integration := routerOptions.ContractIntegration; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1")
 		internal.Use(h.authenticateContractIntegration(*integration), h.auditWrites())
@@ -894,6 +904,10 @@ func (h *Handler) createProject(c *gin.Context) {
 	}
 	writeData(c, http.StatusCreated, item)
 }
+
+// activateContract 接收普通合同激活，导入来源须使用专用命令。
+// 参数：c 为通过授权的HTTP上下文。
+// 返回值：无；响应项目或业务错误。
 func (h *Handler) activateContract(c *gin.Context) {
 	var input domain.ContractActivation
 	if !decode(c, &input) {
@@ -901,7 +915,7 @@ func (h *Handler) activateContract(c *gin.Context) {
 	}
 	item, err := h.service.ActivateContract(c.Request.Context(), principal(c), input)
 	if err != nil {
-		writeServiceError(c, err)
+		writeContractImportError(c, err)
 		return
 	}
 	writeData(c, http.StatusCreated, item)

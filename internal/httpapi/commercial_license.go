@@ -14,9 +14,11 @@ type CommercialLicenseGate interface {
 // 精确审查的读取路由：未来 GET 端点不能仅因使用 GET
 // 就继承计算或推进业务的权限。
 var commercialHistoryRoutes = map[string]bool{
-	"/internal/v1/settlement/project-references/:projectID": true,
-	"/internal/v1/dashboard/projects/snapshot":              true,
-	"/internal/v1/contracts/detection-categories":           true, "/internal/v1/dashboard": true,
+	"/internal/v1/contract-imports/capabilities":                            true,
+	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": true,
+	"/internal/v1/settlement/project-references/:projectID":                 true,
+	"/internal/v1/dashboard/projects/snapshot":                              true,
+	"/internal/v1/contracts/detection-categories":                           true, "/internal/v1/dashboard": true,
 	"/internal/v1/handover/responsibilities": true, "/internal/v1/handover/transfers/:item_id": true,
 	"/api/v1/navigation": true, "/api/v1/role-catalog": true, "/api/v1/rule-configuration-catalog": true,
 	"/api/v1/dashboard": true, "/api/v1/projects": true, "/api/v1/projects-monitoring": true,
