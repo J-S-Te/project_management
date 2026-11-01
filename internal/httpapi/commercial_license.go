@@ -34,7 +34,16 @@ var commercialHistoryRoutes = map[string]bool{
 	"/api/v1/detection-categories": true, "/api/v1/detection-categories/import/template": true, "/api/v1/split-overrides": true,
 }
 
+// commercialOperation 保持会话技术入口的原有许可分类边界。
+// 参数：method为原始HTTP操作方法。
+//
+//	path为原始技术或业务路由。
+//
+// 返回值：与当前路由匹配的许可操作类别。
 func commercialOperation(method, path string) core.Operation {
+	if method == http.MethodGet && path == "/auth/session" || method == http.MethodPost && path == "/auth/activity" {
+		return core.ESSENTIAL_SERVICE
+	}
 	if method == http.MethodOptions {
 		return core.ESSENTIAL_SERVICE
 	}
