@@ -22,7 +22,11 @@ func TestApprovedContractClientListsWithMachineToken(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"OK","data":[{"id":"C-1","contract_number":"HT-1","title":"技术服务","customer_id":"8","customer_name":"客户","version":2,"status":"approved","approval_passed":true}]}`))}, nil
 		case "/internal/v1/project/approved-contract-references":
-			if request.Header.Get("Authorization") != "Bearer machine-token" || request.URL.Query().Get("limit") != "500" {
+			// BIZ-XAPI-09：关键字与游标都必须作为查询参数透传给合同侧。
+			if request.Header.Get("Authorization") != "Bearer machine-token" ||
+				request.URL.Query().Get("limit") != "500" ||
+				request.URL.Query().Get("keyword") != "HT-1" ||
+				request.URL.Query().Get("after_id") != "C-0" {
 				t.Fatalf("authorization=%q query=%q", request.Header.Get("Authorization"), request.URL.RawQuery)
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"OK","data":{"contracts":[{"id":"C-1","contract_number":"HT-1","version":2}],"next_after_id":""}}`))}, nil
@@ -49,7 +53,7 @@ func TestApprovedContractClientListsWithMachineToken(t *testing.T) {
 	if len(items) != 1 || items[0].ID != "C-1" || items[0].CustomerID != "8" || !items[0].ApprovalPassed {
 		t.Fatalf("items=%+v", items)
 	}
-	references, nextAfterID, err := client.ListReferences(context.Background(), "", 500)
+	references, nextAfterID, err := client.ListReferences(context.Background(), " HT-1 ", "C-0", 500)
 	if err != nil || len(references) != 1 || references[0].ID != "C-1" || nextAfterID != "" {
 		t.Fatalf("ListReferences() = %+v, %q, %v", references, nextAfterID, err)
 	}

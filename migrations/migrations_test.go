@@ -1,17 +1,24 @@
 package migrations
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestDeliveryEffectsMigrationKeepsIntentAndRecoveryBoundaries(t *testing.T) {
 	body, err := Files.ReadFile("000028_delivery_effects_outbox.sql")
-	if err != nil { t.Fatal(err) }
-	for _, expected := range []string{"CREATE TABLE IF NOT EXISTS pm_delivery_effects_outbox", "UNIQUE KEY uq_pm_effects_source (tenant_id, source_event_id)", "payload JSON NOT NULL", "idx_pm_effects_claim", "locked_until", "last_error_summary", "completed_at"} {
-		if !strings.Contains(string(body), expected) { t.Fatalf("missing durable boundary %q", expected) }
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(body), "INSERT INTO") { t.Fatal("historical events must not be retroactively replayed") }
+	for _, expected := range []string{"CREATE TABLE IF NOT EXISTS pm_delivery_effects_outbox", "UNIQUE KEY uq_pm_effects_source (tenant_id, source_event_id)", "payload JSON NOT NULL", "idx_pm_effects_claim", "locked_until", "last_error_summary", "completed_at"} {
+		if !strings.Contains(string(body), expected) {
+			t.Fatalf("missing durable boundary %q", expected)
+		}
+	}
+	if strings.Contains(string(body), "INSERT INTO") {
+		t.Fatal("historical events must not be retroactively replayed")
+	}
 }
 
 func TestIncomeContractCategoriesOnlyAddMissingTenantEntries(t *testing.T) {
@@ -344,6 +351,72 @@ func TestEmbeddedPenetrationWorkPackageMigrationSeparatesSubjectAndIdempotency(t
 	}
 }
 
+// TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp 固定交互列的可空兼容语义。
+// 参数：t 为测试上下文。
+// 返回值：无；迁移改写既有行或绝对截止时失败。
+func TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp(t *testing.T) {
+	body, err := Files.ReadFile("000038_pm_oidc_session_idle.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"ALTER TABLE pm_oidc_session",
+		"ADD COLUMN last_interactive_at DATETIME(3) NULL",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("idle session migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE ", "DELETE ", "INSERT INTO", "session_expires_at", "DROP ", "MODIFY "} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("idle session migration must not touch existing rows or deadlines: found %q", forbidden)
+		}
+	}
+}
+
+// TestAuditOutboxRequestIDMigrationMatchesReadModel 固定审计请求关联列的增量迁移。
+// 参数：t 为测试上下文。
+// 返回值：无；列重复声明、非可空或历史数据改写时失败。
+func TestAuditOutboxRequestIDMigrationMatchesReadModel(t *testing.T) {
+	body, err := Files.ReadFile("000039_pm_audit_request_id.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"ALTER TABLE prj_audit_outbox",
+		"ADD COLUMN request_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL",
+		"AFTER resource_id",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("audit request_id migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE ", "DELETE ", "INSERT INTO", "DROP ", "MODIFY ", "NOT NULL", "CHANGE "} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("audit request_id migration must stay additive and nullable: found %q", forbidden)
+		}
+	}
+	// 同一列不得被其它迁移重复添加：MySQL 会以 1060 duplicate column 失败。
+	entries, err := Files.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() == "000039_pm_audit_request_id.sql" {
+			continue
+		}
+		other, err := Files.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(other), "prj_audit_outbox") && strings.Contains(string(other), "request_id") {
+			t.Fatalf("%s already declares prj_audit_outbox.request_id", entry.Name())
+		}
+	}
+}
+
 func TestOfflineFieldEvidenceMigrationAddsReplayAndCaptureBoundaries(t *testing.T) {
 	body, err := Files.ReadFile("000026_offline_field_evidence.sql")
 	if err != nil {
@@ -359,5 +432,30 @@ func TestOfflineFieldEvidenceMigrationAddsReplayAndCaptureBoundaries(t *testing.
 		if !strings.Contains(sql, required) {
 			t.Fatalf("offline field migration missing %q", required)
 		}
+	}
+}
+
+// TestEmbeddedMigrationVersionsRemainUniqueAndContiguous 固定合并后迁移版本连续且不重复。
+// 参数：t 为测试上下文。
+// 返回值：无；版本重复、缺口或命名异常时失败。
+func TestEmbeddedMigrationVersionsRemainUniqueAndContiguous(t *testing.T) {
+	entries, err := Files.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := 1
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(entry.Name(), "_")
+		version, err := strconv.Atoi(prefix)
+		if !ok || err != nil || version != expected {
+			t.Fatalf("migration %s version=%d want=%d err=%v", entry.Name(), version, expected, err)
+		}
+		expected++
+	}
+	if expected != 40 {
+		t.Fatalf("migration count=%d want=39", expected-1)
 	}
 }

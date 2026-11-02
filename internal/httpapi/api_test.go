@@ -36,7 +36,7 @@ func (approvedContractVerifier) List(_ context.Context, _ int) ([]platform.Appro
 	return []platform.ApprovedContract{{ID: "approved-1", Number: "HT-1", CustomerName: "示例客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
 }
 
-func (approvedContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (approvedContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return []platform.ApprovedContract{{ID: "approved-1", Number: "HT-1", Version: 1}}, "", nil
 }
 
@@ -49,6 +49,32 @@ func (approvedContractVerifier) GetServiceItems(_ context.Context, id string) (p
 		{SourceID: "SVC-1", Name: "等级保护测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", System: "核心系统", SystemLevel: "三级", Requirement: "按标准执行", TestMode: "STANDARD"},
 		{SourceID: "SVC-2", Name: "渗透测试", ServiceType: "渗透测试", Site: "默认场所", Batch: "第一批", Category: "渗透测试", System: "核心系统", SystemLevel: "三级", Requirement: "黑盒测试", TestMode: "PENETRATION"},
 	}}, nil
+}
+
+// contractActivationVerifier 是用户会话建项的权威合同桩：合同身份与服务项目录
+// 都由它提供，请求体里的合同号/客户/服务项归类必须被应用层丢弃。
+type contractActivationVerifier struct {
+	number   string
+	title    string
+	customer string
+	version  uint64
+	services []platform.ApprovedContractService
+}
+
+func (v contractActivationVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return nil, nil
+}
+
+func (v contractActivationVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", nil
+}
+
+func (v contractActivationVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	return platform.ApprovedContract{ID: id, Number: v.number, Title: v.title, CustomerName: v.customer, Version: v.version, Status: "approved", ApprovalPassed: true}, nil
+}
+
+func (v contractActivationVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	return platform.ApprovedContractServiceCatalog{ContractID: id, ContractVersion: v.version, ServiceItems: v.services}, nil
 }
 
 func (v *integrationVerifier) VerifyClientCredentials(_ context.Context, token string) (platform.ServiceTokenIdentity, error) {
@@ -72,6 +98,8 @@ type repo struct {
 	reservations   []domain.EquipmentReservation
 	dashboard      domain.Dashboard
 	dashboardScope platform.ScopeFilter
+	// eventWindowErr 让按服务项读取事件流失败，用于验证缺项判定 fail-closed。
+	eventWindowErr error
 }
 
 func (r *repo) FilterUnreferencedApprovedContracts(_ context.Context, tenantID string, references []platform.ApprovedContract) ([]platform.ApprovedContract, error) {
@@ -137,6 +165,25 @@ func (r *repo) ListSlaOverdue(context.Context, platform.ScopeFilter) ([]domain.S
 }
 func (r *repo) ListDeliveryEvents(_ context.Context, _ platform.ScopeFilter, project string) ([]domain.DeliveryEvent, error) {
 	return r.events, nil
+}
+
+// ListServiceItemDeliveryEvents 按服务项返回完整事件流（BIZ-PROJECT-06）。
+// eventWindowErr 用于模拟事件超限等"判定不可用"的失败。
+func (r *repo) ListServiceItemDeliveryEvents(_ context.Context, filter platform.ScopeFilter, itemID string) ([]domain.DeliveryEvent, error) {
+	if r.eventWindowErr != nil {
+		return nil, r.eventWindowErr
+	}
+	events := make([]domain.DeliveryEvent, 0, len(r.events))
+	for _, event := range r.events {
+		if event.ServiceItemID != itemID {
+			continue
+		}
+		if filter.TenantID != "" && event.TenantID != "" && event.TenantID != filter.TenantID {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events, nil
 }
 func (r *repo) FindProjectForDeviation(_ context.Context, _ platform.ScopeFilter, _ string) (string, string, error) {
 	if len(r.projects) == 0 {
@@ -935,9 +982,16 @@ func TestServiceItemConfirmationUsesWorkflow(t *testing.T) {
 }
 func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	repository := &repo{}
-	service := &application.Service{Repo: repository}
+	// 用户会话入口只接受 contract_id + source_id + 现场字段：合同号、客户与服务项归类
+	// 由权威合同服务提供（BIZ-PROJECT-01）。
+	contracts := contractActivationVerifier{number: "HT-1", title: "年度测评", customer: "示例客户", version: 1, services: []platform.ApprovedContractService{
+		{SourceID: "S1", Name: "等保测评", Site: "合同场所", Batch: "B1", Category: "等保", System: "核心系统", SystemLevel: "三级", Requirement: "三级", TestMode: "STANDARD"},
+		{SourceID: "S2", Name: "渗透测试", Site: "合同场所", Batch: "B1", Category: "渗透测试", System: "门户", Requirement: "黑盒", TestMode: "PENETRATION"},
+		{SourceID: "S3", Name: "等保复测", Site: "合同场所", Batch: "B1", Category: "等保", System: "门户", SystemLevel: "二级", Requirement: "二级", TestMode: "STANDARD"},
+	}}
+	service := &application.Service{Repo: repository, Contracts: contracts}
 	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "contract_management", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	body := `{"contract_id":"HT-1","contract_number":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","name":"等保测评","site":"上海","batch":"B1","category":"等保","system":"核心系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","name":"渗透测试","site":"上海","batch":"B1","category":"渗透测试","system":"门户","requirement":"黑盒","test_mode":"PENETRATION"},{"source_id":"S3","name":"等保复测","site":"上海","batch":"B1","category":"等保","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"HT-1","contract_number":"HT-FORGED","contract_version":"1","contract_name":"年度测评","customer":"伪造客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"伪造批次","category":"伪造类别","system":"伪造系统","requirement":"三级","test_mode":"STANDARD"},{"source_id":"S2","site":"上海","batch":"伪造批次","category":"伪造类别","system":"门户","requirement":"黑盒","test_mode":"STANDARD"},{"source_id":"S3","site":"上海","batch":"伪造批次","category":"伪造类别","system":"门户","requirement":"二级","test_mode":"STANDARD"}]}`
 	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -948,6 +1002,9 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 	if len(repository.projects) != 1 || repository.projects[0].Status != "待拆解确认" {
 		t.Fatalf("projects=%+v", repository.projects)
 	}
+	if repository.projects[0].Customer != "示例客户" || repository.projects[0].Contract != "HT-1" {
+		t.Fatalf("body-supplied contract snapshot leaked into project: %+v", repository.projects[0])
+	}
 	if len(repository.items) != 2 || repository.items[0].Status != "待确认" || repository.items[1].Status != "待确认" {
 		t.Fatalf("items=%+v", repository.items)
 	}
@@ -955,7 +1012,7 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 		t.Fatalf("events=%+v", repository.events)
 	}
 
-	stampedBody := `{"contract_id":"HT-1","contract_number":"HT-1","contract_version":"v1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	stampedBody := `{"contract_id":"HT-1","contract_number":"HT-1","contract_version":"1","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","stamped_contract_uploaded":true,"services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", stampedBody)
 	if response.Code != http.StatusCreated || len(repository.events) != 2 || repository.events[1].Type != application.EventContractStampStatus {
 		t.Fatalf("status=%d projects=%+v events=%+v", response.Code, repository.projects, repository.events)
@@ -964,9 +1021,13 @@ func TestContractActivationCreatesProjectAndGroupedServiceItems(t *testing.T) {
 
 func TestContractActivationPersistsAuthoritativeContractNumber(t *testing.T) {
 	repository := &repo{}
-	service := &application.Service{Repo: repository}
+	// 权威合同编号与版本来自合同服务：请求体里的旧编号/版本不得落库。
+	contracts := contractActivationVerifier{number: "HT-2026-0099", title: "年度测评", customer: "示例客户", version: 3, services: []platform.ApprovedContractService{
+		{SourceID: "S1", Name: "等保测评", Site: "合同场所", Batch: "B1", Category: "等保", System: "核心系统", TestMode: "STANDARD"},
+	}}
+	service := &application.Service{Repo: repository, Contracts: contracts}
 	handler := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "contract_management", UserID: "contract_management", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	body := `{"contract_id":"01J-STABLE-ID","contract_number":"HT-2026-0099","contract_version":"v3","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
+	body := `{"contract_id":"01J-STABLE-ID","contract_number":"HT-CLIENT-STALE","contract_version":"3","contract_name":"年度测评","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","system":"核心系统","test_mode":"STANDARD"}]}`
 
 	response := perform(handler, http.MethodPost, "/api/v1/contracts/activate", body)
 	if response.Code != http.StatusCreated {
@@ -976,15 +1037,15 @@ func TestContractActivationPersistsAuthoritativeContractNumber(t *testing.T) {
 		t.Fatalf("projects=%+v", repository.projects)
 	}
 	project := repository.projects[0]
-	if project.ContractID != "01J-STABLE-ID" || project.Contract != "HT-2026-0099" || project.ContractVersion != "v3" {
+	if project.ContractID != "01J-STABLE-ID" || project.Contract != "HT-2026-0099" || project.ContractVersion != "3" {
 		t.Fatalf("contract identity/display mapping=%+v", project)
 	}
 	if len(repository.events) != 1 || repository.events[0].Payload["contract_id"] != "01J-STABLE-ID" || repository.events[0].Payload["contract_number"] != "HT-2026-0099" {
 		t.Fatalf("events=%+v", repository.events)
 	}
 
-	// 同一稳定 ID + 版本重放必须命中既有项目，不受展示编号不同的影响。
-	replayed := strings.Replace(body, `"contract_number":"HT-2026-0099"`, `"contract_number":"HT-CLIENT-STALE"`, 1)
+	// 同一稳定 ID 重放必须命中既有项目，请求体编号差异不影响身份映射。
+	replayed := strings.Replace(body, `"contract_number":"HT-CLIENT-STALE"`, `"contract_number":"HT-ANOTHER-STALE"`, 1)
 	response = perform(handler, http.MethodPost, "/api/v1/contracts/activate", replayed)
 	if response.Code != http.StatusCreated || len(repository.projects) != 1 {
 		t.Fatalf("replay status=%d projects=%+v body=%s", response.Code, repository.projects, response.Body.String())
@@ -1013,6 +1074,40 @@ func TestContractIntegrationAcceptsInternalRequestWithoutBrowserSession(t *testi
 	}
 	if len(repository.projects) != 1 || repository.projects[0].TenantID != tenantID {
 		t.Fatalf("projects=%+v", repository.projects)
+	}
+}
+
+// 用户会话入口与机器入口必须分离：同样的“请求体自带合同快照”载荷，浏览器会话
+// 必须被权威回读拦下（BIZ-PROJECT-01），而机器令牌投递保留可信投递语义。
+func TestUserSessionActivationDoesNotShareMachineTrust(t *testing.T) {
+	repository := &repo{}
+	service := &application.Service{Repo: repository}
+	body := `{"contract_id":"C-TRUST","contract_number":"HT-TRUST","contract_version":"1","contract_name":"年度测评","customer":"伪造客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","test_mode":"STANDARD"}]}`
+
+	session := httpapi.NewRouter(service, identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "browser", UserID: "browser", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := perform(session, http.MethodPost, "/api/v1/contracts/activate", body)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("user session accepted body-only contract snapshot: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.projects) != 0 {
+		t.Fatalf("user session created project without authority: %+v", repository.projects)
+	}
+
+	machine := httpapi.NewRouter(service, identity{err: platform.ErrUnauthenticated}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), httpapi.RouterOptions{
+		ContractIntegration: &httpapi.ContractIntegrationOptions{Enabled: true, BearerVerifier: &integrationVerifier{}},
+	})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/contracts/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer verified-machine-token")
+	request.Header.Set("X-Contract-Delivery-ID", ulid.Make().String())
+	request.Header.Set("X-Contract-Tenant-ID", "tenant-contract")
+	recorder := httptest.NewRecorder()
+	machine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("machine delivery rejected: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(repository.projects) != 1 || repository.projects[0].Contract != "HT-TRUST" {
+		t.Fatalf("machine delivery did not persist delivered snapshot: %+v", repository.projects)
 	}
 }
 
@@ -1264,6 +1359,109 @@ func TestWriteIsReportedToAudit(t *testing.T) {
 		t.Fatalf("events=%+v", reporter.events)
 	}
 }
+
+// sessionActivityIdentity 是可报告/续期空闲会话的身份桩，用于覆盖
+// POST /api/v1/auth/activity 与 GET /api/v1/auth/me 的新增契约字段。
+type sessionActivityIdentity struct {
+	identity
+	idle       platform.SessionIdleStatus
+	touchErr   error
+	idleCalls  int
+	touchCalls int
+}
+
+func (i *sessionActivityIdentity) SessionIdleStatus(context.Context, *http.Request) (platform.SessionIdleStatus, error) {
+	i.idleCalls++
+	return i.idle, nil
+}
+
+func (i *sessionActivityIdentity) TouchSessionActivity(context.Context, *http.Request) (platform.SessionIdleStatus, error) {
+	i.touchCalls++
+	return i.idle, i.touchErr
+}
+
+func sessionActivityRouter(t *testing.T, tracker *sessionActivityIdentity) http.Handler {
+	t.Helper()
+	tracker.identity = identity{p: platform.Principal{TenantID: "tenant-1", IdentityID: "user-1", UserID: "user-1", Roles: []string{"admin"}, Permissions: map[string]bool{}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}, AuthorizationRevision: 1, CatalogVersion: "2"}}
+	return httpapi.NewRouter(&application.Service{Repo: &repo{}}, tracker, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestAuthActivityRenewsSessionAndReturnsUnifiedContractFields(t *testing.T) {
+	tracker := &sessionActivityIdentity{idle: platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute, IdleRemaining: 25 * time.Minute}}
+	response := perform(sessionActivityRouter(t, tracker), http.MethodPost, "/api/v1/auth/activity", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data struct {
+			IdleTimeoutSeconds int64 `json:"idle_timeout_seconds"`
+			IdleRemainingMS    int64 `json:"idle_remaining_ms"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Data.IdleTimeoutSeconds != 1800 || body.Data.IdleRemainingMS != 1500000 {
+		t.Fatalf("activity data = %+v, want 1800s / 1500000ms", body.Data)
+	}
+	if tracker.touchCalls != 1 {
+		t.Fatalf("touch calls = %d, want 1", tracker.touchCalls)
+	}
+}
+
+func TestAuthActivityKeepsCookieSessionSameOriginProtection(t *testing.T) {
+	tracker := &sessionActivityIdentity{idle: platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute, IdleRemaining: time.Minute}}
+	router := sessionActivityRouter(t, tracker)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PM_ORIGIN_REJECTED") {
+		t.Fatalf("cross-origin activity status=%d body=%s", response.Code, response.Body.String())
+	}
+	if tracker.touchCalls != 0 {
+		t.Fatal("cross-origin activity must not renew the session")
+	}
+}
+
+func TestAuthActivityRejectsExpiredSessionWithoutRenewal(t *testing.T) {
+	tracker := &sessionActivityIdentity{idle: platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute}, touchErr: platform.ErrUnauthenticated}
+	response := perform(sessionActivityRouter(t, tracker), http.MethodPost, "/api/v1/auth/activity", "")
+	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "PM_UNAUTHENTICATED") {
+		t.Fatalf("expired activity status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthActivityRequiresSessionActivityIdentity(t *testing.T) {
+	response := perform(router(t, map[string]bool{}, nil), http.MethodPost, "/api/v1/auth/activity", "")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "PM_IDENTITY_UNAVAILABLE") {
+		t.Fatalf("activity without tracker status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthActivityMapsStoreFailureToServiceUnavailable(t *testing.T) {
+	tracker := &sessionActivityIdentity{idle: platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute}, touchErr: errors.New("database unavailable")}
+	response := perform(sessionActivityRouter(t, tracker), http.MethodPost, "/api/v1/auth/activity", "")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "PM_AUTHORIZATION_UNAVAILABLE") {
+		t.Fatalf("store failure status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMeAppendsIdleDeadlineFieldsWithoutChangingExistingContract(t *testing.T) {
+	tracker := &sessionActivityIdentity{idle: platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute, IdleRemaining: 10 * time.Minute}}
+	response := perform(sessionActivityRouter(t, tracker), http.MethodGet, "/api/v1/auth/me", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{"identity_id", "data_scopes", "authorization_revision", `"idle_timeout_seconds":1800`, `"idle_remaining_ms":600000`} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("response missing %s: %s", expected, response.Body.String())
+		}
+	}
+	if tracker.idleCalls != 1 {
+		t.Fatalf("/auth/me idle status calls = %d, want 1", tracker.idleCalls)
+	}
+}
+
 func TestUnauthenticated(t *testing.T) {
 	repository := &repo{}
 	service := &application.Service{Repo: repository}

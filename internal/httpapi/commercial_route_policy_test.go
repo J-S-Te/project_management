@@ -75,6 +75,7 @@ func TestExpiredProjectExactHandoverAndAuditPolicies(t *testing.T) {
 		{"GET", "/internal/v1/handover/responsibilities", "/internal/v1/handover/responsibilities", core.READ_HISTORY, 204},
 		{"GET", "/internal/v1/handover/transfers/:item_id", "/internal/v1/handover/transfers/item-1", core.READ_HISTORY, 204},
 		{"GET", "/api/v1/audit-outbox/failed", "/api/v1/audit-outbox/failed", core.ESSENTIAL_SERVICE, 204},
+		{"POST", "/api/v1/auth/activity", "/api/v1/auth/activity", core.ESSENTIAL_SERVICE, 204},
 		{"GET", "/api/v1/projects/:id/supplement-contracts", "/api/v1/projects/PJ-1/supplement-contracts", core.READ_HISTORY, 204},
 		{"POST", "/api/v1/audit-outbox/failed/:id/retry", "/api/v1/audit-outbox/failed/row-1/retry", core.ESSENTIAL_SERVICE, 204},
 		{"POST", "/internal/v1/handover/freeze", "/internal/v1/handover/freeze", core.MUTATE_BUSINESS, 403},

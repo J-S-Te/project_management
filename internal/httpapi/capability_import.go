@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 )
 
@@ -134,6 +135,47 @@ func (h *Handler) importEquipment(c *gin.Context) {
 	h.confirmEquipmentImport(c)
 }
 
+// escapeCSVFormulaCell 对公式注入载荷加前导单引号（OWASP CSV Injection 防御）：
+// 以 =、+、-、@ 开头，或前导含 tab/CR（表格软件会先剥掉这些控制字符再判定公式）的
+// 单元格一律加 ' 前缀，使其按字面文本渲染；普通值原样返回，不改变既有导出内容。
+// 口径对齐平台 SEC-B6 escapeCSVFormulaCell、Settlement safeCell 与 CRM safeCSV：
+// 既有口径不含"纯数字豁免"，负数字面值同样按 '-' 公式前缀处理。
+func escapeCSVFormulaCell(value string) string {
+	if value == "" {
+		return value
+	}
+	// 前导 tab/CR 本身就是公式解析绕过面，按同样方式转义。
+	if strings.TrimLeft(value, "\t\r") != value {
+		return "'" + value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@':
+		return "'" + value
+	default:
+		return value
+	}
+}
+
+// capabilityExportRow 把能力记录转换为导出 CSV 行，列顺序与 capabilityImportColumns 一致。
+// 资源 ID、名称、编码等字段来自用户导入，可能以公式前缀或控制字符开头，
+// 审计/业务人员在 Excel/WPS 打开导出文件时会被解释为公式，因此逐格转义。
+func capabilityExportRow(item domain.Capability) []string {
+	validFrom, validUntil := "", ""
+	if item.ResourceType == "EQUIPMENT" {
+		validFrom = formatCapabilityTime(item.ValidFrom)
+		validUntil = formatCapabilityTime(item.ValidUntil)
+	}
+	return []string{
+		escapeCSVFormulaCell(item.ResourceType),
+		escapeCSVFormulaCell(item.ResourceID),
+		escapeCSVFormulaCell(item.ResourceName),
+		escapeCSVFormulaCell(strings.Join(item.Codes, ";")),
+		escapeCSVFormulaCell(item.Status),
+		escapeCSVFormulaCell(validFrom),
+		escapeCSVFormulaCell(validUntil),
+	}
+}
+
 func (h *Handler) exportCapabilities(c *gin.Context) {
 	typ := strings.ToUpper(strings.TrimSpace(c.Query("resource_type")))
 	if typ != "" && typ != "PERSON" && typ != "EQUIPMENT" {
@@ -150,20 +192,7 @@ func (h *Handler) exportCapabilities(c *gin.Context) {
 	writer := csv.NewWriter(buffer)
 	_ = writer.Write(capabilityImportColumns)
 	for _, item := range items {
-		validFrom, validUntil := "", ""
-		if item.ResourceType == "EQUIPMENT" {
-			validFrom = formatCapabilityTime(item.ValidFrom)
-			validUntil = formatCapabilityTime(item.ValidUntil)
-		}
-		_ = writer.Write([]string{
-			item.ResourceType,
-			item.ResourceID,
-			item.ResourceName,
-			strings.Join(item.Codes, ";"),
-			item.Status,
-			validFrom,
-			validUntil,
-		})
+		_ = writer.Write(capabilityExportRow(item))
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
@@ -171,6 +200,7 @@ func (h *Handler) exportCapabilities(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "text/csv; charset=utf-8")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=capabilities-%s.csv", time.Now().UTC().Format("20060102-150405")))
+	// 导出文件名里的日期段时间按北京业务时间：凌晨导出不能标成前一天的日期。
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=capabilities-%s.csv", businessclock.Now().Format("20060102-150405")))
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", buffer.Bytes())
 }

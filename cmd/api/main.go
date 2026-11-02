@@ -26,6 +26,9 @@ import (
 // main 装配项目API、可信集成与后台生命周期。
 // 参数：无。
 // 返回值：无；启动失败终止进程。
+// main 装配项目 API、会话认证及后台依赖并启动服务。
+// 参数：无。
+// 返回值：无；初始化失败终止启动。
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -67,7 +70,7 @@ func main() {
 		}
 		go auditDispatcher.Run(ctx)
 	}
-	identity, err := platform.NewOIDCAuthenticator(startupCtx, platform.OIDCOptions{CentralSessionEnabled: cfg.CentralSessionEnabled, CentralSessionPublicBaseURL: cfg.CentralSessionPublicBaseURL, Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL, PlatformBaseURL: cfg.PlatformBaseURL, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, IdentityProviderHint: cfg.OIDCIDPHint, RedirectURI: cfg.OIDCRedirectURI, PostLogoutRedirectURI: cfg.OIDCPostLogoutRedirectURI, TenantID: cfg.OIDCTenantID, ApplicationCode: cfg.PlatformApplicationCode, EnvironmentCode: cfg.PlatformEnvironmentCode, SessionCookieName: cfg.OIDCSessionCookieName, SessionTTL: cfg.OIDCSessionTTL, AuthorizationRefreshInterval: cfg.OIDCAuthorizationRefresh, AuthorizationMaxStale: cfg.OIDCAuthorizationMaxStale, AuthorizationTimeout: cfg.OIDCAuthorizationTimeout, SessionSecure: cfg.OIDCSessionSecure, PathPrefix: cfg.AppPathPrefix, Audit: audit}, platform.NewGORMOIDCStore(db), cfg.OIDCSessionEncryptionKey)
+	identity, err := platform.NewOIDCAuthenticator(startupCtx, platform.OIDCOptions{CentralSessionEnabled: cfg.CentralSessionEnabled, CentralSessionPublicBaseURL: cfg.CentralSessionPublicBaseURL, Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL, PlatformBaseURL: cfg.PlatformBaseURL, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, IdentityProviderHint: cfg.OIDCIDPHint, RedirectURI: cfg.OIDCRedirectURI, PostLogoutRedirectURI: cfg.OIDCPostLogoutRedirectURI, TenantID: cfg.OIDCTenantID, ApplicationCode: cfg.PlatformApplicationCode, EnvironmentCode: cfg.PlatformEnvironmentCode, SessionCookieName: cfg.OIDCSessionCookieName, SessionIdleTTL: cfg.OIDCSessionIdleTTL, SessionAbsoluteTTL: cfg.OIDCSessionAbsoluteTTL, AuthorizationRefreshInterval: cfg.OIDCAuthorizationRefresh, AuthorizationMaxStale: cfg.OIDCAuthorizationMaxStale, AuthorizationTimeout: cfg.OIDCAuthorizationTimeout, SessionSecure: cfg.OIDCSessionSecure, PathPrefix: cfg.AppPathPrefix, Audit: audit}, platform.NewGORMOIDCStore(db), cfg.OIDCSessionEncryptionKey)
 	if err != nil {
 		logger.Error("initialize platform OIDC", "error", err)
 		os.Exit(1)
@@ -77,6 +80,7 @@ func main() {
 		settlementReferenceBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
 			Issuer: cfg.SettlementReferenceIssuer, Audience: cfg.SettlementReferenceAudience, PublicKeyPath: cfg.SettlementReferencePublicKeyPath,
 			ClientID: cfg.SettlementReferenceClientID, TenantID: cfg.OIDCTenantID, CallerApplicationCode: "settlement", CallerEnvironmentCode: cfg.SettlementReferenceCallerEnv, RequiredScope: "settlement.project_reference.read",
+			AllowAnyClientSubject: cfg.SettlementReferenceAllowAnyClient,
 		})
 		if err != nil {
 			logger.Error("initialize settlement reference verifier", "error", err)
@@ -143,10 +147,42 @@ func main() {
 		os.Exit(1)
 	}
 	auditConfig := platform.CheckAuditReporterConfiguration(cfg.PlatformBaseURL, cfg.PlatformAuditClientID, cfg.PlatformAuditClientSecret, cfg.PlatformApplicationCode, cfg.PlatformEnvironmentCode)
-	if auditConfig.Enabled {
-		logger.Info("platform audit reporting enabled")
-	} else {
+	notifications := platform.NewNotificationPublisher(cfg.PlatformBaseURL, cfg.PlatformNotificationURL, cfg.PlatformNotificationClientID, cfg.PlatformNotificationSecret, cfg.PlatformNotificationScope)
+	// BIZ-XAPI-10 分级策略：审计必开缺失 → 生产失败关闭；通知缺失 → 生产失败、
+	// 非生产只 WARN（本地 outbox 保留积压，/readyz degraded 暴露）。
+	destinationDecision := config.DecideIntegrationDestinations(config.IntegrationDestinationInput{
+		AuditRequired:          cfg.AuditRequired,
+		AuditConfigured:        auditConfig.Enabled,
+		NotificationEnabled:    cfg.NotificationEnabled,
+		NotificationConfigured: notifications != nil,
+		Production:             cfg.ProductionEnvironment,
+	})
+	if destinationDecision.AuditFatal {
+		logger.Error("platform audit destination is required but its configuration is incomplete",
+			"missing_configuration", auditConfig.MissingFields)
+		os.Exit(1)
+	}
+	if destinationDecision.AuditMissing {
 		logger.Warn("platform audit reporting disabled; write operations will not be sent to the platform audit service", "missing_configuration", auditConfig.MissingFields)
+	} else {
+		logger.Info("platform audit reporting enabled")
+	}
+	if destinationDecision.NotificationFatal {
+		logger.Error("NOTIFICATION_ENABLED=true but the platform notification publisher could not be configured in production")
+		os.Exit(1)
+	}
+	if notifications != nil {
+		logger.Info("platform notification integration enabled")
+	} else if destinationDecision.NotificationMissing {
+		logger.Warn("NOTIFICATION_ENABLED=true but the platform notification publisher is not configured; local outbox backlog will accumulate and /readyz stays degraded")
+	} else {
+		logger.Warn("platform notification integration disabled; automated notifications will stay in the local outbox")
+	}
+	integrationDestinations := &httpapi.IntegrationDestinationStatus{
+		AuditRequired:          cfg.AuditRequired,
+		AuditConfigured:        auditConfig.Enabled,
+		NotificationRequired:   cfg.NotificationEnabled,
+		NotificationConfigured: notifications != nil,
 	}
 	var personnel platform.OwnerDirectory
 	if cfg.OwnerDirectoryEnabled {
@@ -158,10 +194,6 @@ func main() {
 		logger.Info("platform owner directory integration enabled")
 	} else {
 		logger.Warn("platform owner directory integration disabled; personnel pickers will be unavailable")
-	}
-	notifications := platform.NewNotificationPublisher(cfg.PlatformBaseURL, cfg.PlatformNotificationURL, cfg.PlatformNotificationClientID, cfg.PlatformNotificationSecret, cfg.PlatformNotificationScope)
-	if notifications != nil {
-		logger.Info("platform notification integration enabled")
 	}
 	// 启动即核对库结构：代码先上线、迁移没跑是真实发生过的故障模式，届时任何写路径都会因
 	// 缺列/缺表报 500，对外只剩"服务暂不可用"。这里显式检测并把待执行迁移挂到就绪检查上。
@@ -188,7 +220,11 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger}
+	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger,
+		// BIZ-PROJECT-05：签到坐标与站点主数据的一致性格局由部署配置决定（阈值/站点缺失策略）。
+		FieldCheckIn: application.FieldCheckInPolicy{SiteDistanceMeters: cfg.FieldCheckIn.SiteDistanceMeters, SiteMissingPolicy: cfg.FieldCheckIn.SiteMissingPolicy},
+		// BIZ-PROJECT-06：缺项说明门禁的强度由部署配置决定（新装 enforce，存量升级先 advisory）。
+		FieldEvidenceGate: application.FieldEvidenceGatePolicy{Mode: cfg.FieldIncompleteReasonGate}}
 	handoverRepository, handoverErr := handover.NewGORMRepository(db)
 	if handoverErr != nil {
 		logger.Error("initialize handover repository", "error", handoverErr)
@@ -204,10 +240,11 @@ func main() {
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
-		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
-		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
-		CommercialLicense:   commercialGate,
-		PendingMigrations:   pendingMigrations,
+		ContractImport:          &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
+		SettlementReference:     &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
+		CommercialLicense:       commercialGate,
+		PendingMigrations:       pendingMigrations,
+		IntegrationDestinations: integrationDestinations,
 		ProjectSnapshotLimits: application.ProjectSnapshotLimits{
 			BatchSize: 200, MaxProjects: cfg.Snapshot.MaxProjects,
 			MaxServiceItems: cfg.Snapshot.MaxServiceItems,

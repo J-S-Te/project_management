@@ -9,6 +9,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,12 +19,106 @@ import (
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
+	"github.com/j-s-te/project-management/internal/platform"
 	"io"
 	"log/slog"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+// splitE2EContractVerifier 按合同 ID 提供权威合同与服务项目录。
+// 用户会话建项入口只接受 contract_id + source_id + 现场字段，合同号/客户/服务项
+// 归类必须来自合同服务回读（BIZ-PROJECT-01）。
+type splitE2EContractVerifier struct {
+	contracts map[string]platform.ApprovedContract
+	catalogs  map[string]platform.ApprovedContractServiceCatalog
+}
+
+func (v splitE2EContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
+	return nil, nil
+}
+
+func (v splitE2EContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
+	return nil, "", nil
+}
+
+func (v splitE2EContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
+	contract, ok := v.contracts[id]
+	if !ok {
+		return platform.ApprovedContract{}, errors.New("contract not found")
+	}
+	return contract, nil
+}
+
+func (v splitE2EContractVerifier) GetServiceItems(_ context.Context, id string) (platform.ApprovedContractServiceCatalog, error) {
+	catalog, ok := v.catalogs[id]
+	if !ok {
+		return platform.ApprovedContractServiceCatalog{}, errors.New("contract service catalog not found")
+	}
+	return catalog, nil
+}
+
+func splitE2EService(sourceID, site, batch, category, requirement, testMode string) platform.ApprovedContractService {
+	return platform.ApprovedContractService{SourceID: sourceID, Name: category, ServiceType: category, Site: site, Batch: batch, Category: category, System: "核心系统", Requirement: requirement, TestMode: testMode}
+}
+
+func splitE2ECatalog(contractID string, services ...platform.ApprovedContractService) platform.ApprovedContractServiceCatalog {
+	return platform.ApprovedContractServiceCatalog{ContractID: contractID, ContractVersion: 1, ServiceItems: services}
+}
+
+func splitE2EContract(id, title, customer string) platform.ApprovedContract {
+	return platform.ApprovedContract{ID: id, Number: id, Title: title, CustomerName: customer, Version: 1, Status: "approved", ApprovalPassed: true}
+}
+
+// splitRuleContractVerifier 返回走查用例涉及的全部合同与目录。
+func splitRuleContractVerifier() splitE2EContractVerifier {
+	const customer = "走查客户"
+	quantum := splitE2EService("L1", "杭州机房", "B1", "量子加密检测", "条款A", "STANDARD")
+	return splitE2EContractVerifier{
+		contracts: map[string]platform.ApprovedContract{
+			"HT-SPLIT-1":  splitE2EContract("HT-SPLIT-1", "拆解走查合同", customer),
+			"HT-SPLIT-2":  splitE2EContract("HT-SPLIT-2", "跨场所合同", customer),
+			"HT-SPLIT-2B": splitE2EContract("HT-SPLIT-2B", "跨场所合同", customer),
+			"HT-SPLIT-3":  splitE2EContract("HT-SPLIT-3", "缺规则合同", customer),
+		},
+		catalogs: map[string]platform.ApprovedContractServiceCatalog{
+			"HT-SPLIT-1": splitE2ECatalog("HT-SPLIT-1",
+				splitE2EService("L1", "杭州机房", "B1", "等保测评", "条款A", "STANDARD"),
+				splitE2EService("L2", "杭州机房", "B1", "等保测评", "条款B", "STANDARD"),
+				splitE2EService("L3", "上海机房", "B2", "渗透测试", "", "PENETRATION"),
+			),
+			"HT-SPLIT-2": splitE2ECatalog("HT-SPLIT-2",
+				splitE2EService("M1", "杭州机房", "B1", "等保测评", "", "STANDARD"),
+				splitE2EService("M2", "上海机房", "B1", "等保测评", "", "STANDARD"),
+			),
+			"HT-SPLIT-2B": splitE2ECatalog("HT-SPLIT-2B",
+				splitE2EService("M1", "杭州机房", "B1", "等保测评", "", "STANDARD"),
+				splitE2EService("M2", "上海机房", "B1", "等保测评", "", "STANDARD"),
+			),
+			"HT-SPLIT-3": splitE2ECatalog("HT-SPLIT-3",
+				quantum,
+				splitE2EService("L2", "杭州机房", "B1", "等保测评", "条款B", "STANDARD"),
+				splitE2EService("L3", "上海机房", "B2", "渗透测试", "", "PENETRATION"),
+			),
+		},
+	}
+}
+
+// splitCodesContractVerifier 返回能力码走查用例的权威合同与目录。
+func splitCodesContractVerifier() splitE2EContractVerifier {
+	return splitE2EContractVerifier{
+		contracts: map[string]platform.ApprovedContract{
+			"HT-CODES-1": splitE2EContract("HT-CODES-1", "能力码走查合同", "走查客户"),
+		},
+		catalogs: map[string]platform.ApprovedContractServiceCatalog{
+			"HT-CODES-1": splitE2ECatalog("HT-CODES-1",
+				splitE2EService("C1", "杭州机房", "B1", "等保测评", "", "STANDARD"),
+				splitE2EService("C2", "杭州机房", "B2", "漏洞扫描", "", "STANDARD"),
+			),
+		},
+	}
+}
 
 func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
@@ -54,7 +149,7 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	repository := store.NewRepository(db)
 	service := &application.Service{
 		Repo:      repository,
-		Contracts: approvedContractVerifier{},
+		Contracts: splitRuleContractVerifier(),
 		Personnel: staticRolePersonnelDirectory{
 			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
 			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
@@ -131,7 +226,7 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	}
 
 	// ---- ③ 合同激活：按配置分组 + 定状态 + 补体系要求 ----
-	activation := `{"contract_id":"HT-SPLIT-1","contract_version":"v1","contract_name":"拆解走查合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
+	activation := `{"contract_id":"HT-SPLIT-1","contract_version":"1","contract_name":"拆解走查合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
 		"services":[
 			{"source_id":"L1","site":"杭州机房","batch":"B1","category":"等保测评","requirement":"条款A"},
 			{"source_id":"L2","site":"杭州机房","batch":"B1","category":"等保测评","requirement":"条款B"},
@@ -190,7 +285,7 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("空匹配条件应 422，实际 HTTP %d %s", status, body)
 	}
-	crossSite := `{"contract_id":"HT-SPLIT-2","contract_version":"v1","contract_name":"跨场所合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
+	crossSite := `{"contract_id":"HT-SPLIT-2","contract_version":"1","contract_name":"跨场所合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
 		"services":[
 			{"source_id":"M1","site":"杭州机房","batch":"B1","category":"等保测评"},
 			{"source_id":"M2","site":"上海机房","batch":"B1","category":"等保测评"}
@@ -287,10 +382,21 @@ func TestSplitRuleConfigEndToEnd(t *testing.T) {
 	if supplement != "REQUIRED" {
 		t.Fatalf("范围变更应进入补充协议处理中，实际 %q", supplement)
 	}
-	// 已在补充协议分支（合同已回写）后允许确认，避免拆解永久无法收口。
+	// BIZ-PROJECT-04：进入补充协议分支后不能靠"再点一次确认"静默清零。没有通过
+	//「拆解调整」应用补充协议目录（也不能证明目录已应用）之前，确认必须继续返回
+	// 409 且给出可执行的下一步，而不是放行后把 supplement_status 抹成 NONE。
 	status, body = e2eCall(handler, "business_admin", http.MethodPost, "/api/v1/service-items/confirm", confirmBody)
-	if status < 200 || status > 299 {
-		t.Fatalf("合同回写后确认拆解应放行: HTTP %d %s", status, body)
+	if status != http.StatusConflict {
+		t.Fatalf("未应用补充协议目录时确认拆解应继续被拦下: HTTP %d %s", status, body)
+	}
+	if !strings.Contains(body, "拆解调整") {
+		t.Fatalf("拒绝提示应指向受控退出动作（拆解调整/关账）: %s", body)
+	}
+	if err := db.WithContext(ctx).Raw(`SELECT supplement_status FROM pm_project WHERE tenant_id = ? AND id = ?`, tenant, projectID).Scan(&supplement).Error; err != nil {
+		t.Fatalf("读取补充协议状态失败: %v", err)
+	}
+	if supplement != "REQUIRED" {
+		t.Fatalf("确认被拒不得清除补充协议状态，实际 %q", supplement)
 	}
 }
 
@@ -325,7 +431,8 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 
 	repository := store.NewRepository(db)
 	service := &application.Service{
-		Repo: repository,
+		Repo:      repository,
+		Contracts: splitCodesContractVerifier(),
 		Personnel: staticRolePersonnelDirectory{
 			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
 			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
@@ -364,7 +471,7 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 		t.Fatalf("保存检测类别失败: HTTP %d %s", status, body)
 	}
 
-	activation := `{"contract_id":"HT-CODES-1","contract_version":"v1","contract_name":"能力码走查合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
+	activation := `{"contract_id":"HT-CODES-1","contract_version":"1","contract_name":"能力码走查合同","customer":"走查客户","effective_at":"2026-09-14T00:00:00Z",
 		"services":[
 			{"source_id":"C1","site":"杭州机房","batch":"B1","category":"等保测评"},
 			{"source_id":"C2","site":"杭州机房","batch":"B2","category":"漏洞扫描"}

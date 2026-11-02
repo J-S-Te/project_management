@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
 	"io"
+	"math"
 	"strings"
 	"time"
 )
@@ -175,13 +177,20 @@ func normalizeTravelArrangement(input domain.PreparationInput, item domain.Servi
 				return domain.TravelArrangementInput{}, ValidationError("出行人员必须来自当前服务项已分配人员")
 			}
 		}
-		travel.RequestID = "TRIP-" + time.Now().UTC().Format("20060102") + "-" + strings.ToUpper(ulid.Make().String()[20:])
+		// 行程单号里的日期段按北京业务日：跨零点后新开的行程必须落在新日期，
+		// 否则同一段业务时间里会混出两个日期段的单号。
+		travel.RequestID = newTravelRequestID(time.Now())
 		travel.ReferenceEventID = ""
 		travel.NoTravelReason = ""
 		return travel, nil
 	default:
 		return domain.TravelArrangementInput{}, ValidationError("请选择有效的行程安排方式")
 	}
+}
+
+// newTravelRequestID 生成 TRIP-<北京业务日>-<后缀> 行程单号。
+func newTravelRequestID(now time.Time) string {
+	return "TRIP-" + businessclock.DateString(now) + "-" + strings.ToUpper(ulid.Make().String()[20:])
 }
 
 // RevokeImplementationPlan 仅在尚未开始实施准备时允许撤销计划；责任分配和能力结论仍保留，
@@ -255,6 +264,9 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 		if err := normalizeFileEvidence(&input.EvidenceFiles[i], "现场证据"); err != nil {
 			return err
 		}
+		if err := s.verifyFileEvidence(ctx, p, itemID, input.EvidenceFiles[i], "现场证据"); err != nil {
+			return err
+		}
 	}
 	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, false)
 	if err != nil {
@@ -270,7 +282,12 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 // CheckInField 在现场作业前记录 GPS 和设备精度，支持安全重放，
 // 使离线客户端恢复连接后可提交相同操作。
 func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCheckInInput) error {
-	if err := s.authorizeServiceItem(ctx, p, "project.field.execute", itemID); err != nil {
+	filter, err := authorizeProjectScope(p, "project.field.execute")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
 		return err
 	}
 	if input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 {
@@ -282,6 +299,15 @@ func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID
 	if err := validateProjectTextLength(input.DeviationReason, 1000, "签到偏离原因"); err != nil {
 		return err
 	}
+	// BIZ-PROJECT-05：签到坐标必须与站点主数据一致；偏离或无法核验时偏离原因不能为空。
+	policy := s.fieldCheckInPolicy()
+	assessment, err := s.assessCheckInSite(ctx, p.TenantID, item, input.Latitude, input.Longitude)
+	if err != nil {
+		return err
+	}
+	if err := requireCheckInDeviationReason(assessment, input.DeviationReason, policy); err != nil {
+		return err
+	}
 	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, true)
 	if err != nil {
 		return err
@@ -289,6 +315,19 @@ func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID
 	payload := map[string]any{
 		"latitude": input.Latitude, "longitude": input.Longitude, "accuracy_meters": input.AccuracyMeters,
 		"deviation_reason": strings.TrimSpace(input.DeviationReason), "expected_version": input.ExpectedVersion,
+		"site_check": assessment.Status,
+	}
+	// 比对结论一并留痕：只有"未关联站点主数据"的历史数据没有站点维度，其余都写清楚
+	// 站点、实际距离与阈值，审计时能直接判断这条签到是否可信。
+	if assessment.SiteCode != "" {
+		payload["site_code"] = assessment.SiteCode
+	}
+	if assessment.SiteName != "" {
+		payload["site_name"] = assessment.SiteName
+	}
+	if assessment.hasDistance() {
+		payload["site_distance_meters"] = math.Round(assessment.DistanceMeters*10) / 10
+		payload["site_distance_limit_meters"] = assessment.LimitMeters
 	}
 	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldCheckedIn, payload, operationID, capturedAt))
 }
@@ -305,6 +344,9 @@ func (s *Service) CaptureFieldSignature(ctx context.Context, p platform.Principa
 	}
 	if input.SignatureFile.MIME != "image/png" {
 		return ValidationError("电子签名必须使用 PNG 格式")
+	}
+	if err := s.verifyFileEvidence(ctx, p, itemID, input.SignatureFile, "电子签名"); err != nil {
+		return err
 	}
 	operationID, capturedAt, err := normalizeOfflineOperation(input.ClientOperationID, input.CapturedAt, true)
 	if err != nil {
@@ -395,6 +437,9 @@ func (s *Service) ReportDeviation(ctx context.Context, p platform.Principal, ite
 		if err := normalizeFileEvidence(&input.EvidenceFiles[i], "偏离证据"); err != nil {
 			return "", err
 		}
+		if err := s.verifyFileEvidence(ctx, p, itemID, input.EvidenceFiles[i], "偏离证据"); err != nil {
+			return "", err
+		}
 	}
 	id := "DV-" + ulid.Make().String()
 	return id, s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventDeviationReported, map[string]any{"deviation_id": id, "description": input.Description, "severity": input.Severity, "evidence_files": input.EvidenceFiles, "decision": "PENDING"}))
@@ -411,6 +456,81 @@ func normalizeFileEvidence(input *domain.ReportArtifactInput, label string) erro
 		}
 	}
 	return nil
+}
+
+// evidenceResourceType 是本子系统在文件网关登记业务对象时使用的资源类型：
+// 现场记录/电子签名/偏离/报告证据都绑定到具体服务项（resource_id = itemID）。
+const evidenceResourceType = "PROJECT_SERVICE_ITEM"
+
+// verifyFileEvidence 回源文件网关核验一份证据回执（BIZ-PROJECT-03）。
+//
+// 修复前这里只校验 file_id/sha256/大小这类"回执形状"，伪造回执即可满足现场完成与
+// 报告签发门禁，证据台账也会指向不存在的文件。现在必须确认网关侧的只读元数据：
+// 文件真实存在且仍可用、归属同一租户、绑定到本次提交的服务项（对象级绑定，只看
+// 应用级绑定会让服务项 A 的证据被复用到服务项 B）、服务端摘要/大小/类型与回执一致。
+// 任何一项不满足都拒绝，不写事件、不登记证据。
+// 网关未配置或不可达时同样失败关闭：没有核验结论就不能当成"已核验"。
+func (s *Service) verifyFileEvidence(ctx context.Context, p platform.Principal, itemID string, artifact domain.ReportArtifactInput, label string) error {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return ValidationError(label + "缺少服务项标识，无法核验证据归属")
+	}
+	if s.EvidenceFiles == nil {
+		return evidenceGatewayUnavailable(label)
+	}
+	metadata, err := s.EvidenceFiles.StatEvidence(ctx, artifact.FileID, evidenceResourceType, itemID)
+	if err != nil {
+		if errors.Is(err, platform.ErrEvidenceFileUnavailable) {
+			return ValidationError(label + "文件未在文件网关登记、已不可用、不属于当前应用或未绑定到当前服务项")
+		}
+		return evidenceGatewayUnavailable(label)
+	}
+	if strings.TrimSpace(metadata.FileID) != artifact.FileID {
+		return ValidationError(label + "文件与文件网关返回的文件不一致")
+	}
+	if tenant := strings.TrimSpace(p.TenantID); tenant != "" && !strings.EqualFold(strings.TrimSpace(metadata.TenantID), tenant) {
+		return ValidationError(label + "文件不属于当前租户")
+	}
+	if !evidenceStatusAvailable(metadata.Status) {
+		return ValidationError(label + "文件当前不可用")
+	}
+	if !metadata.BindingActive {
+		return ValidationError(label + "文件未绑定到当前业务对象")
+	}
+	if metadata.SizeBytes != artifact.Size {
+		return ValidationError(label + "文件大小与文件网关记录不一致")
+	}
+	if !strings.EqualFold(strings.TrimSpace(metadata.SHA256), artifact.SHA256) {
+		return ValidationError(label + "文件摘要与文件网关记录不一致")
+	}
+	// 类型同样要回源核对：否则把 PDF 声明成 image/png 就能冒充电子签名。
+	if declared := canonicalEvidenceMediaType(artifact.MIME); declared != "" && strings.TrimSpace(metadata.MediaType) != "" && declared != strings.TrimSpace(metadata.MediaType) {
+		return ValidationError(label + "文件类型与文件网关记录不一致")
+	}
+	return nil
+}
+
+// canonicalEvidenceMediaType 归一化证据 MIME（去参数、转小写），供回执与网关记录比对。
+func canonicalEvidenceMediaType(value string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Split(strings.TrimSpace(value), ";")[0]))
+}
+
+// evidenceStatusAvailable 判断网关返回的文件状态是否仍可用于业务证据。
+// 仓储只会解析可用状态，这里仍显式列出，避免网关未来放宽查询时静默放行。
+func evidenceStatusAvailable(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "READY", "AVAILABLE", "ACTIVE":
+		return true
+	default:
+		return false
+	}
+}
+
+// evidenceGatewayUnavailable 表示证据无法核验（网关未配置或不可达）。
+// 复用 ErrServiceTimeout 的依赖不可用语义（接口层映射为 503 可重试），
+// 绝不放行未经核验的证据，也不把未知状态当成"通过"。
+func evidenceGatewayUnavailable(label string) error {
+	return ReasonError{Kind: ErrServiceTimeout, Reason: "文件网关暂不可用，无法核验" + label + "，请稍后重试"}
 }
 
 func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, deviationID string, input domain.DeviationReviewInput) error {
@@ -442,10 +562,10 @@ func (s *Service) ReviewDeviation(ctx context.Context, p platform.Principal, dev
 // CompleteServiceItemField 确认单个服务项现场实施完成：服务项进入「现场实施完成」
 // 并开启报告编制；全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切
 // 完成入口——多服务项项目里各服务项按自己的节奏收口。
-
-// CompleteServiceItemField 确认单个服务项现场实施完成：服务项进入「现场实施完成」
-// 并开启报告编制；全部服务项完成后项目状态由派生规则自动推进，不再有项目级一刀切
-// 完成入口——多服务项项目里各服务项按自己的节奏收口。
+//
+// BIZ-PROJECT-06：缺项判定与写入同源。完成事件里的缺项说明必须与本服务项的权威证据链
+// 一致：证据不全却说明为空是"无据完成"，证据齐全却写缺项说明是"与事实相反的审计叙述"。
+// 两种矛盾都由服务端门禁拦下，判定结果（gaps 快照与 evidence_complete）随事件落库。
 func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCompletionInput) error {
 	if err := s.authorizeServiceItem(ctx, p, "project.field.complete", itemID); err != nil {
 		return err
@@ -456,7 +576,323 @@ func (s *Service) CompleteServiceItemField(ctx context.Context, p platform.Princ
 	if err := s.verifyExpectedVersion(ctx, p, "project.field.complete", itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, map[string]any{
-		"confirmed_by": p.UserID, "incomplete_reason": strings.TrimSpace(input.IncompleteReason), "expected_version": input.ExpectedVersion,
-	}))
+	filter, err := authorizeProjectScope(p, "project.field.complete")
+	if err != nil {
+		return err
+	}
+	reason := strings.TrimSpace(input.IncompleteReason)
+	payload := map[string]any{"confirmed_by": p.UserID, "incomplete_reason": reason, "expected_version": input.ExpectedVersion}
+	policy := s.fieldEvidenceGatePolicy()
+	evidence, evidenceErr := s.serviceItemFieldEvidence(ctx, filter, itemID)
+	if evidenceErr != nil {
+		// 判定不可用（事件超限、仓储不支持、读取失败）时不能假装"证据齐全"：
+		// enforce 直接拒绝；advisory 只记录并保留"未知"痕迹，绝不写 evidence_complete=true。
+		if policy == FieldIncompleteReasonGateEnforce {
+			return evidenceErr
+		}
+		s.logFieldEvidenceGate("evidence unavailable; completion allowed in advisory mode", itemID, reason, "error", evidenceErr.Error())
+		payload["evidence_state"] = FieldEvidenceStateUnknown
+		payload["evidence_error"] = evidenceErr.Error()
+	} else {
+		payload["gaps"] = evidence.Gaps
+		payload["missing_evidence"] = evidence.Missing
+		payload["evidence_complete"] = evidence.EvidenceComplete
+		payload["evidence_state"] = evidence.State
+		if err := s.requireFieldEvidenceReason(policy, evidence, reason); err != nil {
+			return err
+		}
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldCompleted, payload))
+}
+
+// FieldEvidenceStateUnknown 表示服务端未能完成缺项判定（证据不可用/未同步）。
+// 前端必须据此 fail-closed：未知不等于齐全。
+const FieldEvidenceStateUnknown = "UNKNOWN"
+
+// MaxServiceItemDeliveryEvents 是单服务项事件流的读取上限（BIZ-PROJECT-06）。
+// 超限必须报错而不是静默截断：截断会让缺项判定重新退化成窗口近似，正是本缺陷的根因。
+const MaxServiceItemDeliveryEvents = 1000
+
+var (
+	// ErrFieldEvidenceWindowExceeded 表示该服务项的事件数超过单次可核验上限，
+	// 判定结果不可信，读写都必须拒绝而不是按部分事件下结论。
+	ErrFieldEvidenceWindowExceeded = errors.New("service item evidence event window exceeded")
+	// ErrFieldEvidenceUnavailable 表示仓储不具备按服务项读取完整事件流的能力，
+	// 无法核验缺项。宁可拒绝，也不能按"证据齐全"放行。
+	ErrFieldEvidenceUnavailable = errors.New("service item evidence is unavailable")
+)
+
+// FieldEvidenceStateComplete / FieldEvidenceStateIncomplete 是判定完成后的两种结论。
+const (
+	FieldEvidenceStateComplete   = "COMPLETE"
+	FieldEvidenceStateIncomplete = "INCOMPLETE"
+)
+
+// 缺项说明门禁的两种强度（BIZ-PROJECT-06）。
+const (
+	// FieldIncompleteReasonGateAdvisory 只记录不拒绝：存量升级先跑该档，
+	// 等前端改为服务端判定后再切 enforce。
+	FieldIncompleteReasonGateAdvisory = "ADVISORY"
+	// FieldIncompleteReasonGateEnforce 执行 422 拒绝。新装默认该档。
+	FieldIncompleteReasonGateEnforce = "ENFORCE"
+)
+
+// FieldEvidenceGatePolicy 是现场完成缺项说明门禁的策略。
+// 零值等价于 enforce：无法识别的配置不能当成"不校验"。
+type FieldEvidenceGatePolicy struct {
+	Mode string
+}
+
+// normalize 补齐默认值并收敛未知取值。
+func (policy FieldEvidenceGatePolicy) normalize() string {
+	if strings.ToUpper(strings.TrimSpace(policy.Mode)) == FieldIncompleteReasonGateAdvisory {
+		return FieldIncompleteReasonGateAdvisory
+	}
+	return FieldIncompleteReasonGateEnforce
+}
+
+func (s *Service) fieldEvidenceGatePolicy() string { return s.FieldEvidenceGate.normalize() }
+
+// ServiceItemEventRepository 是服务项事件流的窄接口：缺项判定必须基于该服务项的完整
+// 证据链，而不是"租户最近 N 条事件"的窗口。与 SiteRepository 一样按需断言，让只实现
+// 部分能力的仓储（含测试桩）继续可用；能力缺失时按"无法核验"处理，绝不静默放行。
+type ServiceItemEventRepository interface {
+	ListServiceItemDeliveryEvents(context.Context, platform.ScopeFilter, string) ([]domain.DeliveryEvent, error)
+}
+
+// fieldEvidenceRequirement 是现场完成必须具备的一类证据。
+type fieldEvidenceRequirement struct {
+	Type  string
+	Label string
+}
+
+// fieldEvidenceRequirements 固定三类必备证据，顺序即界面展示顺序。
+var fieldEvidenceRequirements = []fieldEvidenceRequirement{
+	{Type: EventFieldCheckedIn, Label: "GPS 签到"},
+	{Type: EventFieldRecordSubmitted, Label: "现场记录"},
+	{Type: EventFieldSignatureCaptured, Label: "电子签名"},
+}
+
+// FieldEvidenceEntry 是一条已经具备的现场证据，直接回给界面展示，
+// 让"真实证据在 UI 上不可见"不再成立。
+type FieldEvidenceEntry struct {
+	Type        string `json:"type"`
+	Label       string `json:"label"`
+	EventID     string `json:"event_id"`
+	ActorUserID string `json:"actor_user_id,omitempty"`
+	CapturedAt  string `json:"captured_at,omitempty"`
+	FileRef     string `json:"file_ref,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+}
+
+// ServiceItemFieldEvidence 是单个服务项的现场证据完整性判定结果。
+type ServiceItemFieldEvidence struct {
+	ServiceItemID string `json:"service_item_id"`
+	// Gaps 是缺失证据的类型码，Missing 是同序的中文名称，界面直接展示 Missing。
+	Gaps     []string             `json:"gaps"`
+	Missing  []string             `json:"missing"`
+	Evidence []FieldEvidenceEntry `json:"evidence"`
+	// EvidenceComplete 为 true 时表示三类证据齐全，不得再填写缺项说明。
+	EvidenceComplete bool   `json:"evidence_complete"`
+	State            string `json:"state"`
+	GatePolicy       string `json:"gate_policy"`
+	// ScannedEvents 是参与判定的该服务项事件总数，便于核对是否触达读取上限。
+	ScannedEvents int `json:"scanned_events"`
+}
+
+// ServiceItemFieldEvidence 返回服务项的现场证据完整性与已具备的证据明细。
+// 读取权限 + 资源授权与其它只读接口一致（project.read + 数据范围）。
+func (s *Service) ServiceItemFieldEvidence(ctx context.Context, p platform.Principal, itemID string) (ServiceItemFieldEvidence, error) {
+	if err := s.authorizeServiceItem(ctx, p, "project.read", itemID); err != nil {
+		return ServiceItemFieldEvidence{}, err
+	}
+	filter, err := authorizeProjectScope(p, "project.read")
+	if err != nil {
+		return ServiceItemFieldEvidence{}, err
+	}
+	return s.serviceItemFieldEvidence(ctx, filter, itemID)
+}
+
+// serviceItemFieldEvidence 以权威事件流计算缺项，供读接口与完成门禁共用同一口径。
+func (s *Service) serviceItemFieldEvidence(ctx context.Context, filter platform.ScopeFilter, itemID string) (ServiceItemFieldEvidence, error) {
+	repo, ok := s.Repo.(ServiceItemEventRepository)
+	if !ok {
+		return ServiceItemFieldEvidence{}, ErrFieldEvidenceUnavailable
+	}
+	events, err := repo.ListServiceItemDeliveryEvents(ctx, filter, itemID)
+	if err != nil {
+		return ServiceItemFieldEvidence{}, err
+	}
+	evidence := make([]FieldEvidenceEntry, 0, len(fieldEvidenceRequirements))
+	present := make(map[string]bool, len(fieldEvidenceRequirements))
+	for _, event := range events {
+		requirement, known := fieldEvidenceRequirementOf(event.Type)
+		if !known {
+			continue
+		}
+		// 判定只看"是否出现过"；明细保留最近一条，更贴近现场事实。
+		entry := FieldEvidenceEntry{
+			Type: requirement.Type, Label: requirement.Label, EventID: event.ID,
+			ActorUserID: event.ActorUserID, CapturedAt: fieldEvidenceCapturedAt(event),
+			FileRef: fieldEvidenceFileRef(event), Summary: fieldEvidenceSummary(event),
+		}
+		if index := fieldEvidenceIndex(evidence, requirement.Type); index >= 0 {
+			evidence[index] = entry
+		} else {
+			evidence = append(evidence, entry)
+		}
+		present[requirement.Type] = true
+	}
+	gaps := make([]string, 0, len(fieldEvidenceRequirements))
+	missing := make([]string, 0, len(fieldEvidenceRequirements))
+	for _, requirement := range fieldEvidenceRequirements {
+		if present[requirement.Type] {
+			continue
+		}
+		gaps = append(gaps, requirement.Type)
+		missing = append(missing, requirement.Label)
+	}
+	state := FieldEvidenceStateComplete
+	if len(gaps) > 0 {
+		state = FieldEvidenceStateIncomplete
+	}
+	return ServiceItemFieldEvidence{
+		ServiceItemID: itemID, Gaps: gaps, Missing: missing, Evidence: evidence,
+		EvidenceComplete: len(gaps) == 0, State: state, GatePolicy: s.fieldEvidenceGatePolicy(),
+		ScannedEvents: len(events),
+	}, nil
+}
+
+// requireFieldEvidenceReason 执行缺项说明与证据判定的一致性门禁（四象限）：
+//   - 证据齐全 + 无说明 → 放行；
+//   - 证据齐全 + 有说明 → 拒绝（阻止"证据齐全却写缺项"的矛盾叙述）；
+//   - 证据不全 + 有说明 → 放行（确认无法补齐的合法说明）；
+//   - 证据不全 + 无说明 → 拒绝（无据完成）。
+//
+// advisory 档只记录不拒绝，用于存量升级的过渡窗口。
+func (s *Service) requireFieldEvidenceReason(policy string, evidence ServiceItemFieldEvidence, reason string) error {
+	if evidence.EvidenceComplete && reason != "" {
+		if policy == FieldIncompleteReasonGateEnforce {
+			return ValidationError("现场证据已齐全（" + fieldEvidenceLabelList() + "），不得填写缺项说明；请清空说明后重新确认完成")
+		}
+		s.logFieldEvidenceGate("evidence complete but a gap reason was submitted", evidence.ServiceItemID, reason)
+		return nil
+	}
+	if !evidence.EvidenceComplete && reason == "" {
+		if policy == FieldIncompleteReasonGateEnforce {
+			return ValidationError("现场证据不完整，缺少 " + strings.Join(evidence.Missing, "、") + "；请先补齐证据，确实无法补齐时填写缺项确认说明")
+		}
+		s.logFieldEvidenceGate("evidence incomplete without a gap reason", evidence.ServiceItemID, reason, "missing", strings.Join(evidence.Missing, "、"))
+	}
+	return nil
+}
+
+func (s *Service) logFieldEvidenceGate(message, itemID, reason string, attributes ...any) {
+	if s.Logger == nil {
+		return
+	}
+	fields := []any{"service_item_id", itemID, "incomplete_reason", reason, "gate", s.fieldEvidenceGatePolicy()}
+	fields = append(fields, attributes...)
+	s.Logger.Warn("field-incomplete-reason gate: "+message, fields...)
+}
+
+// fieldEvidenceLabelList 返回三类必备证据的中文清单，用于提示文案。
+func fieldEvidenceLabelList() string {
+	labels := make([]string, 0, len(fieldEvidenceRequirements))
+	for _, requirement := range fieldEvidenceRequirements {
+		labels = append(labels, requirement.Label)
+	}
+	return strings.Join(labels, "、")
+}
+
+func fieldEvidenceRequirementOf(eventType string) (fieldEvidenceRequirement, bool) {
+	for _, requirement := range fieldEvidenceRequirements {
+		if requirement.Type == eventType {
+			return requirement, true
+		}
+	}
+	return fieldEvidenceRequirement{}, false
+}
+
+func fieldEvidenceIndex(evidence []FieldEvidenceEntry, eventType string) int {
+	for index, entry := range evidence {
+		if entry.Type == eventType {
+			return index
+		}
+	}
+	return -1
+}
+
+// fieldEvidenceCapturedAt 优先取事件列的采集时间，历史事件回退到载荷里的 captured_at。
+func fieldEvidenceCapturedAt(event domain.DeliveryEvent) string {
+	if event.CapturedAt != nil {
+		return event.CapturedAt.UTC().Format(time.RFC3339)
+	}
+	if captured := payloadText(event.Payload, "captured_at"); captured != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, captured); err == nil {
+			return parsed.UTC().Format(time.RFC3339)
+		}
+		return captured
+	}
+	return ""
+}
+
+// fieldEvidenceFileRef 提取证据引用的文件网关回执 ID。
+// 落库后 JSON 反序列化得到 map，测试桩里可能是结构体，两种形态都要能读。
+func fieldEvidenceFileRef(event domain.DeliveryEvent) string {
+	switch event.Type {
+	case EventFieldSignatureCaptured:
+		return firstEvidenceFileRef(event.Payload["signature_file"], event.Payload["evidence_files"])
+	case EventFieldRecordSubmitted:
+		return firstEvidenceFileRef(event.Payload["evidence_files"])
+	}
+	return ""
+}
+
+func firstEvidenceFileRef(values ...any) string {
+	for _, value := range values {
+		if ref := evidenceFileRefOf(value); ref != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
+func evidenceFileRefOf(value any) string {
+	switch typed := value.(type) {
+	case domain.ReportArtifactInput:
+		return strings.TrimSpace(typed.FileID)
+	case []domain.ReportArtifactInput:
+		if len(typed) > 0 {
+			return strings.TrimSpace(typed[0].FileID)
+		}
+	case map[string]any:
+		return payloadText(typed, "file_id")
+	case []any:
+		if len(typed) > 0 {
+			return evidenceFileRefOf(typed[0])
+		}
+	case []map[string]any:
+		if len(typed) > 0 {
+			return payloadText(typed[0], "file_id")
+		}
+	}
+	return ""
+}
+
+// fieldEvidenceSummary 只对签到给出可读摘要（坐标与精度），其余类型由 file_ref 表达。
+func fieldEvidenceSummary(event domain.DeliveryEvent) string {
+	if event.Type != EventFieldCheckedIn {
+		return ""
+	}
+	latitude, latitudeOK := event.Payload["latitude"].(float64)
+	longitude, longitudeOK := event.Payload["longitude"].(float64)
+	if !latitudeOK || !longitudeOK {
+		return ""
+	}
+	summary := fmt.Sprintf("定位 %.4f, %.4f", latitude, longitude)
+	if accuracy, ok := event.Payload["accuracy_meters"].(float64); ok && accuracy > 0 {
+		summary += fmt.Sprintf("（精度 %.1f 米）", accuracy)
+	}
+	return summary
 }

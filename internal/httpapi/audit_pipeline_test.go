@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -42,6 +43,41 @@ type stubIdentityPM struct{}
 
 func (stubIdentityPM) Authenticate(context.Context, *http.Request) (platform.Principal, error) {
 	return platform.Principal{TenantID: "tenant-1", UserID: "user-1", DisplayName: "测试用户"}, nil
+}
+
+// stubActivityIdentityPM 是支持空闲会话续期的身份桩：用于验证活动心跳不会作为
+// 业务写请求进入平台审计。
+type stubActivityIdentityPM struct{}
+
+func (stubActivityIdentityPM) Authenticate(context.Context, *http.Request) (platform.Principal, error) {
+	return platform.Principal{TenantID: "tenant-1", UserID: "user-1"}, nil
+}
+
+func (stubActivityIdentityPM) SessionIdleStatus(context.Context, *http.Request) (platform.SessionIdleStatus, error) {
+	return platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute, IdleRemaining: time.Minute}, nil
+}
+
+func (stubActivityIdentityPM) TouchSessionActivity(context.Context, *http.Request) (platform.SessionIdleStatus, error) {
+	return platform.SessionIdleStatus{IdleTimeout: 30 * time.Minute, IdleRemaining: 30 * time.Minute}, nil
+}
+
+// 会话活动心跳只推进空闲时间，没有业务副作用；强制审计模式下也不应产生
+// 审计事件或因为审计不可用被拒绝（与 /auth/me 同级）。
+func TestPMActivityHeartbeatIsNotAuditedAsBusinessWrite(t *testing.T) {
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	var logs bytes.Buffer
+	reporter := &stubAuditReporterPM{}
+	router := NewRouter(nil, stubActivityIdentityPM{}, reporter, slog.New(slog.NewJSONHandler(&logs, nil)))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	request.Header.Set("Origin", "http://example.com")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if reporter.calls != 0 {
+		t.Fatalf("activity heartbeat was audited as business write: calls=%d", reporter.calls)
+	}
 }
 
 func newPMAuditTestRouter(audit platform.AuditReporter, logs *bytes.Buffer) *gin.Engine {

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
+	"github.com/j-s-te/project-management/internal/platform"
 )
 
 type equipmentImportGateway struct{ fail bool }
@@ -25,6 +26,11 @@ func (g equipmentImportGateway) UploadImport(context.Context, string, string, st
 		return domain.ReportArtifactInput{}, errors.New("private upstream failure")
 	}
 	return domain.ReportArtifactInput{}, nil
+}
+
+// StatEvidence 只满足证据网关接口；本文件用例只覆盖导入预览，不涉及证据核验。
+func (g equipmentImportGateway) StatEvidence(context.Context, string, string, string) (platform.EvidenceMetadata, error) {
+	return platform.EvidenceMetadata{}, errors.New("evidence verification is not part of import preview tests")
 }
 
 func TestEquipmentImportRejectsInvalidSelectionAndFailedGateway(t *testing.T) {

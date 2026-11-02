@@ -9,6 +9,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,6 +50,10 @@ const (
 	// EventScopeChangeDetected 由「范围变更检测」在确认拆解时发出：拆解结果与合同清单
 	// 的范围不一致，项目进入补充协议处理中等待合同回写。原型拆解流程的「是否范围变更」分支。
 	EventScopeChangeDetected = "SCOPE_CHANGE_DETECTED"
+	// EventSupplementClosed 是补充协议分支的受控关账动作（BIZ-PROJECT-04）：
+	// 携带已审批补充协议、原因与关账时接受的范围指纹，只有它能显式清零
+	// supplement_status（确认拆解不再静默清除）。
+	EventSupplementClosed = "SUPPLEMENT_CLOSED"
 	// EventAutomationTriggered 是配置驱动的派生事件：事件落库后有启用的
 	//「自动化触发」规则命中时才追加，保证配置表真正参与运行时行为。
 	EventAutomationTriggered = "AUTOMATION_TRIGGERED"
@@ -62,13 +67,82 @@ const (
 	assignmentRoleDirectorySize  = 50
 )
 
-// ActivateContract 执行普通合同激活，禁止导入来源降级进入旧协议。
+// ActivateContract 执行合同生效事件驱动的投递（机器入口）。
+//
+// 该路径只在合同管理系统完成审批并投递生效事件时使用：调用方是经机器令牌验证的
+// 合同服务，载荷本身即合同服务的权威结果，因此保留“可信投递”语义，按载荷落库。
+// 用户会话入口绝不能复用本方法——浏览器可以伪造同样形状的载荷，必须改用
+// ActivateContractFromUser 由合同服务权威回读合同与 Service 目录。
+//
 // 参数：ctx 为请求，p 为已认证主体，input 为普通激活信息。
 // 返回值：项目；来源非法或业务校验失败时返回错误。
 func (s *Service) ActivateContract(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
 	if !platform.NormalProjectContract(platform.ApprovedContract{OriginKind: input.OriginKind, ImportMode: input.ImportMode, OriginImportItemID: input.OriginImportItemID}) {
 		return domain.Project{}, ErrImportPolicy
 	}
+	return s.activateContract(ctx, p, input, false, nil)
+}
+
+// ActivateContractFromUser 是用户会话建项入口的权威回读路径。
+//
+// 请求体只被允许提供 contract_id、所选 source_id、服务项的现场补充字段（场所等）、
+// effective_at 与盖章标记；合同编号、客户、客户标识、合同版本、服务项类别/批次/体系
+// 要求/方法类型一律来自合同服务：先按 contract_id 读取已审批合同并比对版本，再读取
+// 合同服务项目录重建服务范围。任何回读失败都按依赖不可用失败关闭，不降级使用请求体。
+//
+// 参数：ctx 为请求，p 为用户主体，input 为浏览器提交的激活信息。
+// 返回值：创建/同步后的项目，或权限、政策、权威回读与校验错误。
+func (s *Service) ActivateContractFromUser(ctx context.Context, p platform.Principal, input domain.ContractActivation) (domain.Project, error) {
+	contractID := strings.TrimSpace(input.ContractID)
+	if contractID == "" {
+		// 只有合同号的载荷无法定位权威合同：编号在历史项目里可能被当身份使用，
+		// 不能凭请求体字符串推出合同与客户。
+		return domain.Project{}, ValidationError("请选择已通过审批的合同后建项；仅凭合同编号不能建立项目")
+	}
+	if s.Contracts == nil {
+		return domain.Project{}, ErrContractUnavailable
+	}
+	contract, err := s.Contracts.Get(ctx, contractID)
+	if err != nil {
+		return domain.Project{}, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+	}
+	if strings.TrimSpace(contract.ID) != contractID || !contract.ApprovalPassed || !platform.NormalProjectContract(contract) || !contractApprovedStatus(contract.Status) {
+		return domain.Project{}, PreconditionError("所选合同尚未通过审批，不能建立项目")
+	}
+	if strings.TrimSpace(contract.Number) == "" || strings.TrimSpace(contract.CustomerName) == "" {
+		return domain.Project{}, PreconditionError("所选合同缺少合同编号或客户信息，请先在合同管理系统中补全")
+	}
+	contractVersion := strconv.FormatUint(contract.Version, 10)
+	// 客户端若带上合同版本，必须与权威版本一致：版本不同意味着所选范围可能已过期，
+	// 静默按最新版本落库会让用户以为自己提交的是旧清单。
+	if requestedVersion := strings.TrimSpace(input.ContractVersion); requestedVersion != "" && requestedVersion != contractVersion {
+		return domain.Project{}, PreconditionError("合同版本已更新，请刷新合同后重新建项")
+	}
+	if len(input.Services) == 0 {
+		return domain.Project{}, ValidationError("项目至少需要一个服务项")
+	}
+	catalog, catalogErr := s.Contracts.GetServiceItems(ctx, contractID)
+	if catalogErr != nil {
+		return domain.Project{}, fmt.Errorf("%w: %v", ErrContractUnavailable, catalogErr)
+	}
+	if strings.TrimSpace(catalog.ContractID) != contractID || catalog.ContractVersion != contract.Version {
+		return domain.Project{}, PreconditionError("合同服务范围已发生变化，请刷新合同后重新建项")
+	}
+	services, servicesErr := approvedContractServices(input.Services, catalog.ServiceItems)
+	if servicesErr != nil {
+		return domain.Project{}, servicesErr
+	}
+	// 请求体中的合同号/客户/客户 ID/合同名称/来源标记全部丢弃，只保留不可伪造字段。
+	input.ContractID = contractID
+	input.ContractNumber = strings.TrimSpace(contract.Number)
+	input.ContractVersion = contractVersion
+	input.ContractName = strings.TrimSpace(contract.Title)
+	input.Customer = strings.TrimSpace(contract.CustomerName)
+	input.CustomerID = strings.TrimSpace(contract.CustomerID)
+	input.OriginKind = contract.OriginKind
+	input.ImportMode = contract.ImportMode
+	input.OriginImportItemID = contract.OriginImportItemID
+	input.Services = services
 	return s.activateContract(ctx, p, input, false, nil)
 }
 
@@ -258,10 +332,25 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	if len(input.Items) == 0 {
 		return ValidationError("调整后的服务项清单不能为空")
 	}
-	if err := validateContractServiceTexts(input.Items); err != nil {
+	supplement, err := s.verifyApprovedSupplementContract(ctx, project, input.SupplementContractID)
+	if err != nil {
 		return err
 	}
-	if err := s.verifyApprovedSupplementContract(ctx, project, input.SupplementContractID); err != nil {
+	// 调整后的范围必须落在补充协议的服务项目录内：客户端只选 source_id 并补现场字段
+	// （场所等），类别/批次/体系要求/方法类型由权威目录重建。目录不可用即失败关闭，
+	// 不能降级成客户端清单，否则范围变更指纹会失去权威基准。
+	catalog, catalogErr := s.Contracts.GetServiceItems(ctx, strings.TrimSpace(supplement.ID))
+	if catalogErr != nil {
+		return fmt.Errorf("%w: %v", ErrContractUnavailable, catalogErr)
+	}
+	if strings.TrimSpace(catalog.ContractID) != strings.TrimSpace(supplement.ID) || catalog.ContractVersion != supplement.Version {
+		return PreconditionError("补充协议服务范围已发生变化，请重新选择后再调整")
+	}
+	selected, err := approvedContractServices(input.Items, catalog.ServiceItems)
+	if err != nil {
+		return err
+	}
+	if err := validateContractServiceTexts(selected); err != nil {
 		return err
 	}
 	// 拆解调整是人填清单：按原型流程，调整后进入补充协议并重新确认，
@@ -270,26 +359,26 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	if domainErr != nil {
 		return domainErr
 	}
-	plan, planErr := s.resolveSplitPlan(ctx, p.TenantID, "", "", len(input.Items), nil)
+	plan, planErr := s.resolveSplitPlan(ctx, p.TenantID, "", "", len(selected), nil)
 	if planErr != nil {
 		return planErr
 	}
-	items := make([]domain.ServiceItem, 0, len(input.Items))
-	categories := make([]string, 0, len(input.Items))
-	for _, source := range input.Items {
+	items := make([]domain.ServiceItem, 0, len(selected))
+	categories := make([]string, 0, len(selected))
+	for _, source := range selected {
+		if source.Batch == "" || source.Category == "" {
+			return fmt.Errorf("%w: supplement contract service %s lacks batch or category", ErrContractUnavailable, source.SourceID)
+		}
 		categories = append(categories, source.Category)
 	}
 	baselines, err := s.detectionCategoryBaselines(ctx, p.TenantID, categories)
 	if err != nil {
 		return err
 	}
-	for _, source := range input.Items {
-		if source.SourceID == "" || source.Site == "" || source.Batch == "" || source.Category == "" {
-			return ErrValidation
-		}
+	for _, source := range selected {
 		mode := strings.ToUpper(firstNonEmpty(source.TestMode, "STANDARD"))
 		if mode != "STANDARD" && mode != "PENETRATION" {
-			return ErrValidation
+			return fmt.Errorf("%w: supplement contract service %s has invalid test mode", ErrContractUnavailable, source.SourceID)
 		}
 		var siteErr error
 		source.Site, source.SiteCode, siteErr = s.resolveActiveSite(ctx, p.TenantID, source.Site, source.SiteCode)
@@ -301,7 +390,7 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 		// 编号由仓储层在归档旧服务项后按既有最大序号顺延，避免与归档行冲突。
 		items = append(items, domain.ServiceItem{ProjectID: projectID, SourceServiceID: source.SourceID, Batch: source.Batch, Site: source.Site, SiteCode: source.SiteCode, Category: source.Category, Requirement: source.Requirement, System: source.System, SystemLevel: source.SystemLevel, SystemStandard: outcome.SystemStandard, TestMode: outcome.TestMode, Special: outcome.Special, RequiredCodes: outcome.RequiredCodes, Status: domain.ServiceItemStatusPendingConfirm, ConflictStatus: "UNCHECKED"})
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(input.SupplementContractID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
+	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(supplement.ID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
 }
 
 // verifyApprovedSupplementContract 防止拆解表单将任意字符串
@@ -310,32 +399,30 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 // 权威来源。同时接受 `approved` 和 `active`，因为合同服务
 // 在同一事务内执行正常审批副作用（pending -> approved -> active），
 // 并原样返回持久化状态。
-
-// verifyApprovedSupplementContract 防止拆解表单将任意字符串
-// 作为补充协议证据。所选记录必须是同一客户下的另一份
-// 已完成审批的合同；合同服务仍是
-// 权威来源。同时接受 `approved` 和 `active`，因为合同服务
-// 在同一事务内执行正常审批副作用（pending -> approved -> active），
-// 并原样返回持久化状态。
-func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project domain.Project, supplementContractID string) error {
+//
+// 返回值是权威合同本身：调用方（拆解调整）接着要用它的 ID/版本读取服务项目录。
+func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project domain.Project, supplementContractID string) (platform.ApprovedContract, error) {
 	supplementContractID = strings.TrimSpace(supplementContractID)
 	if supplementContractID == "" {
-		return ValidationError("请选择已审批的补充协议")
+		return platform.ApprovedContract{}, ValidationError("请选择已审批的补充协议")
 	}
 	projectContractID, projectContractNumber := strings.TrimSpace(project.ContractID), strings.TrimSpace(project.Contract)
 	if supplementContractID == projectContractID ||
 		// 历史项目的 contract_id 可能为空而只保留合同号：同样不能把原合同当成补充协议。
 		(projectContractID == "" && projectContractNumber != "" && supplementContractID == projectContractNumber) {
-		return ValidationError("补充协议不能与原合同相同")
+		return platform.ApprovedContract{}, ValidationError("补充协议不能与原合同相同")
 	}
 	if s.Contracts == nil {
-		return ErrContractUnavailable
+		return platform.ApprovedContract{}, ErrContractUnavailable
 	}
 	supplement, err := s.Contracts.Get(ctx, supplementContractID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+		return platform.ApprovedContract{}, fmt.Errorf("%w: %v", ErrContractUnavailable, err)
 	}
-	return validateSupplementContract(project, supplementContractID, supplement)
+	if err := validateSupplementContract(project, supplementContractID, supplement); err != nil {
+		return platform.ApprovedContract{}, err
+	}
+	return supplement, nil
 }
 
 // validateSupplementContract 核对同客户普通补充合同身份与审批状态。
@@ -348,7 +435,7 @@ func validateSupplementContract(project domain.Project, supplementContractID str
 			return ValidationError("补充协议不能与原合同相同")
 		}
 	}
-	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !platform.NormalProjectContract(supplement) || !supplementContractApprovedStatus(supplement.Status) {
+	if strings.TrimSpace(supplement.ID) != supplementContractID || !supplement.ApprovalPassed || !platform.NormalProjectContract(supplement) || !contractApprovedStatus(supplement.Status) {
 		return PreconditionError("所选补充协议尚未审批通过")
 	}
 	projectCustomerID := strings.TrimSpace(project.CustomerID)
@@ -367,14 +454,11 @@ func validateSupplementContract(project domain.Project, supplementContractID str
 	return nil
 }
 
-// supplementContractApprovedStatus 是补充协议的业务资格状态集合：
+// contractApprovedStatus 是合同的业务资格状态集合（补充协议与用户会话建项共用）：
 // 正常审批在同一事务内完成 pending -> approved -> active，因此 approved（历史停留）
-// 与 active（正常完成）都属于审批通过；draft/pending/terminated/archived 不构成调整依据。
-
-// supplementContractApprovedStatus 是补充协议的业务资格状态集合：
-// 正常审批在同一事务内完成 pending -> approved -> active，因此 approved（历史停留）
-// 与 active（正常完成）都属于审批通过；draft/pending/terminated/archived 不构成调整依据。
-func supplementContractApprovedStatus(status string) bool {
+// 与 active（正常完成）都属于审批通过；draft/pending/terminated/archived 不构成
+// 建项或调整依据。
+func contractApprovedStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "approved", "active":
 		return true

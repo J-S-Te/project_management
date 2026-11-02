@@ -440,9 +440,12 @@ func splitScopeSnapshot(items []domain.ServiceItem) []string {
 //
 // 语义：合同激活时把清单范围指纹写进 CONTRACT_ACTIVATED 事件；确认拆解前再次计算当前拆解
 // 结果的范围指纹（只含来源清单行/批次/场所/检测类别，不含核对阶段允许编辑的技术要求与系统名称）。
+// 基准取「最新一条确立范围的事件」（合同激活 / 拆解调整 / 补充协议关账），因此补充协议
+// 已应用或已关账之后不会再用最初合同的清单反复判为漂移。
 // 不一致说明范围变了：
-//   - 项目还没进补充协议分支 → 记录变更并进入补充协议处理中，要求先完成合同回写；
-//   - 项目已在补充协议分支（合同已回写）→ 放行确认，由既有逻辑在全部确认后退回 NONE。
+//   - 项目还没进补充协议分支 → 记录变更并进入补充协议处理中；
+//   - 项目已在补充协议分支 → 不再由这里"放行"，改由受控退出校验
+//     （verifySupplementExitForConfirm / VerifySupplementExit）决定能否退出。
 func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, filter platform.ScopeFilter, ids []string) error {
 	deliveryRepo, ok := s.Repo.(DeliveryRepository)
 	if !ok {
@@ -464,18 +467,8 @@ func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, fi
 		if err != nil {
 			return err
 		}
-		snapshot := []string(nil)
-		detection := false
-		for index := range events {
-			event := &events[index]
-			if event.Type != EventContractActivated {
-				continue
-			}
-			detection, _ = event.Payload["scope_change_detection"].(bool)
-			snapshot = payloadStringSlice(event.Payload["scope_snapshot"])
-			break
-		}
-		if !detection || len(snapshot) == 0 {
+		snapshot := ScopeChangeBaseline(events)
+		if !scopeChangeDetectionEnabled(events) || len(snapshot) == 0 {
 			continue
 		}
 		project, err := s.Repo.GetProject(ctx, filter, projectID)
@@ -483,20 +476,19 @@ func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, fi
 			return err
 		}
 		if strings.EqualFold(strings.TrimSpace(project.SupplementStatus), "REQUIRED") {
-			// 已经在补充协议分支：合同回写后允许确认，否则拆解永远无法收口。
+			// 已经在补充协议分支：这里不再放行也不再重复记一次变更。能否退出由
+			// verifySupplementExitForConfirm 按受控条件判定（BIZ-PROJECT-04），
+			// 避免"再点一次确认"就把补充协议清掉。
 			continue
 		}
-		current := make([]string, 0, len(items))
+		projectItems := make([]domain.ServiceItem, 0, len(items))
 		for _, item := range items {
-			if item.ProjectID != projectID {
-				continue
+			if item.ProjectID == projectID {
+				projectItems = append(projectItems, item)
 			}
-			current = append(current, strings.Join([]string{
-				strings.TrimSpace(item.SourceServiceID), strings.TrimSpace(item.Batch),
-				strings.TrimSpace(item.Site), strings.TrimSpace(item.Category),
-			}, "|"))
 		}
-		sort.Strings(current)
+		// 与补充协议受控退出共用同一个指纹函数，避免两处比较的字段集合漂移。
+		current := DecompositionScopeSnapshot(projectItems)
 		if slices.Equal(current, snapshot) {
 			continue
 		}

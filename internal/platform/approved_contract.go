@@ -47,7 +47,7 @@ type ApprovedContractServiceCatalog struct {
 
 type ApprovedContractVerifier interface {
 	List(context.Context, int) ([]ApprovedContract, error)
-	ListReferences(context.Context, string, int) ([]ApprovedContract, string, error)
+	ListReferences(context.Context, string, string, int) ([]ApprovedContract, string, error)
 	Get(context.Context, string) (ApprovedContract, error)
 	GetServiceItems(context.Context, string) (ApprovedContractServiceCatalog, error)
 }
@@ -114,7 +114,7 @@ func (c *approvedContractClient) List(ctx context.Context, limit int) ([]Approve
 	return envelope.Data, nil
 }
 
-func (c *approvedContractClient) ListReferences(ctx context.Context, afterID string, limit int) ([]ApprovedContract, string, error) {
+func (c *approvedContractClient) ListReferences(ctx context.Context, keyword, afterID string, limit int) ([]ApprovedContract, string, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
@@ -128,6 +128,9 @@ func (c *approvedContractClient) ListReferences(ctx context.Context, afterID str
 	}
 	query := endpoint.Query()
 	query.Set("limit", fmt.Sprintf("%d", limit))
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		query.Set("keyword", keyword)
+	}
 	if afterID = strings.TrimSpace(afterID); afterID != "" {
 		query.Set("after_id", afterID)
 	}

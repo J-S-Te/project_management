@@ -34,7 +34,7 @@ func (*duplicateContractVerifier) List(context.Context, int) ([]platform.Approve
 	return nil, nil
 }
 
-func (*duplicateContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (*duplicateContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", nil
 }
 

@@ -183,6 +183,7 @@ type auditOutboxRecord struct {
 	Action         string     `gorm:"column:action"`
 	ResourceType   string     `gorm:"column:resource_type"`
 	ResourceID     string     `gorm:"column:resource_id"`
+	RequestID      *string    `gorm:"column:request_id"`
 	LoginIP        []byte     `gorm:"column:login_ip"`
 	ClientIP       []byte     `gorm:"column:client_ip"`
 	IPSource       string     `gorm:"column:ip_source"`

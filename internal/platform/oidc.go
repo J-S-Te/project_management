@@ -19,6 +19,14 @@ import (
 
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// SessionIdleStatus 是会话空闲期限的公开视图。IdleRemaining 取空闲剩余与绝对
+// 剩余的最小值（毫秒精度，非负），对应 API 契约中的 idle_timeout_seconds /
+// idle_remaining_ms。
+type SessionIdleStatus struct {
+	IdleTimeout   time.Duration
+	IdleRemaining time.Duration
+}
+
 const (
 	loginTransactionTTL               = 10 * time.Minute
 	authorizationRefreshRetryInterval = 5 * time.Second
@@ -30,7 +38,7 @@ type OIDCOptions struct {
 	CentralSessionPublicBaseURL                                                                                                   string
 	Issuer, BackchannelBaseURL, PlatformBaseURL, ClientID, ClientSecret, IdentityProviderHint, RedirectURI, PostLogoutRedirectURI string
 	TenantID, ApplicationCode, EnvironmentCode, SessionCookieName, PathPrefix                                                     string
-	SessionTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                                         time.Duration
+	SessionIdleTTL, SessionAbsoluteTTL, AuthorizationRefreshInterval, AuthorizationMaxStale, AuthorizationTimeout                 time.Duration
 	SessionSecure                                                                                                                 bool
 	// Audit 可选；非空时在登录/登出成功后向平台审计上报 auth.login / auth.logout。
 	Audit AuditReporter
@@ -100,6 +108,11 @@ func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCSt
 	}
 	if store == nil {
 		return nil, errors.New("OIDC persistent store is required")
+	}
+	// 失败关闭：没有同时具备"空闲期限 < 绝对期限"的会话策略时拒绝启动，
+	// 不允许退化成单一绝对期限或永不过期。
+	if options.CentralClient == nil && (options.SessionIdleTTL <= 0 || options.SessionAbsoluteTTL <= options.SessionIdleTTL) {
+		return nil, errors.New("OIDC session idle TTL must be positive and shorter than the absolute TTL")
 	}
 	codec, err := newSecretCodec(encryptionKey)
 	if err != nil {
@@ -173,6 +186,11 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 		_ = a.store.RevokeSession(ctx, hash, now)
 		return Principal{}, ErrUnauthenticated
 	}
+	// 空闲期限只在显式活动接口推进；普通业务请求只更新 last_seen_at（见下方
+	// UpdateSession），所以长时间无操作后会在这里被拒绝，而绝对期限不会延长。
+	if !a.sessionWithinDeadlines(stored, now) {
+		return Principal{}, ErrUnauthenticated
+	}
 	refreshDue := !stored.TokenExpiresAt.After(now) || now.Sub(stored.AuthorizationCheckedAt) >= a.options.AuthorizationRefreshInterval
 	if refreshDue {
 		if stored.RefreshRetryAt.After(now) {
@@ -211,6 +229,125 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 		return Principal{}, ErrUnauthenticated
 	}
 	return principal, nil
+}
+
+// sessionIdleDeadline 计算旧模式会话的真实空闲截止。
+// 参数：stored 为持久会话，缺显式交互时间时回退创建时间。
+// 返回值：截止时间与策略有效标记；缺配置或时间基准时失败关闭。
+func (a *OIDCAuthenticator) sessionIdleDeadline(stored StoredOIDCSession) (time.Time, bool) {
+	if a.options.SessionIdleTTL <= 0 {
+		return time.Time{}, false
+	}
+	lastInteractive := stored.LastInteractiveAt
+	if lastInteractive.IsZero() {
+		lastInteractive = stored.CreatedAt
+	}
+	if lastInteractive.IsZero() {
+		return time.Time{}, false
+	}
+	return lastInteractive.Add(a.options.SessionIdleTTL), true
+}
+
+// sessionWithinDeadlines 同时核验旧模式的绝对期限与真实空闲期限。
+// 参数：stored 为持久会话，now 为服务端校验时钟。
+// 返回值：两个期限均有效时为真，失效会话不得复活。
+func (a *OIDCAuthenticator) sessionWithinDeadlines(stored StoredOIDCSession, now time.Time) bool {
+	if !stored.SessionExpiresAt.After(now) {
+		return false
+	}
+	idleDeadline, ok := a.sessionIdleDeadline(stored)
+	return ok && now.Before(idleDeadline)
+}
+
+// sessionIdleStatus 计算旧模式空闲窗口的公开视图。
+// 参数：stored 为持久会话，now 为服务端校验时钟。
+// 返回值：空闲策略与距空闲或绝对截止较早者的非负时长。
+func (a *OIDCAuthenticator) sessionIdleStatus(stored StoredOIDCSession, now time.Time) SessionIdleStatus {
+	idleDeadline, _ := a.sessionIdleDeadline(stored)
+	remaining := earliestTime(idleDeadline, stored.SessionExpiresAt).Sub(now)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return SessionIdleStatus{IdleTimeout: a.options.SessionIdleTTL, IdleRemaining: remaining}
+}
+
+// activeSessionForRequest 核验活动与状态接口的本地会话和主体。
+// 参数：ctx 为请求上下文，request 为携带 Cookie 的浏览器请求。
+// 返回值：会话、摘要和时钟；旧模式额外核验本地空闲，依赖故障保留服务异常。
+func (a *OIDCAuthenticator) activeSessionForRequest(ctx context.Context, request *http.Request) (StoredOIDCSession, []byte, time.Time, error) {
+	cookie, err := request.Cookie(a.options.SessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return StoredOIDCSession{}, nil, time.Time{}, ErrUnauthenticated
+	}
+	now := a.now().UTC()
+	hash := tokenDigest(cookie.Value)
+	stored, err := a.store.FindSession(ctx, hash, now)
+	if err != nil {
+		if errors.Is(err, errOIDCRecordNotFound) {
+			return StoredOIDCSession{}, nil, time.Time{}, ErrUnauthenticated
+		}
+		return StoredOIDCSession{}, nil, time.Time{}, ErrAuthorizationUnavailable
+	}
+	if stored.TenantID != a.options.TenantID {
+		return StoredOIDCSession{}, nil, time.Time{}, ErrUnauthenticated
+	}
+	principal, err := decodePrincipal(stored.PrincipalJSON)
+	if err != nil || principal.IdentityID != stored.IdentityID || principal.TenantID != stored.TenantID {
+		return StoredOIDCSession{}, nil, time.Time{}, ErrUnauthenticated
+	}
+	if a.options.CentralClient == nil && !a.sessionWithinDeadlines(stored, now) {
+		return StoredOIDCSession{}, nil, time.Time{}, ErrUnauthenticated
+	}
+	return stored, hash, now, nil
+}
+
+// SessionIdleStatus 读取会话空闲状态，中央模式使用平台权威窗口。
+// 参数：ctx 为请求上下文，request 为携带 Cookie 的浏览器请求。
+// 返回值：只读窗口；未认证或依赖错误不推进活动时间。
+func (a *OIDCAuthenticator) SessionIdleStatus(ctx context.Context, request *http.Request) (SessionIdleStatus, error) {
+	stored, _, now, err := a.activeSessionForRequest(ctx, request)
+	if err != nil {
+		return SessionIdleStatus{}, err
+	}
+	if a.options.CentralClient != nil {
+		state, err := a.centralState(ctx, stored, false, true)
+		if err != nil {
+			return SessionIdleStatus{}, err
+		}
+		return SessionIdleStatus{
+			IdleTimeout:   time.Duration(state.IdleTimeoutSeconds) * time.Second,
+			IdleRemaining: time.Duration(state.IdleRemainingMS) * time.Millisecond,
+		}, nil
+	}
+	return a.sessionIdleStatus(stored, now), nil
+}
+
+// TouchSessionActivity 记录显式活动，中央模式代理平台，旧模式条件更新本地时间。
+// 参数：ctx 为请求上下文，request 为已通过同源写保护的浏览器请求。
+// 返回值：最新空闲窗口；失效不复活，依赖故障返回服务异常。
+func (a *OIDCAuthenticator) TouchSessionActivity(ctx context.Context, request *http.Request) (SessionIdleStatus, error) {
+	stored, hash, now, err := a.activeSessionForRequest(ctx, request)
+	if err != nil {
+		return SessionIdleStatus{}, err
+	}
+	if a.options.CentralClient != nil {
+		state, err := a.centralState(ctx, stored, true, true)
+		if err != nil {
+			return SessionIdleStatus{}, err
+		}
+		return SessionIdleStatus{
+			IdleTimeout:   time.Duration(state.IdleTimeoutSeconds) * time.Second,
+			IdleRemaining: time.Duration(state.IdleRemainingMS) * time.Millisecond,
+		}, nil
+	}
+	if err := a.store.TouchSessionActivity(ctx, hash, now, now.Add(-a.options.SessionIdleTTL)); err != nil {
+		if errors.Is(err, errOIDCRecordNotFound) {
+			return SessionIdleStatus{}, ErrUnauthenticated
+		}
+		return SessionIdleStatus{}, err
+	}
+	stored.LastInteractiveAt = now
+	return a.sessionIdleStatus(stored, now), nil
 }
 
 // Login 建立原state、nonce和PKCE事务并进入可信登录流程。
@@ -377,8 +514,8 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "OIDC token is expired", http.StatusUnauthorized)
 		return
 	}
-	expiresAt := now.Add(a.options.SessionTTL)
-	stored := StoredOIDCSession{SessionIDHash: tokenDigest(rawSession), TenantID: principal.TenantID, IdentityID: principal.IdentityID, OIDCSubject: strings.TrimSpace(claims.Subject), OIDCSessionID: strings.TrimSpace(claims.SessionID), PersonID: principal.PersonID, PrincipalJSON: principalJSON, IDTokenCipher: idTokenCipher, OAuthTokenCipher: tokenCipher, AuthorizationRevision: principal.AuthorizationRevision, AuthorizationCheckedAt: now, TokenExpiresAt: tokenExpiry, SessionExpiresAt: expiresAt, CreatedAt: now, LastSeenAt: now}
+	expiresAt := now.Add(a.options.SessionAbsoluteTTL)
+	stored := StoredOIDCSession{SessionIDHash: tokenDigest(rawSession), TenantID: principal.TenantID, IdentityID: principal.IdentityID, OIDCSubject: strings.TrimSpace(claims.Subject), OIDCSessionID: strings.TrimSpace(claims.SessionID), PersonID: principal.PersonID, PrincipalJSON: principalJSON, IDTokenCipher: idTokenCipher, OAuthTokenCipher: tokenCipher, AuthorizationRevision: principal.AuthorizationRevision, AuthorizationCheckedAt: now, TokenExpiresAt: tokenExpiry, SessionExpiresAt: expiresAt, CreatedAt: now, LastSeenAt: now, LastInteractiveAt: now}
 	if a.options.CentralClient != nil {
 		if stored.OIDCSessionID == "" {
 			http.Error(w, "missing upstream session", 401)
@@ -393,13 +530,30 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		expiresAt = binding.Context.AbsoluteExpiresAt
 		stored.SessionExpiresAt = expiresAt
 	}
-	if err := a.store.CreateSession(r.Context(), stored); err != nil {
+	expiresAt, err = a.createSession(r.Context(), now, stored)
+	if err != nil {
 		http.Error(w, "session service is unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	a.reportAuth(r, AuditEvent{ActorID: principal.UserID, ActorName: principal.DisplayName, Action: "auth.login", ResourceType: "auth_session", Result: "SUCCESS", RiskLevel: "LOW"})
 	http.SetCookie(w, a.cookie(rawSession, expiresAt))
 	http.Redirect(w, r, a.PublicPath(tx.ReturnPath), http.StatusFound)
+}
+
+// createSession 持久化新会话，中央模式保留平台原始认证的绝对截止。
+// 参数：ctx 为请求上下文，now 为登录时钟，stored 为令牌与主体快照。
+// 返回值：固定的绝对截止；持久化失败返回错误。
+func (a *OIDCAuthenticator) createSession(ctx context.Context, now time.Time, stored StoredOIDCSession) (time.Time, error) {
+	if a.options.CentralClient == nil {
+		stored.SessionExpiresAt = now.Add(a.options.SessionAbsoluteTTL)
+	}
+	stored.CreatedAt = now
+	stored.LastSeenAt = now
+	stored.LastInteractiveAt = now
+	if err := a.store.CreateSession(ctx, stored); err != nil {
+		return time.Time{}, err
+	}
+	return stored.SessionExpiresAt, nil
 }
 
 // refreshStoredSession 保持旧模式刷新钩子的固定签名与行为。

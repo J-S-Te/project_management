@@ -28,7 +28,50 @@ func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, 
 	if err := s.verifyExpectedVersion(ctx, p, reportPhasePermission(phase), itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
+	// 审核/签发是把报告推向对客户生效的门禁：进门之前必须再回源核验当前版本报告文件，
+	// 避免登记时通过、签发前文件已被删除或替换却仍然放行（BIZ-PROJECT-03）。
+	if phase == "REVIEWED" || phase == "ISSUED" {
+		if err := s.verifyCurrentReportArtifact(ctx, p, itemID, reportPhasePermission(phase)); err != nil {
+			return err
+		}
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventReportStatusUpdated, map[string]any{"phase": phase, "expected_version": input.ExpectedVersion}))
+}
+
+// verifyCurrentReportArtifact 读取当前有效报告版本上登记的文件，并回源文件网关核验。
+// 没有登记文件、仓储不支持读取版本，或核验失败时都拒绝推进：报告门禁不能建立在
+// 未经核验的回执之上。
+func (s *Service) verifyCurrentReportArtifact(ctx context.Context, p platform.Principal, itemID, permission string) error {
+	filter, err := authorizeProjectScope(p, permission)
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	repo, ok := s.Repo.(ReportRevisionRepository)
+	if !ok {
+		return errors.New("report revision repository unavailable")
+	}
+	revisions, err := repo.ListReportRevisions(ctx, p.TenantID, itemID)
+	if err != nil {
+		return err
+	}
+	for _, revision := range revisions {
+		if revision.Revision != item.ReportRevision || !strings.EqualFold(strings.TrimSpace(revision.ValidityStatus), "ACTIVE") {
+			continue
+		}
+		if strings.TrimSpace(revision.FileID) == "" {
+			return PreconditionError("请先上传并登记当前报告版本文件，再提交审核或签发")
+		}
+		artifact := domain.ReportArtifactInput{FileID: revision.FileID, FileName: revision.FileName, MIME: revision.FileMIME, Size: revision.FileSize, SHA256: revision.FileSHA256}
+		if err := normalizeFileEvidence(&artifact, "报告"); err != nil {
+			return err
+		}
+		return s.verifyFileEvidence(ctx, p, itemID, artifact, "报告")
+	}
+	return PreconditionError("请先上传并登记当前报告版本文件，再提交审核或签发")
 }
 
 func (s *Service) ListReportRevisions(ctx context.Context, p platform.Principal, itemID string) ([]domain.ReportRevision, error) {
@@ -47,6 +90,11 @@ func (s *Service) RegisterReportArtifact(ctx context.Context, p platform.Princip
 		return err
 	}
 	if err := normalizeFileEvidence(&input, "报告"); err != nil {
+		return err
+	}
+	// 报告文件是审核/签发门禁的实体：登记前必须回源文件网关核验，
+	// 否则伪造 file_id/sha256 就能让"报告已上传"成立（BIZ-PROJECT-03）。
+	if err := s.verifyFileEvidence(ctx, p, itemID, input, "报告"); err != nil {
 		return err
 	}
 	repo, ok := s.Repo.(ReportRevisionRepository)

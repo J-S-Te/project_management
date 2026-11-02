@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,28 +31,41 @@ type Config struct {
 	RunWorkerWithAPI               bool
 	Background                     BackgroundConfig
 	Snapshot                       ProjectSnapshotConfig
-	PlatformBaseURL                string
-	OIDCIssuer                     string
-	OIDCBackchannelBaseURL         string
-	OIDCClientID                   string
-	OIDCClientSecret               string
-	OIDCIDPHint                    string
-	OIDCRedirectURI                string
-	OIDCPostLogoutRedirectURI      string
-	OIDCTenantID                   string
-	OIDCSessionCookieName          string
-	OIDCSessionTTL                 time.Duration
-	OIDCAuthorizationRefresh       time.Duration
-	OIDCAuthorizationMaxStale      time.Duration
-	OIDCAuthorizationTimeout       time.Duration
-	OIDCSessionEncryptionKey       []byte
-	OIDCSessionSecure              bool
-	AppPathPrefix                  string
-	PlatformApplicationCode        string
-	PlatformEnvironmentCode        string
-	PlatformApplicationID          string
-	PlatformAuditClientID          string
-	PlatformAuditClientSecret      string
+	FieldCheckIn                   FieldCheckInConfig
+	// FieldIncompleteReasonGate 是现场完成"缺项说明"门禁的强度（BIZ-PROJECT-06）：
+	// ADVISORY 只记录不拒绝（存量升级过渡），ENFORCE 执行 422 拒绝（新装默认）。
+	FieldIncompleteReasonGate string
+	PlatformBaseURL           string
+	OIDCIssuer                string
+	OIDCBackchannelBaseURL    string
+	OIDCClientID              string
+	OIDCClientSecret          string
+	OIDCIDPHint               string
+	OIDCRedirectURI           string
+	OIDCPostLogoutRedirectURI string
+	OIDCTenantID              string
+	OIDCSessionCookieName     string
+	// OIDCSessionIdleTTL 是无显式交互的最长容忍时间；OIDCSessionAbsoluteTTL 是
+	// 从登录成功起不能延长的绝对上限。两者不能退化为单一绝对期限。
+	OIDCSessionIdleTTL        time.Duration
+	OIDCSessionAbsoluteTTL    time.Duration
+	OIDCAuthorizationRefresh  time.Duration
+	OIDCAuthorizationMaxStale time.Duration
+	OIDCAuthorizationTimeout  time.Duration
+	OIDCSessionEncryptionKey  []byte
+	OIDCSessionSecure         bool
+	AppPathPrefix             string
+	PlatformApplicationCode   string
+	PlatformEnvironmentCode   string
+	PlatformApplicationID     string
+	PlatformAuditClientID     string
+	PlatformAuditClientSecret string
+	// AuditRequired 是 BIZ-XAPI-10 的审计目的地必开判定：
+	// 显式 PROJECT_AUDIT_REQUIRED 优先，兼容既有 PLATFORM_AUDIT_REQUIRED，
+	// 否则 APP_ENV=production / PLATFORM_ENVIRONMENT_CODE=prod 视为生产必开。
+	AuditRequired bool
+	// ProductionEnvironment 用于“审计允许告警放行、通知必须失败关闭”的分级策略。
+	ProductionEnvironment          bool
 	OwnerDirectoryEnabled          bool
 	PlatformOwnerDirectoryURL      string
 	PlatformOwnerDirectoryClientID string
@@ -62,31 +76,32 @@ type Config struct {
 	NotificationEnabled bool
 	// SLA 扫描：SLA 超期/临近的主动提醒需要周期任务；租户列表显式给出，
 	// 避免一条命令扫全库（系统侧任务不代替用户授权，必须限定范围）。
-	SlaScanTenants                   []string
-	SlaScanInterval                  time.Duration
-	NotificationDispatchInterval     time.Duration
-	PlatformNotificationURL          string
-	PlatformNotificationClientID     string
-	PlatformNotificationSecret       string
-	PlatformNotificationScope        string
-	PlatformCatalogSync              bool
-	PlatformCatalogClientID          string
-	PlatformCatalogClientSecret      string
-	SettlementReferenceEnabled       bool
-	SettlementReferenceClientID      string
-	SettlementReferenceAudience      string
-	SettlementReferenceIssuer        string
-	SettlementReferencePublicKeyPath string
-	SettlementReferenceCallerEnv     string
-	ContractIntegrationEnabled       bool
-	ContractIntegrationRequireBearer bool
-	ContractIntegrationClientID      string
-	ContractIntegrationAudience      string
-	ContractIntegrationIssuer        string
-	ContractIntegrationPublicKeyPath string
-	ContractIntegrationCallerApp     string
-	ContractIntegrationCallerEnv     string
-	ContractIntegrationScope         string
+	SlaScanTenants                    []string
+	SlaScanInterval                   time.Duration
+	NotificationDispatchInterval      time.Duration
+	PlatformNotificationURL           string
+	PlatformNotificationClientID      string
+	PlatformNotificationSecret        string
+	PlatformNotificationScope         string
+	PlatformCatalogSync               bool
+	PlatformCatalogClientID           string
+	PlatformCatalogClientSecret       string
+	SettlementReferenceEnabled        bool
+	SettlementReferenceAllowAnyClient bool
+	SettlementReferenceClientID       string
+	SettlementReferenceAudience       string
+	SettlementReferenceIssuer         string
+	SettlementReferencePublicKeyPath  string
+	SettlementReferenceCallerEnv      string
+	ContractIntegrationEnabled        bool
+	ContractIntegrationRequireBearer  bool
+	ContractIntegrationClientID       string
+	ContractIntegrationAudience       string
+	ContractIntegrationIssuer         string
+	ContractIntegrationPublicKeyPath  string
+	ContractIntegrationCallerApp      string
+	ContractIntegrationCallerEnv      string
+	ContractIntegrationScope          string
 
 	ProjectContractImportEnabled       bool
 	ProjectContractImportClientID      string
@@ -96,6 +111,9 @@ type Config struct {
 	ProjectContractImportCallerEnv     string
 
 	// HandoverIntegration 是基础平台人员交接机器协议的入站配置。
+	// 调用方应用/环境与唯一 scope 由跨系统契约固定：caller=platform/prod、scope=handover.machine；
+	// 平台清单 HANDOVER_INTEGRATION_CALLER_APPLICATION_CODE 若漏配，默认值也必须落在 platform，
+	// 否则验签器会把平台令牌判为其它子系统而一律 401。
 	HandoverIntegrationEnabled             bool
 	HandoverIntegrationRequireBearer       bool
 	HandoverIntegrationClientID            string
@@ -175,7 +193,7 @@ func Load() (Config, error) {
 		HandoverIntegrationAudience:            strings.TrimSpace(os.Getenv("HANDOVER_INTEGRATION_AUDIENCE")),
 		HandoverIntegrationIssuer:              env("HANDOVER_INTEGRATION_ISSUER", "basic-platform"),
 		HandoverIntegrationPublicKeyPath:       env("HANDOVER_INTEGRATION_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem"),
-		HandoverIntegrationCallerApp:           env("HANDOVER_INTEGRATION_CALLER_APPLICATION_CODE", "basic-platform"),
+		HandoverIntegrationCallerApp:           env("HANDOVER_INTEGRATION_CALLER_APPLICATION_CODE", "platform"),
 		HandoverIntegrationCallerEnv:           env("HANDOVER_INTEGRATION_CALLER_ENVIRONMENT_CODE", strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE"))),
 		HandoverIntegrationScope:               env("HANDOVER_INTEGRATION_REQUIRED_SCOPE", "handover.machine"),
 		ContractApprovalValidationURL:          strings.TrimSpace(os.Getenv("CONTRACT_APPROVAL_VALIDATION_URL")),
@@ -202,7 +220,24 @@ func Load() (Config, error) {
 	if c.SettlementReferenceEnabled, err = strconv.ParseBool(env("SETTLEMENT_REFERENCE_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("SETTLEMENT_REFERENCE_ENABLED: %w", err)
 	}
-	if c.OIDCSessionTTL, err = duration("OIDC_SESSION_TTL", 8*time.Hour); err != nil {
+	if c.SettlementReferenceAllowAnyClient, err = strconv.ParseBool(env("SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT", "false")); err != nil {
+		return c, fmt.Errorf("SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT: %w", err)
+	}
+	// 统一会话语义：空闲期限默认 30m，绝对期限默认 8h。
+	if c.OIDCSessionIdleTTL, err = duration("OIDC_SESSION_IDLE_TTL", 30*time.Minute); err != nil {
+		return c, err
+	}
+	// 兼容旧键：新绝对期限未显式设置时，旧 OIDC_SESSION_TTL 继续作为本次绝对期限，
+	// 避免升级后把旧环境静默放大到 8 小时；新键与旧键同时存在时以新键为准。
+	absoluteFallback := 8 * time.Hour
+	if legacy := strings.TrimSpace(os.Getenv("OIDC_SESSION_TTL")); legacy != "" && strings.TrimSpace(os.Getenv("OIDC_SESSION_ABSOLUTE_TTL")) == "" {
+		parsed, parseErr := time.ParseDuration(legacy)
+		if parseErr != nil {
+			return c, fmt.Errorf("OIDC_SESSION_TTL: %w", parseErr)
+		}
+		absoluteFallback = parsed
+	}
+	if c.OIDCSessionAbsoluteTTL, err = duration("OIDC_SESSION_ABSOLUTE_TTL", absoluteFallback); err != nil {
 		return c, err
 	}
 	c.CentralSessionEnabled, err = strconv.ParseBool(env("CENTRAL_SESSION_ENABLED", "false"))
@@ -282,10 +317,53 @@ func Load() (Config, error) {
 	if c.DashboardMachineRequireBearer, err = strconv.ParseBool(env("DASHBOARD_MACHINE_REQUIRE_BEARER", "false")); err != nil {
 		return c, fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER: %w", err)
 	}
+	if c.FieldIncompleteReasonGate, err = fieldIncompleteReasonGate(); err != nil {
+		return c, err
+	}
+	// BIZ-XAPI-10：审计必开判定与生产标记在启动装配、审计中间件与 /readyz 共用，
+	// 避免三处各读一套环境变量产生漂移。
+	if c.AuditRequired, err = ResolveAuditRequired(
+		os.Getenv("PROJECT_AUDIT_REQUIRED"),
+		os.Getenv("PLATFORM_AUDIT_REQUIRED"),
+		os.Getenv("APP_ENV"),
+		c.PlatformEnvironmentCode,
+	); err != nil {
+		return c, err
+	}
+	c.ProductionEnvironment = IsProduction(os.Getenv("APP_ENV"), c.PlatformEnvironmentCode)
 	if err := c.loadFeatures(); err != nil {
 		return c, err
 	}
 	return c, c.validate()
+}
+
+// 现场完成缺项说明门禁的两种强度（BIZ-PROJECT-06）。
+const (
+	FieldIncompleteReasonGateAdvisory = "ADVISORY"
+	FieldIncompleteReasonGateEnforce  = "ENFORCE"
+)
+
+// fieldIncompleteReasonGate 读取缺项说明门禁的强度。
+//
+// 默认（键未配置）取 ADVISORY：存量部署通常没有这个键，若默认 enforce，旧前端仍用
+// 窗口近似判定"缺项"并强制必填说明，而新后端按权威证据拒绝该说明，会形成短暂死锁。
+// 因此默认只记录不拒绝，等前端跟进后再显式切 FIELD_INCOMPLETE_REASON_GATE=enforce；
+// 全新部署若希望从第一天就是硬约束，直接显式配置 enforce 即可。
+//
+// 同时接受 PROJECT_ 前缀别名，与本仓其它键的命名习惯保持一致。
+func fieldIncompleteReasonGate() (string, error) {
+	raw := strings.ToUpper(strings.TrimSpace(env("FIELD_INCOMPLETE_REASON_GATE", "")))
+	if raw == "" {
+		raw = strings.ToUpper(strings.TrimSpace(os.Getenv("PROJECT_FIELD_INCOMPLETE_REASON_GATE")))
+	}
+	switch raw {
+	case "":
+		return FieldIncompleteReasonGateAdvisory, nil
+	case FieldIncompleteReasonGateAdvisory, FieldIncompleteReasonGateEnforce:
+		return raw, nil
+	default:
+		return "", fmt.Errorf("FIELD_INCOMPLETE_REASON_GATE must be advisory or enforce")
+	}
 }
 
 // validate 检查运行配置和集成门禁。
@@ -330,8 +408,17 @@ func (c Config) validate() error {
 	if c.OIDCPostLogoutRedirectURI != "" && !validRedirectURL(c.OIDCPostLogoutRedirectURI) {
 		return fmt.Errorf("OIDC_POST_LOGOUT_REDIRECT_URI must be a valid HTTP(S) redirect URL")
 	}
-	if c.OIDCSessionTTL <= 0 || c.OIDCAuthorizationRefresh <= 0 || c.OIDCAuthorizationRefresh >= c.OIDCSessionTTL || c.OIDCAuthorizationMaxStale < c.OIDCAuthorizationRefresh || c.OIDCAuthorizationMaxStale >= c.OIDCSessionTTL {
-		return fmt.Errorf("OIDC refresh and maximum stale intervals must be positive, ordered and shorter than session TTL")
+	// 失败关闭：空闲期限超出运维可接受范围或绝对期限不足时拒绝启动，避免把
+	// 15 分钟绝对到期或永不过期当成"修复"。（旧 OIDC_SESSION_TTL=15m 且未配置新键
+	// 时会在这里失败，运维必须显式配置 OIDC_SESSION_IDLE_TTL/OIDC_SESSION_ABSOLUTE_TTL。）
+	if c.OIDCSessionIdleTTL < 60*time.Second || c.OIDCSessionIdleTTL > 24*time.Hour {
+		return fmt.Errorf("OIDC_SESSION_IDLE_TTL must be between 60s and 24h")
+	}
+	if c.OIDCSessionAbsoluteTTL <= c.OIDCSessionIdleTTL {
+		return fmt.Errorf("OIDC_SESSION_ABSOLUTE_TTL must be greater than OIDC_SESSION_IDLE_TTL")
+	}
+	if c.OIDCAuthorizationRefresh <= 0 || c.OIDCAuthorizationRefresh >= c.OIDCSessionAbsoluteTTL || c.OIDCAuthorizationMaxStale < c.OIDCAuthorizationRefresh || c.OIDCAuthorizationMaxStale >= c.OIDCSessionAbsoluteTTL {
+		return fmt.Errorf("OIDC refresh and maximum stale intervals must be positive, ordered and shorter than absolute session TTL")
 	}
 	if c.OIDCAuthorizationTimeout <= 0 || c.OIDCAuthorizationTimeout > 30*time.Second {
 		return fmt.Errorf("OIDC_AUTHORIZATION_TIMEOUT must be between 1ns and 30s")
@@ -372,20 +459,30 @@ func (c Config) validate() error {
 		}
 	}
 	if c.NotificationEnabled {
+		missing := make([]string, 0, 3)
 		for name, value := range map[string]string{
 			"PLATFORM_NOTIFICATION_URL":           c.PlatformNotificationURL,
 			"PLATFORM_NOTIFICATION_CLIENT_ID":     c.PlatformNotificationClientID,
 			"PLATFORM_NOTIFICATION_CLIENT_SECRET": c.PlatformNotificationSecret,
 		} {
 			if strings.TrimSpace(value) == "" || placeholder(value) {
-				return fmt.Errorf("%s is required when NOTIFICATION_ENABLED=true", name)
+				missing = append(missing, name)
 			}
 		}
-		if !validHTTPURL(c.PlatformNotificationURL) {
-			return fmt.Errorf("PLATFORM_NOTIFICATION_URL must be a valid HTTP(S) URL")
-		}
-		if c.PlatformNotificationScope != "" && c.PlatformNotificationScope != "notification.ingest" {
-			return fmt.Errorf("PLATFORM_NOTIFICATION_SCOPE must be notification.ingest")
+		if len(missing) > 0 {
+			// BIZ-XAPI-10：通知目的地缺失不阻断非生产启动（启动 WARN + /readyz degraded +
+			// 本地 outbox 积压告警）；生产仍失败关闭，避免“已声明启用但永远不投递”。
+			if c.ProductionEnvironment {
+				sort.Strings(missing)
+				return fmt.Errorf("%s is required when NOTIFICATION_ENABLED=true in production", strings.Join(missing, ", "))
+			}
+		} else {
+			if !validHTTPURL(c.PlatformNotificationURL) {
+				return fmt.Errorf("PLATFORM_NOTIFICATION_URL must be a valid HTTP(S) URL")
+			}
+			if c.PlatformNotificationScope != "" && c.PlatformNotificationScope != "notification.ingest" {
+				return fmt.Errorf("PLATFORM_NOTIFICATION_SCOPE must be notification.ingest")
+			}
 		}
 	}
 	if c.ContractIntegrationRequireBearer {
@@ -438,8 +535,8 @@ func (c Config) validate() error {
 		if !validHTTPURL(c.FileGatewayBaseURL) {
 			return fmt.Errorf("FILE_GATEWAY_BASE_URL must be a valid HTTP(S) URL")
 		}
-		if c.FileGatewayScope != "platform:file:upload platform:file:bind" {
-			return fmt.Errorf("FILE_GATEWAY_SCOPE must be platform:file:upload platform:file:bind")
+		if c.FileGatewayScope != "platform:file:upload platform:file:bind platform:file:download" {
+			return fmt.Errorf("FILE_GATEWAY_SCOPE must be platform:file:upload platform:file:bind platform:file:download")
 		}
 	}
 	if c.DashboardMachineRequireBearer {
@@ -465,7 +562,13 @@ func (c Config) validate() error {
 		return fmt.Errorf("DASHBOARD_MACHINE_REQUIRE_BEARER must be true when DASHBOARD_MACHINE_ENABLED=true")
 	}
 	if c.SettlementReferenceEnabled {
-		for name, value := range map[string]string{"CLIENT_ID": c.SettlementReferenceClientID, "AUDIENCE": c.SettlementReferenceAudience, "ISSUER": c.SettlementReferenceIssuer, "PUBLIC_KEY_PATH": c.SettlementReferencePublicKeyPath, "CALLER_ENVIRONMENT_CODE": c.SettlementReferenceCallerEnv} {
+		// ALLOW_ANY_CLIENT=true 时不再固定结算 client_id：项目按平台应用、环境与
+		// settlement.project_reference.read scope 授权验签，其余信任绑定仍必须完整。
+		required := map[string]string{"AUDIENCE": c.SettlementReferenceAudience, "ISSUER": c.SettlementReferenceIssuer, "PUBLIC_KEY_PATH": c.SettlementReferencePublicKeyPath, "CALLER_ENVIRONMENT_CODE": c.SettlementReferenceCallerEnv}
+		if !c.SettlementReferenceAllowAnyClient {
+			required["CLIENT_ID"] = c.SettlementReferenceClientID
+		}
+		for name, value := range required {
 			if strings.TrimSpace(value) == "" || placeholder(value) {
 				return fmt.Errorf("SETTLEMENT_REFERENCE_%s is required when reference integration is enabled", name)
 			}
@@ -540,6 +643,102 @@ func encryptionKey(key string) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("%s must be base64 encoding of exactly 32 bytes", key)
+}
+
+// ResolveAuditRequired 解析审计目的地是否必开（BIZ-XAPI-10）。
+// 参数：explicitProject 为新键 PROJECT_AUDIT_REQUIRED，explicitPlatform 为兼容既有
+// PLATFORM_AUDIT_REQUIRED，appEnv 为 APP_ENV，environmentCode 为 PLATFORM_ENVIRONMENT_CODE。
+// 返回值：生效判定；显式值非法时返回错误（失败关闭）。
+// 判定顺序：新键 > 旧键 > APP_ENV=production > 生产环境编码。兼容旧键是为了不改变
+// 既有部署的默认语义；新部署应使用 PROJECT_AUDIT_REQUIRED。
+func ResolveAuditRequired(explicitProject, explicitPlatform, appEnv, environmentCode string) (bool, error) {
+	for _, item := range []struct{ name, value string }{
+		{"PROJECT_AUDIT_REQUIRED", explicitProject},
+		{"PLATFORM_AUDIT_REQUIRED", explicitPlatform},
+	} {
+		if raw := strings.TrimSpace(item.value); raw != "" {
+			required, err := strconv.ParseBool(raw)
+			if err != nil {
+				return false, fmt.Errorf("%s: %w", item.name, err)
+			}
+			return required, nil
+		}
+	}
+	if env := strings.TrimSpace(appEnv); env != "" {
+		return strings.EqualFold(env, "production"), nil
+	}
+	return isProductionEnvironmentCode(environmentCode), nil
+}
+
+// AuditRequiredFromEnvironment 是中间件与启动装配共用的判定入口。
+// 参数：无，从进程环境读取开关与生产特征。
+// 返回值：生效判定；非法显式值按失败关闭处理（true）。
+func AuditRequiredFromEnvironment() bool {
+	required, err := ResolveAuditRequired(
+		os.Getenv("PROJECT_AUDIT_REQUIRED"),
+		os.Getenv("PLATFORM_AUDIT_REQUIRED"),
+		os.Getenv("APP_ENV"),
+		os.Getenv("PLATFORM_ENVIRONMENT_CODE"),
+	)
+	if err != nil {
+		return true
+	}
+	return required
+}
+
+// IsProduction 判定当前进程是否生产环境：APP_ENV 优先，其次平台环境编码。
+func IsProduction(appEnv, environmentCode string) bool {
+	if env := strings.TrimSpace(appEnv); env != "" {
+		return strings.EqualFold(env, "production")
+	}
+	return isProductionEnvironmentCode(environmentCode)
+}
+
+// isProductionEnvironmentCode 按平台环境编码判断生产：兼容 prod 与 production。
+func isProductionEnvironmentCode(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "prod", "production":
+		return true
+	default:
+		return false
+	}
+}
+
+// IntegrationDestinationInput 是启动期审计/通知目的地检查的只读输入。
+type IntegrationDestinationInput struct {
+	AuditRequired          bool
+	AuditConfigured        bool
+	NotificationEnabled    bool
+	NotificationConfigured bool
+	Production             bool
+}
+
+// IntegrationDestinationDecision 是分级策略结果（BIZ-XAPI-10）：
+// 审计 required 缺失为致命；通知缺失只在生产致命，非生产降级告警。
+type IntegrationDestinationDecision struct {
+	AuditMissing         bool
+	AuditFatal           bool
+	NotificationMissing  bool
+	NotificationFatal    bool
+	DegradedDestinations []string
+}
+
+// DecideIntegrationDestinations 把“目的地是否配置”翻译为启动策略。
+// 参数：in 为开关、配置完整性与生产标记。
+// 返回值：致命/降级项；供 main 决定 os.Exit(1) 或 WARN。
+func DecideIntegrationDestinations(in IntegrationDestinationInput) IntegrationDestinationDecision {
+	decision := IntegrationDestinationDecision{}
+	if !in.AuditConfigured {
+		decision.AuditMissing = true
+		decision.AuditFatal = in.AuditRequired
+		decision.DegradedDestinations = append(decision.DegradedDestinations, "PLATFORM_AUDIT")
+	}
+	if in.NotificationEnabled && !in.NotificationConfigured {
+		decision.NotificationMissing = true
+		decision.NotificationFatal = in.Production
+		decision.DegradedDestinations = append(decision.DegradedDestinations, "PLATFORM_NOTIFICATION")
+	}
+	return decision
 }
 
 func placeholder(value string) bool {

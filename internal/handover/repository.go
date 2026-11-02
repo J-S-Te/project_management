@@ -245,10 +245,12 @@ func (repository *GORMRepository) TransferOwnership(ctx context.Context, in Tran
 	return outcome, nil
 }
 
-// writeHandoverAudit 记录离职交接对项目责任的变更。
-// 交接由平台交接批次驱动（机器主体），但必须能追溯到原负责人、承接人与批次。
+// writeHandoverAudit 记录离职交接对责任资源的变更（项目与服务项同一口径）。
+// 交接由平台交接批次驱动（机器主体），但必须能追溯到被改派的具体资源、操作者与来源；
+// 实体标识沿用 TransferInput.ResourceType（project / service_item），
+// 前后负责人、批次与幂等键由同一事务内的回执 pm_handover_receipt 承载。
 func writeHandoverAudit(tx *gorm.DB, in TransferInput) error {
-	if in.ResourceType != ResourceProject {
+	if in.ResourceType != ResourceProject && in.ResourceType != ResourceServiceItem {
 		return nil
 	}
 	meta := auditctx.FromContext(tx.Statement.Context)
@@ -261,8 +263,9 @@ func writeHandoverAudit(tx *gorm.DB, in TransferInput) error {
 		ID: ulid.Make().String(), TenantID: in.TenantID, EventID: ulid.Make().String(),
 		ActorID: &actor, ActorType: "SYSTEM",
 		Action:       "PROJECT_MANAGEMENT:HANDOVER_TRANSFERRED",
-		ResourceType: "project", ResourceID: in.ResourceID,
-		LoginIP: auditIP(meta.LoginIP), ClientIP: auditIP(meta.ClientIP), IPSource: auditSource(meta.IPSource),
+		ResourceType: in.ResourceType, ResourceID: in.ResourceID,
+		RequestID: auditRequestID(meta.RequestID),
+		LoginIP:   auditIP(meta.LoginIP), ClientIP: auditIP(meta.ClientIP), IPSource: auditSource(meta.IPSource),
 		Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: now, CreatedAt: now,
 	}).Error
 }
@@ -277,6 +280,7 @@ type handoverAuditRow struct {
 	Action         string    `gorm:"column:action"`
 	ResourceType   string    `gorm:"column:resource_type"`
 	ResourceID     string    `gorm:"column:resource_id"`
+	RequestID      *string   `gorm:"column:request_id"`
 	LoginIP        []byte    `gorm:"column:login_ip"`
 	ClientIP       []byte    `gorm:"column:client_ip"`
 	IPSource       string    `gorm:"column:ip_source"`
@@ -287,6 +291,15 @@ type handoverAuditRow struct {
 }
 
 func (handoverAuditRow) TableName() string { return "prj_audit_outbox" }
+
+// auditRequestID 把请求关联号写进 prj_audit_outbox.request_id；
+// 空值保持 NULL，由投递器回退到平台生成的 request_id。
+func auditRequestID(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
 
 // auditIP 把文本地址转换为二进制列；空值或非法值保持 NULL。
 func auditIP(value string) []byte {

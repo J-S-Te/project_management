@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
@@ -20,6 +21,11 @@ type NotificationOutboxRepository interface {
 type NotificationOutboxEnqueuer interface {
 	EnqueueNotification(context.Context, string, domain.NotificationMessage) (bool, error)
 }
+
+// ErrNotificationDestinationUnavailable 表示已启用通知投递但发布器未配置（BIZ-XAPI-10）。
+// 事务内的 outbox 行仍会保留为本地积压，但投递循环必须显式失败并告警，
+// 不能返回 (0, nil) 把“永远不投递”伪装成“没有待办”。
+var ErrNotificationDestinationUnavailable = errors.New("notification destination is not configured; local outbox backlog remains pending")
 
 // enqueueBusinessNotification 是未附着于同一交付事件事务的通知
 // 的唯一生产路径。保持该边界明确，防止未来功能
@@ -73,7 +79,9 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 	if unparsable > 0 && s.Logger != nil {
 		s.Logger.Warn("sla scan skipped items with unparsable planned_end", "tenant_id", tenantID, "skipped", unparsable)
 	}
-	day := now.UTC().Format("2006-01-02")
+	// SLA 每日去重键按北京业务日：否则北京时间 00:00–08:00 的扫描会被当成“昨天”，
+	// 同一天对同一服务项再发一次提醒。
+	day := businessclock.DateKey(now)
 	published := 0
 	for _, item := range items {
 		recipients := s.itemAssignees(ctx, filter.TenantID, item.ID)
@@ -237,7 +245,13 @@ func (s *Service) DispatchNotificationOutbox(ctx context.Context, tenantID, work
 		}
 	}
 	if s.Notifications == nil {
-		return 0, nil
+		// BIZ-XAPI-10：缺失通知目的地时不再静默 return 0。本地 outbox 行仍在积压，
+		// 这里留下 WARN 并返回可识别错误，让后台活动重试/告警与 /readyz degraded 可见。
+		if s.Logger != nil {
+			s.Logger.Warn("notification destination is not configured; local outbox backlog remains pending",
+				"tenant_id", tenantID)
+		}
+		return 0, fmt.Errorf("%w: tenant %s", ErrNotificationDestinationUnavailable, tenantID)
 	}
 	if limit <= 0 || limit > 50 {
 		limit = 50

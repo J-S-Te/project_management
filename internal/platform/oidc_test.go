@@ -173,9 +173,15 @@ func TestAuthorizationContextClientDecodesMetadata(t *testing.T) {
 type fakeOIDCStore struct {
 	login      LoginTransaction
 	session    StoredOIDCSession
+	created    StoredOIDCSession
+	calls      int
 	revoked    bool
 	revokedAll bool
 	updated    bool
+	touched    bool
+	touchErr   error
+	touchNow   time.Time
+	touchAt    time.Time
 }
 
 func (s *fakeOIDCStore) SaveLoginTransaction(_ context.Context, value LoginTransaction) error {
@@ -185,7 +191,10 @@ func (s *fakeOIDCStore) SaveLoginTransaction(_ context.Context, value LoginTrans
 func (s *fakeOIDCStore) ConsumeLoginTransaction(context.Context, []byte, time.Time) (LoginTransaction, error) {
 	return LoginTransaction{}, errOIDCRecordNotFound
 }
-func (s *fakeOIDCStore) CreateSession(context.Context, StoredOIDCSession) error { return nil }
+func (s *fakeOIDCStore) CreateSession(_ context.Context, value StoredOIDCSession) error {
+	s.created, s.calls = value, s.calls+1
+	return nil
+}
 func (s *fakeOIDCStore) FindSession(context.Context, []byte, time.Time) (StoredOIDCSession, error) {
 	if s.revoked || s.revokedAll {
 		return StoredOIDCSession{}, errOIDCRecordNotFound
@@ -194,6 +203,16 @@ func (s *fakeOIDCStore) FindSession(context.Context, []byte, time.Time) (StoredO
 }
 func (s *fakeOIDCStore) UpdateSession(_ context.Context, value StoredOIDCSession, _ time.Time) error {
 	s.updated, s.session = true, value
+	return nil
+}
+func (s *fakeOIDCStore) TouchSessionActivity(_ context.Context, _ []byte, now, idleCutoff time.Time) error {
+	if s.touchErr != nil {
+		return s.touchErr
+	}
+	s.touched = true
+	s.touchNow, s.touchAt = now, idleCutoff
+	s.session.LastInteractiveAt = now
+	s.session.LastSeenAt = now
 	return nil
 }
 func (s *fakeOIDCStore) RevokeSession(context.Context, []byte, time.Time) error {
@@ -212,14 +231,15 @@ func storedPrincipal(t *testing.T, now time.Time) (StoredOIDCSession, Principal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return StoredOIDCSession{TenantID: "tenant-1", IdentityID: "identity-1", PrincipalJSON: encoded, AuthorizationCheckedAt: now.Add(-2 * time.Minute), TokenExpiresAt: now.Add(time.Hour), SessionExpiresAt: now.Add(time.Hour)}, principal
+	activeAt := now.Add(-2 * time.Minute)
+	return StoredOIDCSession{TenantID: "tenant-1", IdentityID: "identity-1", PrincipalJSON: encoded, AuthorizationCheckedAt: activeAt, TokenExpiresAt: now.Add(time.Hour), SessionExpiresAt: now.Add(time.Hour), CreatedAt: activeAt, LastSeenAt: activeAt, LastInteractiveAt: activeAt}, principal
 }
 
 func TestAuthorizationDenialRevokesAllIdentitySessions(t *testing.T) {
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	stored, _ := storedPrincipal(t, now)
 	store := &fakeOIDCStore{session: stored}
-	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute}, store: store, now: func() time.Time { return now }, refreshAuthorization: func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error) {
+	auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", SessionIdleTTL: 30 * time.Minute, AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute}, store: store, now: func() time.Time { return now }, refreshAuthorization: func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error) {
 		return StoredOIDCSession{}, Principal{}, ErrAuthorizationDenied
 	}}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
@@ -240,7 +260,7 @@ func TestAuthorizationRefreshPersistsNewRevisionAcrossAuthenticatorRestart(t *te
 		t.Fatal(err)
 	}
 	first := &OIDCAuthenticator{
-		options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute},
+		options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", SessionIdleTTL: 30 * time.Minute, AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute},
 		store:   store, now: func() time.Time { return now },
 		refreshAuthorization: func(_ context.Context, value StoredOIDCSession, _ time.Time, _ string) (StoredOIDCSession, Principal, error) {
 			value.PrincipalJSON = updatedJSON
@@ -269,7 +289,7 @@ func TestRevocationIsVisibleToAnotherAuthenticatorInstance(t *testing.T) {
 	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
 	stored, _ := storedPrincipal(t, now)
 	store := &fakeOIDCStore{session: stored}
-	first := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session"}, store: store, now: func() time.Time { return now }}
+	first := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", SessionIdleTTL: 30 * time.Minute}, store: store, now: func() time.Time { return now }}
 	second := &OIDCAuthenticator{options: first.options, store: store, now: first.now}
 	if err := first.store.RevokeSessionsForIdentity(context.Background(), "tenant-1", "identity-1", now); err != nil {
 		t.Fatal(err)
@@ -287,7 +307,7 @@ func TestAuthorizationOutageAllowsOnlyFreshReadSnapshot(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
 			store := &fakeOIDCStore{session: stored}
-			auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute}, store: store, now: func() time.Time { return now }, refreshAuthorization: func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error) {
+			auth := &OIDCAuthenticator{options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", SessionIdleTTL: 30 * time.Minute, AuthorizationRefreshInterval: time.Minute, AuthorizationMaxStale: 5 * time.Minute}, store: store, now: func() time.Time { return now }, refreshAuthorization: func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error) {
 				return StoredOIDCSession{}, Principal{}, ErrAuthorizationUnavailable
 			}}
 			request := httptest.NewRequest(method, "/api/v1/projects", nil)
@@ -365,6 +385,247 @@ func TestLoginForwardsForcedLoginPrompt(t *testing.T) {
 	}
 	if got := location.Query().Get("kc_idp_hint"); got != "basic-platform" {
 		t.Fatalf("kc_idp_hint = %q, want basic-platform", got)
+	}
+}
+
+// sessionTestAuthenticator 构造启用空闲/绝对双期限的认证器；测试用固定时钟。
+func sessionTestAuthenticator(store *fakeOIDCStore, now time.Time, idle, absolute time.Duration) *OIDCAuthenticator {
+	return &OIDCAuthenticator{
+		options: OIDCOptions{TenantID: "tenant-1", SessionCookieName: "project_session", SessionIdleTTL: idle, SessionAbsoluteTTL: absolute, AuthorizationRefreshInterval: time.Hour, AuthorizationMaxStale: 5 * time.Minute},
+		store:   store,
+		now:     func() time.Time { return now },
+	}
+}
+
+// TestCreateSessionUsesUnifiedIdleAndAbsoluteDeadlines 覆盖"新建会话"契约：
+// 绝对到期 = 登录时刻 + 绝对期限；last_interactive_at 立即生效；Cookie 与记录使用同一到期。
+func TestCreateSessionUsesUnifiedIdleAndAbsoluteDeadlines(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	store := &fakeOIDCStore{}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	stored := StoredOIDCSession{TenantID: "tenant-1", IdentityID: "identity-1", SessionIDHash: tokenDigest("raw-session")}
+	expiresAt, err := auth.createSession(context.Background(), now, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expiresAt.Equal(now.Add(8*time.Hour)) || !store.created.SessionExpiresAt.Equal(now.Add(8*time.Hour)) {
+		t.Fatalf("absolute expiry = %s / stored %s, want %s", expiresAt, store.created.SessionExpiresAt, now.Add(8*time.Hour))
+	}
+	if !store.created.CreatedAt.Equal(now) || !store.created.LastSeenAt.Equal(now) || !store.created.LastInteractiveAt.Equal(now) {
+		t.Fatalf("new session timestamps = %+v, want created/last_seen/last_interactive at login time", store.created)
+	}
+}
+
+// TestSessionIdleExpiryRejectsAuthentication 覆盖空闲到期：即使 Cookie 与绝对期限仍有效，
+// 长时间无显式交互的会话也必须拒绝，且普通请求不得写入续期。
+func TestSessionIdleExpiryRejectsAuthentication(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.LastInteractiveAt = now.Add(-31 * time.Minute)
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	if _, err := auth.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("idle-expired session error = %v, want unauthenticated", err)
+	}
+	if store.updated {
+		t.Fatal("idle-expired session must not be refreshed or renewed")
+	}
+}
+
+// TestSessionAbsoluteExpiryRejectsAuthenticationAndActivity 覆盖绝对到期：
+// 即使最近有交互也不能续期；显式活动接口同样拒绝，不复活已过期会话。
+func TestSessionAbsoluteExpiryRejectsAuthenticationAndActivity(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.SessionExpiresAt = now.Add(-time.Minute)
+	stored.LastInteractiveAt = now
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	if _, err := auth.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("absolute-expired authenticate error = %v", err)
+	}
+	if _, err := auth.TouchSessionActivity(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("absolute-expired activity error = %v", err)
+	}
+	if store.touched || store.updated {
+		t.Fatalf("expired session was renewed: touched=%v updated=%v", store.touched, store.updated)
+	}
+}
+
+// TestOrdinaryRequestUpdatesLastSeenOnly 覆盖"普通业务请求只更新 last_seen_at"：
+// last_interactive_at 必须保持原值，防止任意后台轮询把空闲期限变成永不过期。
+func TestOrdinaryRequestUpdatesLastSeenOnly(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, expected := storedPrincipal(t, now)
+	interactiveAt := now.Add(-2 * time.Minute)
+	stored.LastInteractiveAt = interactiveAt
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	principal, err := auth.Authenticate(context.Background(), request)
+	if err != nil || principal.IdentityID != expected.IdentityID || !store.updated {
+		t.Fatalf("principal=%+v error=%v updated=%v", principal, err, store.updated)
+	}
+	if !store.session.LastSeenAt.Equal(now) {
+		t.Fatalf("last_seen_at = %s, want %s", store.session.LastSeenAt, now)
+	}
+	if !store.session.LastInteractiveAt.Equal(interactiveAt) {
+		t.Fatalf("ordinary request advanced last_interactive_at: %s", store.session.LastInteractiveAt)
+	}
+}
+
+// TestTouchSessionActivityRenewsIdleButNotAbsolute 覆盖活动续期：显式活动把空闲期限
+// 推后 30 分钟，但绝对到期不变；越过绝对期限后活动接口拒绝。
+func TestTouchSessionActivityRenewsIdleButNotAbsolute(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.CreatedAt = now.Add(-30 * time.Minute)
+	stored.LastInteractiveAt = now.Add(-29 * time.Minute)
+	absoluteExpiry := now.Add(time.Hour)
+	stored.SessionExpiresAt = absoluteExpiry
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	status, err := auth.TouchSessionActivity(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.touched || !store.touchNow.Equal(now) || !store.touchAt.Equal(now.Add(-30*time.Minute)) {
+		t.Fatalf("activity update = touched %v now %s idleCutoff %s", store.touched, store.touchNow, store.touchAt)
+	}
+	if status.IdleTimeout != 30*time.Minute || status.IdleRemaining != 30*time.Minute {
+		t.Fatalf("activity status = %+v, want idle 30m and remaining 30m (absolute 1h away)", status)
+	}
+	if !store.session.LastInteractiveAt.Equal(now) || !store.session.SessionExpiresAt.Equal(absoluteExpiry) {
+		t.Fatalf("activity renewal changed absolute expiry or missed interactive time: %+v", store.session)
+	}
+
+	// 31 分钟后再来：空闲期限已再次到期，必须 401；绝对到期也未因活动而延长。
+	later := now.Add(31 * time.Minute)
+	laterAuth := sessionTestAuthenticator(store, later, 30*time.Minute, 8*time.Hour)
+	laterRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	laterRequest.AddCookie(laterAuth.cookie("session-1", absoluteExpiry))
+	if _, err := laterAuth.TouchSessionActivity(context.Background(), laterRequest); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("activity after renewed idle window error = %v", err)
+	}
+
+	// 越过绝对期限：空闲仍在窗口内也不算有效，且不能被续期。
+	atAbsolute := now.Add(2 * time.Hour)
+	absoluteAuth := sessionTestAuthenticator(store, atAbsolute, 2*time.Hour, 8*time.Hour)
+	absoluteRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	absoluteRequest.AddCookie(absoluteAuth.cookie("session-1", now.Add(3*time.Hour)))
+	store.session.LastInteractiveAt = atAbsolute.Add(-time.Minute)
+	if _, err := absoluteAuth.TouchSessionActivity(context.Background(), absoluteRequest); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("activity past absolute deadline error = %v", err)
+	}
+}
+
+// TestLegacySessionWithoutInteractiveTimestampUsesCreatedAt 覆盖旧存量行兼容：
+// last_interactive_at 为 NULL 时按 created_at 计算空闲期限，升级不锁死在线会话。
+func TestLegacySessionWithoutInteractiveTimestampUsesCreatedAt(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.LastInteractiveAt = time.Time{}
+	stored.CreatedAt = now.Add(-10 * time.Minute)
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	if _, err := auth.Authenticate(context.Background(), request); err != nil {
+		t.Fatalf("legacy session rejected: %v", err)
+	}
+	status, err := auth.SessionIdleStatus(context.Background(), request)
+	if err != nil || status.IdleRemaining != 20*time.Minute {
+		t.Fatalf("legacy idle remaining = %s error = %v, want 20m", status.IdleRemaining, err)
+	}
+
+	// 同一旧行超过 30 分钟无交互后按 created_at 判为到期。
+	stored.CreatedAt = now.Add(-31 * time.Minute)
+	store.session = stored
+	if _, err := auth.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("legacy idle-expired session error = %v", err)
+	}
+}
+
+// TestSessionIdleStatusUsesEarliestDeadline 覆盖 /auth/me 剩余时间：取空闲剩余与
+// 绝对剩余的最小值，非负，不推进交互时间。
+func TestSessionIdleStatusUsesEarliestDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	stored.LastInteractiveAt = now
+	stored.SessionExpiresAt = now.Add(10 * time.Minute)
+	store := &fakeOIDCStore{session: stored}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	status, err := auth.SessionIdleStatus(context.Background(), request)
+	if err != nil || status.IdleTimeout != 30*time.Minute || status.IdleRemaining != 10*time.Minute {
+		t.Fatalf("status = %+v error = %v, want remaining 10m (absolute sooner)", status, err)
+	}
+	if store.touched {
+		t.Fatal("/auth/me must not renew the idle deadline")
+	}
+}
+
+// TestTouchSessionActivityPropagatesStoreFailure 覆盖存储故障：活动续期不能把数据库
+// 故障误报成 401（否则前端会把可用会话当成已退出），交由 HTTP 层返回 503。
+func TestTouchSessionActivityPropagatesStoreFailure(t *testing.T) {
+	now := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	stored, _ := storedPrincipal(t, now)
+	store := &fakeOIDCStore{session: stored, touchErr: errors.New("database unavailable")}
+	auth := sessionTestAuthenticator(store, now, 30*time.Minute, 8*time.Hour)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activity", nil)
+	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
+	if _, err := auth.TouchSessionActivity(context.Background(), request); err == nil || errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("store failure error = %v, want non-authentication error", err)
+	}
+}
+
+// TestOIDCSessionRecordRoundTripsNullableInteractiveTimestamp 覆盖存储映射：
+// 旧行 NULL 映射为零值，新值可往返，写库时用 NULL 表示"未记录"。
+func TestOIDCSessionRecordRoundTripsNullableInteractiveTimestamp(t *testing.T) {
+	legacy := sessionRecord(StoredOIDCSession{SessionIDHash: []byte{1}})
+	if legacy.LastInteractiveAt != nil {
+		t.Fatalf("zero interactive time must persist as NULL, got %v", legacy.LastInteractiveAt)
+	}
+	if got := storedSession(legacy); !got.LastInteractiveAt.IsZero() {
+		t.Fatalf("NULL interactive time = %s, want zero", got.LastInteractiveAt)
+	}
+	interactiveAt := time.Date(2026, 10, 30, 9, 30, 0, 0, time.UTC)
+	record := sessionRecord(StoredOIDCSession{SessionIDHash: []byte{1}, LastInteractiveAt: interactiveAt})
+	if record.LastInteractiveAt == nil || !record.LastInteractiveAt.Equal(interactiveAt) {
+		t.Fatalf("record interactive time = %v, want %s", record.LastInteractiveAt, interactiveAt)
+	}
+	if got := storedSession(record); !got.LastInteractiveAt.Equal(interactiveAt) {
+		t.Fatalf("round-trip interactive time = %s, want %s", got.LastInteractiveAt, interactiveAt)
+	}
+}
+
+// TestNewOIDCAuthenticatorFailsClosedOnInvalidSessionDeadlines 覆盖启动失败关闭：
+// 空闲期限缺失/非正、绝对期限不大于空闲期限时拒绝构造，绝不退化为单一绝对期限。
+func TestNewOIDCAuthenticatorFailsClosedOnInvalidSessionDeadlines(t *testing.T) {
+	store := &fakeOIDCStore{}
+	for _, test := range []struct {
+		name     string
+		idle     time.Duration
+		absolute time.Duration
+	}{
+		{"missing idle", 0, 8 * time.Hour},
+		{"missing absolute", 30 * time.Minute, 0},
+		{"absolute equals idle", 30 * time.Minute, 30 * time.Minute},
+		{"absolute shorter than idle", 2 * time.Hour, time.Hour},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewOIDCAuthenticator(context.Background(), OIDCOptions{SessionIdleTTL: test.idle, SessionAbsoluteTTL: test.absolute}, store, nil); err == nil {
+				t.Fatal("invalid session deadlines were accepted")
+			}
+		})
 	}
 }
 

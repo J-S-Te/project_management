@@ -14,7 +14,6 @@ import (
 
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
-	"github.com/oklog/ulid/v2"
 )
 
 var (
@@ -137,6 +136,12 @@ type Service struct {
 	// Logger 可选。派生事件（自动化/预警）是主事件提交后的 best-effort 副作用：
 	// 写入失败不会回滚主流程，但必须留下可观测痕迹，否则"配置触发了但没落库"无人知晓。
 	Logger *slog.Logger
+	// FieldCheckIn 是现场签到坐标与站点主数据一致性校验的策略（BIZ-PROJECT-05）。
+	// 零值使用默认阈值 1000 米与 REQUIRE_REASON（站点缺失时必须填写偏离原因）。
+	FieldCheckIn FieldCheckInPolicy
+	// FieldEvidenceGate 是现场完成"缺项说明"门禁的强度（BIZ-PROJECT-06）。
+	// 零值等价于 enforce：判定数据不可用或说明与证据矛盾时拒绝完成。
+	FieldEvidenceGate FieldEvidenceGatePolicy
 	// AuditStore 支持管理员检查或重试终态审计投递
 	// 失败。运维端点在其为 nil 时安全拒绝。
 	AuditStore *auditoutbox.GORMStore
@@ -257,6 +262,76 @@ func (s *Service) ListApprovedContracts(ctx context.Context, p platform.Principa
 	return available, nil
 }
 
+const (
+	// approvedContractSearchMaxPages 是搜索时允许的上游页数硬上限：上游游标如果
+	// 不前进或页数无穷，一次请求会变成无界循环，因此必须显式封顶。
+	approvedContractSearchMaxPages = 20
+	// approvedContractSearchPageSize 与合同侧 approved-contract-references 的页上限一致。
+	approvedContractSearchPageSize = 200
+)
+
+// SearchAvailableApprovedContracts 按关键字跨游标页搜索可建项的已审批合同。
+// 参数：ctx 为请求，p 为用户主体，keyword 为可选关键字，afterID 为上游游标，limit 为返回条数上限。
+// 返回值：可用合同、下一页游标（空表示没有更多），或权限、依赖、配置错误。
+//
+// 上游游标接口单页最多 200 条，而"已建项合同"只能在拿到引用后按租户全范围
+// 过滤，因此这里循环拉页直到收满 limit 或上游耗尽；每页都只保留
+// 审批通过 + 普通来源 + 尚未建项的合同。合同依赖失败保持 ErrContractUnavailable（503），
+// 绝不把"读不到合同"降级成"没有可用合同"。翻页游标取最后一条已返回合同的 ID：
+// 与上游 id ASC 游标同序，不会跳过本页剩余条目。
+func (s *Service) SearchAvailableApprovedContracts(ctx context.Context, p platform.Principal, keyword, afterID string, limit int) ([]platform.ApprovedContract, string, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if !mayCreateProject(p) {
+		return nil, "", ErrForbidden
+	}
+	if _, err := authorizeProjectScope(p, "project.create"); err != nil {
+		return nil, "", err
+	}
+	if s.Contracts == nil {
+		return nil, "", ErrContractUnavailable
+	}
+	availableFilter, ok := s.Repo.(AvailableApprovedContractFilter)
+	if !ok {
+		return nil, "", fmt.Errorf("approved contract availability filter is not configured")
+	}
+	keyword = strings.TrimSpace(keyword)
+	cursor := strings.TrimSpace(afterID)
+	items := make([]platform.ApprovedContract, 0, limit)
+	for page := 0; page < approvedContractSearchMaxPages; page++ {
+		references, nextAfterID, err := s.Contracts.ListReferences(ctx, keyword, cursor, approvedContractSearchPageSize)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: %v", ErrContractUnavailable, err)
+		}
+		approved := make([]platform.ApprovedContract, 0, len(references))
+		for _, reference := range references {
+			if reference.ID != "" && reference.ApprovalPassed && platform.NormalProjectContract(reference) {
+				approved = append(approved, reference)
+			}
+		}
+		available, err := availableFilter.FilterUnreferencedApprovedContracts(ctx, p.TenantID, approved)
+		if err != nil {
+			return nil, "", fmt.Errorf("filter approved contracts already linked to projects: %w", err)
+		}
+		// 后置过滤会缩水，因此不能把上游页大小当成本页可选条数：收满 limit 即停，
+		// 下一页游标取最后一条已返回合同的 ID，剩余条目由下一次请求按同一游标续读。
+		for _, item := range available {
+			items = append(items, item)
+			if len(items) >= limit {
+				return items, item.ID, nil
+			}
+		}
+		if nextAfterID == "" || nextAfterID == cursor {
+			return items, "", nil
+		}
+		cursor = nextAfterID
+	}
+	// 达到硬上限仍未收满：返回已收条目与当前游标，让调用方显式继续，
+	// 不静默截断，也不在上游异常时继续空转。
+	return items, cursor, nil
+}
+
 // ListApprovedContractServiceItems 返回单个已审批合同面向项目的
 // 权威服务范围。浏览器不直接调用合同
 // 管理，也不接收合同正文、价格、联系人或文件。
@@ -319,7 +394,7 @@ func (s *Service) populatePendingProjectCreation(ctx context.Context, tenantID s
 	afterID := ""
 	pending := 0
 	for {
-		references, nextAfterID, err := s.Contracts.ListReferences(ctx, afterID, pageSize)
+		references, nextAfterID, err := s.Contracts.ListReferences(ctx, "", afterID, pageSize)
 		if err != nil {
 			s.logPendingProjectCountError(tenantID, err)
 			return
@@ -686,7 +761,8 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 		return input, DuplicateProjectError(existingID)
 	}
 	now := time.Now().UTC()
-	input.ID = "PJ-" + now.Format("2006") + "-" + strings.ToUpper(ulid.Make().String()[20:])
+	// 编号年份按北京业务年：存储时间戳仍是 UTC，只有编号里的年份段用业务日历。
+	input.ID = projectID(now)
 	input.TenantID = p.TenantID
 	input.OwnerIdentityID = p.IdentityID
 	if input.OwnerIdentityID == "" {
@@ -857,6 +933,12 @@ func (s *Service) ConfirmServiceItems(ctx context.Context, p platform.Principal,
 	// 范围变更检测先于确认执行：拆解结果与合同清单不一致时进入补充协议分支并中止本次确认，
 	// 避免"范围变了却直接确认"把差异带进下游。
 	if err := s.CheckScopeChange(ctx, p, filter, ids); err != nil {
+		return nil, err
+	}
+	// BIZ-PROJECT-04：进入补充协议分支的项目必须走受控退出（最近一次拆解调整已把补充
+	// 协议服务目录应用到拆解结果、且范围未再漂移），不允许"再点一次确认"就把
+	// supplement_status 清零。仓储在事务内用同一判定再复核一次。
+	if err := s.verifySupplementExitForConfirm(ctx, filter, ids); err != nil {
 		return nil, err
 	}
 	// 确认拆解是纯事务性行更新，直接走仓储层加锁事务；不再同步等待 Temporal 工作流，

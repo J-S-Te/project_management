@@ -16,7 +16,7 @@ func TestReviewLegacyOriginalContractMustNotBecomeItsOwnSupplement(t *testing.T)
 	project := domain.Project{Contract: "HT-REVIEW-1", CustomerID: "review-customer", Customer: "Review Customer"}
 	contract := platform.ApprovedContract{ID: "review-contract-id", Number: "HT-REVIEW-1", CustomerID: "review-customer", CustomerName: "Review Customer", Status: "active", ApprovalPassed: true}
 	service := &Service{Contracts: supplementContractVerifier{contract: contract}}
-	if err := service.verifyApprovedSupplementContract(context.Background(), project, contract.ID); err == nil {
+	if _, err := service.verifyApprovedSupplementContract(context.Background(), project, contract.ID); err == nil {
 		t.Fatal("the original contract was accepted as a supplement via its canonical id")
 	}
 }
