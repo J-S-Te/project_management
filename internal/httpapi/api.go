@@ -201,6 +201,13 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		router.GET("/logged-out", loggedOut)
 	}
 	api := router.Group("/api/v1")
+	if lifecycle, ok := identity.(interface {
+		SessionState(http.ResponseWriter, *http.Request)
+		Activity(http.ResponseWriter, *http.Request)
+	}); ok {
+		router.GET("/auth/session", func(c *gin.Context) { lifecycle.SessionState(c.Writer, c.Request) })
+		router.POST("/auth/activity", func(c *gin.Context) { lifecycle.Activity(c.Writer, c.Request) })
+	}
 	// SEC-D11：cookie 会话写请求必须通过同源 Origin 校验（失败关闭）；
 	// 放在 auditWrites 之后，使跨站拒绝尝试同样进入审计。
 	api.Use(h.authenticate(), h.auditWrites(), h.requireSameOriginWrite())

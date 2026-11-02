@@ -12,7 +12,9 @@ import (
 )
 
 type Config struct {
-	HTTPAddress string
+	CentralSessionEnabled       bool
+	CentralSessionPublicBaseURL string
+	HTTPAddress                 string
 	// TrustedProxies 是唯一允许采信 X-Real-IP / X-Forwarded-For 的直接对端集合。
 	TrustedProxies                 []string
 	MySQLDSN                       string
@@ -238,6 +240,11 @@ func Load() (Config, error) {
 	if c.OIDCSessionAbsoluteTTL, err = duration("OIDC_SESSION_ABSOLUTE_TTL", absoluteFallback); err != nil {
 		return c, err
 	}
+	c.CentralSessionEnabled, err = strconv.ParseBool(env("CENTRAL_SESSION_ENABLED", "false"))
+	if err != nil {
+		return c, fmt.Errorf("CENTRAL_SESSION_ENABLED: %w", err)
+	}
+	c.CentralSessionPublicBaseURL = strings.TrimSpace(os.Getenv("CENTRAL_SESSION_PUBLIC_BASE_URL"))
 	if c.OIDCAuthorizationRefresh, err = duration("OIDC_AUTHORIZATION_REFRESH_INTERVAL", time.Minute); err != nil {
 		return c, err
 	}

@@ -19,17 +19,21 @@ var errOIDCRecordNotFound = errors.New("OIDC record not found")
 var errOIDCBackchannelReplay = errors.New("OIDC back-channel logout token was already consumed")
 
 type LoginTransaction struct {
-	StateHash          []byte
-	TenantID           string
-	NonceCipher        []byte
-	CodeVerifierCipher []byte
-	ReturnPath         string
-	ExpiresAt          time.Time
-	ConsumedAt         *time.Time
-	CreatedAt          time.Time
+	CentralTicketCipher []byte
+	ForceLogin          bool
+	StateHash           []byte
+	TenantID            string
+	NonceCipher         []byte
+	CodeVerifierCipher  []byte
+	ReturnPath          string
+	ExpiresAt           time.Time
+	ConsumedAt          *time.Time
+	CreatedAt           time.Time
 }
 
 type StoredOIDCSession struct {
+	CentralBindingCipher   []byte
+	CentralSessionID       string
 	SessionIDHash          []byte
 	TenantID               string
 	IdentityID             string
@@ -66,19 +70,23 @@ type OIDCStore interface {
 }
 
 type oidcLoginRecord struct {
-	StateHash          []byte `gorm:"column:state_hash;primaryKey;type:binary(32)"`
-	TenantID           string `gorm:"column:tenant_id;size:64;not null;index"`
-	NonceCipher        []byte `gorm:"column:nonce_ciphertext;type:varbinary(512);not null"`
-	CodeVerifierCipher []byte `gorm:"column:code_verifier_ciphertext;type:varbinary(1024);not null"`
-	ReturnPath         string `gorm:"column:return_path;size:512;not null"`
-	ExpiresAt          time.Time
-	ConsumedAt         *time.Time
-	CreatedAt          time.Time
+	CentralTicketCipher []byte
+	ForceLogin          bool
+	StateHash           []byte `gorm:"column:state_hash;primaryKey;type:binary(32)"`
+	TenantID            string `gorm:"column:tenant_id;size:64;not null;index"`
+	NonceCipher         []byte `gorm:"column:nonce_ciphertext;type:varbinary(512);not null"`
+	CodeVerifierCipher  []byte `gorm:"column:code_verifier_ciphertext;type:varbinary(1024);not null"`
+	ReturnPath          string `gorm:"column:return_path;size:512;not null"`
+	ExpiresAt           time.Time
+	ConsumedAt          *time.Time
+	CreatedAt           time.Time
 }
 
 func (oidcLoginRecord) TableName() string { return "pm_oidc_login_transaction" }
 
 type oidcSessionRecord struct {
+	CentralBindingCipher   []byte
+	CentralSessionID       string
 	SessionIDHash          []byte `gorm:"column:session_id_hash;primaryKey;type:binary(32)"`
 	TenantID               string `gorm:"column:tenant_id;size:64;not null;index"`
 	IdentityID             string `gorm:"column:identity_id;size:128;not null;index"`
@@ -106,11 +114,24 @@ type GORMOIDCStore struct{ db *gorm.DB }
 
 func NewGORMOIDCStore(db *gorm.DB) *GORMOIDCStore { return &GORMOIDCStore{db: db} }
 
+// SaveLoginTransaction 持久化一次性登录事务及受控桥接材料。
+// 参数：ctx为调用上下文与取消边界。
+//
+//	value为待处理的本地持久记录。
+//
+// 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (s *GORMOIDCStore) SaveLoginTransaction(ctx context.Context, value LoginTransaction) error {
-	record := oidcLoginRecord{StateHash: value.StateHash, TenantID: value.TenantID, NonceCipher: value.NonceCipher, CodeVerifierCipher: value.CodeVerifierCipher, ReturnPath: value.ReturnPath, ExpiresAt: value.ExpiresAt, ConsumedAt: value.ConsumedAt, CreatedAt: value.CreatedAt}
+	record := oidcLoginRecord{CentralTicketCipher: value.CentralTicketCipher, ForceLogin: value.ForceLogin, StateHash: value.StateHash, TenantID: value.TenantID, NonceCipher: value.NonceCipher, CodeVerifierCipher: value.CodeVerifierCipher, ReturnPath: value.ReturnPath, ExpiresAt: value.ExpiresAt, ConsumedAt: value.ConsumedAt, CreatedAt: value.CreatedAt}
 	return s.db.WithContext(ctx).Create(&record).Error
 }
 
+// ConsumeLoginTransaction 原子消费未过期的登录事务，拒绝重复回调。
+// 参数：ctx为调用上下文与取消边界。
+//
+//	hash为随机Cookie或事务材料摘要。
+//	now为本次服务端校验时间。
+//
+// 返回值：匹配的有效持久记录；不存在、失效或存储失败返回错误。
 func (s *GORMOIDCStore) ConsumeLoginTransaction(ctx context.Context, hash []byte, now time.Time) (LoginTransaction, error) {
 	var record oidcLoginRecord
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -134,7 +155,7 @@ func (s *GORMOIDCStore) ConsumeLoginTransaction(ctx context.Context, hash []byte
 	if err != nil {
 		return LoginTransaction{}, err
 	}
-	return LoginTransaction{StateHash: record.StateHash, TenantID: record.TenantID, NonceCipher: record.NonceCipher, CodeVerifierCipher: record.CodeVerifierCipher, ReturnPath: record.ReturnPath, ExpiresAt: record.ExpiresAt, ConsumedAt: record.ConsumedAt, CreatedAt: record.CreatedAt}, nil
+	return LoginTransaction{CentralTicketCipher: record.CentralTicketCipher, ForceLogin: record.ForceLogin, StateHash: record.StateHash, TenantID: record.TenantID, NonceCipher: record.NonceCipher, CodeVerifierCipher: record.CodeVerifierCipher, ReturnPath: record.ReturnPath, ExpiresAt: record.ExpiresAt, ConsumedAt: record.ConsumedAt, CreatedAt: record.CreatedAt}, nil
 }
 
 func (s *GORMOIDCStore) CreateSession(ctx context.Context, value StoredOIDCSession) error {
@@ -242,6 +263,9 @@ func (s *GORMOIDCStore) ConsumeBackchannelLogout(ctx context.Context, value Back
 	})
 }
 
+// sessionRecord 将认证会话转换为完整数据库投影。
+// 参数：value为待处理的本地持久记录。
+// 返回值：包含原始认证时间和服务器端材料的持久投影。
 func sessionRecord(value StoredOIDCSession) oidcSessionRecord {
 	var retry, interactive *time.Time
 	if !value.RefreshRetryAt.IsZero() {
@@ -252,9 +276,12 @@ func sessionRecord(value StoredOIDCSession) oidcSessionRecord {
 		interactiveValue := value.LastInteractiveAt
 		interactive = &interactiveValue
 	}
-	return oidcSessionRecord{SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, OIDCSubject: value.OIDCSubject, OIDCSessionID: value.OIDCSessionID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: value.RevokedAt}
+	return oidcSessionRecord{CentralBindingCipher: value.CentralBindingCipher, CentralSessionID: value.CentralSessionID, SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, OIDCSubject: value.OIDCSubject, OIDCSessionID: value.OIDCSessionID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: value.RevokedAt}
 }
 
+// storedSession 从数据库恢复加密令牌与中央绑定。
+// 参数：record为数据库中的会话投影。
+// 返回值：包含原始认证时间和服务器端材料的持久投影。
 func storedSession(record oidcSessionRecord) StoredOIDCSession {
 	var retry, interactive time.Time
 	if record.RefreshRetryAt != nil {
@@ -263,7 +290,7 @@ func storedSession(record oidcSessionRecord) StoredOIDCSession {
 	if record.LastInteractiveAt != nil {
 		interactive = *record.LastInteractiveAt
 	}
-	return StoredOIDCSession{SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, OIDCSubject: record.OIDCSubject, OIDCSessionID: record.OIDCSessionID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: record.RevokedAt}
+	return StoredOIDCSession{CentralBindingCipher: record.CentralBindingCipher, CentralSessionID: record.CentralSessionID, SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, OIDCSubject: record.OIDCSubject, OIDCSessionID: record.OIDCSessionID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: record.RevokedAt}
 }
 
 type secretCodec struct{ aead cipher.AEAD }

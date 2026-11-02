@@ -14,8 +14,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// 由集成 Agent 显式启用。仅接受名称以 _session_idle_test 结尾的一次性隔离库；
-// 原生运行绝不连接任何数据库（与 migrations 的隔离 MySQL 测试同一门禁风格）。
+// TestOIDCSessionStoreEnforcesIdleAndAbsoluteDeadlinesOnMySQL 验证真实存储的空闲与绝对期限。
+// 参数：t 为测试上下文，DSN 只接受明确的空隔离测试库。
+// 返回值：无；普通请求续活、到期复活或中央列投影异常时失败。
 func TestOIDCSessionStoreEnforcesIdleAndAbsoluteDeadlinesOnMySQL(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("PM_SESSION_IDLE_TEST_DSN"))
 	if dsn == "" {
@@ -43,6 +44,8 @@ func TestOIDCSessionStoreEnforcesIdleAndAbsoluteDeadlinesOnMySQL(t *testing.T) {
 		t.Fatal("refusing to modify a nonempty schema")
 	}
 	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE pm_oidc_session (
+  central_binding_cipher VARBINARY(1024) NULL,
+  central_session_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
   session_id_hash BINARY(32) NOT NULL,
   tenant_id VARCHAR(64) NOT NULL,
   identity_id VARCHAR(128) NOT NULL,

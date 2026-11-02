@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -350,10 +351,11 @@ func TestEmbeddedPenetrationWorkPackageMigrationSeparatesSubjectAndIdempotency(t
 	}
 }
 
-// 会话空闲化迁移只允许新增可空交互时间列：存量行保持 NULL 由代码按 created_at 解释，
-// 不得回填/改写已有会话，也不得触碰绝对到期时间或其它列。
+// TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp 固定交互列的可空兼容语义。
+// 参数：t 为测试上下文。
+// 返回值：无；迁移改写既有行或绝对截止时失败。
 func TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp(t *testing.T) {
-	body, err := Files.ReadFile("000037_pm_oidc_session_idle.sql")
+	body, err := Files.ReadFile("000038_pm_oidc_session_idle.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,11 +375,11 @@ func TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp(t *testing.T) 
 	}
 }
 
-// 审计 outbox 的读取模型按 request_id 建列，000030/000034 都没建：
-// 真实 MySQL 上 Claim 会报 1054 Unknown column，而 sqlite AutoMigrate 测试掩盖了它。
-// 该迁移只补可空列，不回填历史行、不改写入侧已有列。
+// TestAuditOutboxRequestIDMigrationMatchesReadModel 固定审计请求关联列的增量迁移。
+// 参数：t 为测试上下文。
+// 返回值：无；列重复声明、非可空或历史数据改写时失败。
 func TestAuditOutboxRequestIDMigrationMatchesReadModel(t *testing.T) {
-	body, err := Files.ReadFile("000038_pm_audit_request_id.sql")
+	body, err := Files.ReadFile("000039_pm_audit_request_id.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +404,7 @@ func TestAuditOutboxRequestIDMigrationMatchesReadModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() == "000038_pm_audit_request_id.sql" {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() == "000039_pm_audit_request_id.sql" {
 			continue
 		}
 		other, err := Files.ReadFile(entry.Name())
@@ -430,5 +432,30 @@ func TestOfflineFieldEvidenceMigrationAddsReplayAndCaptureBoundaries(t *testing.
 		if !strings.Contains(sql, required) {
 			t.Fatalf("offline field migration missing %q", required)
 		}
+	}
+}
+
+// TestEmbeddedMigrationVersionsRemainUniqueAndContiguous 固定合并后迁移版本连续且不重复。
+// 参数：t 为测试上下文。
+// 返回值：无；版本重复、缺口或命名异常时失败。
+func TestEmbeddedMigrationVersionsRemainUniqueAndContiguous(t *testing.T) {
+	entries, err := Files.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := 1
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(entry.Name(), "_")
+		version, err := strconv.Atoi(prefix)
+		if !ok || err != nil || version != expected {
+			t.Fatalf("migration %s version=%d want=%d err=%v", entry.Name(), version, expected, err)
+		}
+		expected++
+	}
+	if expected != 40 {
+		t.Fatalf("migration count=%d want=39", expected-1)
 	}
 }
