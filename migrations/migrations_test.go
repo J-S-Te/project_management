@@ -7,11 +7,17 @@ import (
 
 func TestDeliveryEffectsMigrationKeepsIntentAndRecoveryBoundaries(t *testing.T) {
 	body, err := Files.ReadFile("000028_delivery_effects_outbox.sql")
-	if err != nil { t.Fatal(err) }
-	for _, expected := range []string{"CREATE TABLE IF NOT EXISTS pm_delivery_effects_outbox", "UNIQUE KEY uq_pm_effects_source (tenant_id, source_event_id)", "payload JSON NOT NULL", "idx_pm_effects_claim", "locked_until", "last_error_summary", "completed_at"} {
-		if !strings.Contains(string(body), expected) { t.Fatalf("missing durable boundary %q", expected) }
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(body), "INSERT INTO") { t.Fatal("historical events must not be retroactively replayed") }
+	for _, expected := range []string{"CREATE TABLE IF NOT EXISTS pm_delivery_effects_outbox", "UNIQUE KEY uq_pm_effects_source (tenant_id, source_event_id)", "payload JSON NOT NULL", "idx_pm_effects_claim", "locked_until", "last_error_summary", "completed_at"} {
+		if !strings.Contains(string(body), expected) {
+			t.Fatalf("missing durable boundary %q", expected)
+		}
+	}
+	if strings.Contains(string(body), "INSERT INTO") {
+		t.Fatal("historical events must not be retroactively replayed")
+	}
 }
 
 func TestIncomeContractCategoriesOnlyAddMissingTenantEntries(t *testing.T) {
@@ -341,6 +347,71 @@ func TestEmbeddedPenetrationWorkPackageMigrationSeparatesSubjectAndIdempotency(t
 	}
 	if strings.Contains(sql, "ALTER TABLE pm_service_item ADD") {
 		t.Fatal("embedded penetration must not be represented by expanding the service-item count")
+	}
+}
+
+// 会话空闲化迁移只允许新增可空交互时间列：存量行保持 NULL 由代码按 created_at 解释，
+// 不得回填/改写已有会话，也不得触碰绝对到期时间或其它列。
+func TestOIDCSessionIdleMigrationAddsNullableInteractiveTimestamp(t *testing.T) {
+	body, err := Files.ReadFile("000037_pm_oidc_session_idle.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"ALTER TABLE pm_oidc_session",
+		"ADD COLUMN last_interactive_at DATETIME(3) NULL",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("idle session migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE ", "DELETE ", "INSERT INTO", "session_expires_at", "DROP ", "MODIFY "} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("idle session migration must not touch existing rows or deadlines: found %q", forbidden)
+		}
+	}
+}
+
+// 审计 outbox 的读取模型按 request_id 建列，000030/000034 都没建：
+// 真实 MySQL 上 Claim 会报 1054 Unknown column，而 sqlite AutoMigrate 测试掩盖了它。
+// 该迁移只补可空列，不回填历史行、不改写入侧已有列。
+func TestAuditOutboxRequestIDMigrationMatchesReadModel(t *testing.T) {
+	body, err := Files.ReadFile("000038_pm_audit_request_id.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"ALTER TABLE prj_audit_outbox",
+		"ADD COLUMN request_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL",
+		"AFTER resource_id",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("audit request_id migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE ", "DELETE ", "INSERT INTO", "DROP ", "MODIFY ", "NOT NULL", "CHANGE "} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("audit request_id migration must stay additive and nullable: found %q", forbidden)
+		}
+	}
+	// 同一列不得被其它迁移重复添加：MySQL 会以 1060 duplicate column 失败。
+	entries, err := Files.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() == "000038_pm_audit_request_id.sql" {
+			continue
+		}
+		other, err := Files.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(other), "prj_audit_outbox") && strings.Contains(string(other), "request_id") {
+			t.Fatalf("%s already declares prj_audit_outbox.request_id", entry.Name())
+		}
 	}
 }
 

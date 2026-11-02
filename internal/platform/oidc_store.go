@@ -46,7 +46,10 @@ type StoredOIDCSession struct {
 	SessionExpiresAt       time.Time
 	CreatedAt              time.Time
 	LastSeenAt             time.Time
-	RevokedAt              *time.Time
+	// LastInteractiveAt 只由显式活动接口推进；为零值表示旧存量行（NULL），
+	// 认证层按 CreatedAt 解释，升级时不会锁死在线会话。
+	LastInteractiveAt time.Time
+	RevokedAt         *time.Time
 }
 
 type OIDCStore interface {
@@ -55,6 +58,9 @@ type OIDCStore interface {
 	CreateSession(context.Context, StoredOIDCSession) error
 	FindSession(context.Context, []byte, time.Time) (StoredOIDCSession, error)
 	UpdateSession(context.Context, StoredOIDCSession, time.Time) error
+	// TouchSessionActivity 在会话仍满足绝对期限与空闲截止（idleCutoff）时推进
+	// last_interactive_at 与 last_seen_at；已过期/撤销会话不得被复活。
+	TouchSessionActivity(context.Context, []byte, time.Time, time.Time) error
 	RevokeSession(context.Context, []byte, time.Time) error
 	RevokeSessionsForIdentity(context.Context, string, string, time.Time) error
 }
@@ -89,7 +95,9 @@ type oidcSessionRecord struct {
 	SessionExpiresAt       time.Time
 	CreatedAt              time.Time
 	LastSeenAt             time.Time
-	RevokedAt              *time.Time
+	// 可空：迁移前的存量行没有显式交互时间，语义是"按 created_at 计算"。
+	LastInteractiveAt *time.Time
+	RevokedAt         *time.Time
 }
 
 func (oidcSessionRecord) TableName() string { return "pm_oidc_session" }
@@ -172,6 +180,33 @@ func (s *GORMOIDCStore) UpdateSession(ctx context.Context, value StoredOIDCSessi
 	return nil
 }
 
+// TouchSessionActivity 用条件更新推进显式交互时间：会话必须未撤销、未过绝对期限，
+// 且空闲截止（COALESCE(last_interactive_at, created_at)）仍晚于 idleCutoff。
+// 条件不满足返回 errOIDCRecordNotFound，已失效会话不会被写活。
+func (s *GORMOIDCStore) TouchSessionActivity(ctx context.Context, hash []byte, now, idleCutoff time.Time) error {
+	now = now.UTC()
+	idleCutoff = idleCutoff.UTC()
+	conditions := "session_id_hash = ? AND revoked_at IS NULL AND session_expires_at > ? AND COALESCE(last_interactive_at, created_at) > ?"
+	result := s.db.WithContext(ctx).Model(&oidcSessionRecord{}).Where(conditions, hash, now, idleCutoff).
+		Updates(map[string]any{"last_seen_at": now, "last_interactive_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		// 与 UpdateSession 一致：同一毫秒内的重复活动可能不改变列值，通过存在性
+		// 复核区分"无变化"与"会话已失效"。
+		var active struct {
+			SessionIDHash []byte `gorm:"column:session_id_hash"`
+		}
+		err := s.db.WithContext(ctx).Table((oidcSessionRecord{}).TableName()).Select("session_id_hash").Where(conditions, hash, now, idleCutoff).Take(&active).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errOIDCRecordNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *GORMOIDCStore) RevokeSession(ctx context.Context, hash []byte, now time.Time) error {
 	return s.db.WithContext(ctx).Model(&oidcSessionRecord{}).Where("session_id_hash = ? AND revoked_at IS NULL", hash).Update("revoked_at", now).Error
 }
@@ -208,20 +243,27 @@ func (s *GORMOIDCStore) ConsumeBackchannelLogout(ctx context.Context, value Back
 }
 
 func sessionRecord(value StoredOIDCSession) oidcSessionRecord {
-	var retry *time.Time
+	var retry, interactive *time.Time
 	if !value.RefreshRetryAt.IsZero() {
 		retryValue := value.RefreshRetryAt
 		retry = &retryValue
 	}
-	return oidcSessionRecord{SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, OIDCSubject: value.OIDCSubject, OIDCSessionID: value.OIDCSessionID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, RevokedAt: value.RevokedAt}
+	if !value.LastInteractiveAt.IsZero() {
+		interactiveValue := value.LastInteractiveAt
+		interactive = &interactiveValue
+	}
+	return oidcSessionRecord{SessionIDHash: value.SessionIDHash, TenantID: value.TenantID, IdentityID: value.IdentityID, OIDCSubject: value.OIDCSubject, OIDCSessionID: value.OIDCSessionID, PersonID: value.PersonID, PrincipalJSON: value.PrincipalJSON, IDTokenCipher: value.IDTokenCipher, OAuthTokenCipher: value.OAuthTokenCipher, AuthorizationRevision: value.AuthorizationRevision, AuthorizationCheckedAt: value.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: value.TokenExpiresAt, SessionExpiresAt: value.SessionExpiresAt, CreatedAt: value.CreatedAt, LastSeenAt: value.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: value.RevokedAt}
 }
 
 func storedSession(record oidcSessionRecord) StoredOIDCSession {
-	var retry time.Time
+	var retry, interactive time.Time
 	if record.RefreshRetryAt != nil {
 		retry = *record.RefreshRetryAt
 	}
-	return StoredOIDCSession{SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, OIDCSubject: record.OIDCSubject, OIDCSessionID: record.OIDCSessionID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, RevokedAt: record.RevokedAt}
+	if record.LastInteractiveAt != nil {
+		interactive = *record.LastInteractiveAt
+	}
+	return StoredOIDCSession{SessionIDHash: record.SessionIDHash, TenantID: record.TenantID, IdentityID: record.IdentityID, OIDCSubject: record.OIDCSubject, OIDCSessionID: record.OIDCSessionID, PersonID: record.PersonID, PrincipalJSON: record.PrincipalJSON, IDTokenCipher: record.IDTokenCipher, OAuthTokenCipher: record.OAuthTokenCipher, AuthorizationRevision: record.AuthorizationRevision, AuthorizationCheckedAt: record.AuthorizationCheckedAt, RefreshRetryAt: retry, TokenExpiresAt: record.TokenExpiresAt, SessionExpiresAt: record.SessionExpiresAt, CreatedAt: record.CreatedAt, LastSeenAt: record.LastSeenAt, LastInteractiveAt: interactive, RevokedAt: record.RevokedAt}
 }
 
 type secretCodec struct{ aead cipher.AEAD }

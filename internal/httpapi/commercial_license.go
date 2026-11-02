@@ -23,9 +23,15 @@ var commercialHistoryRoutes = map[string]bool{
 	"/api/v1/navigation": true, "/api/v1/role-catalog": true, "/api/v1/rule-configuration-catalog": true,
 	"/api/v1/dashboard": true, "/api/v1/projects": true, "/api/v1/projects-monitoring": true,
 	"/api/v1/approved-contracts": true, "/api/v1/approved-contracts/:contractID/service-items": true,
+	// BIZ-XAPI-09：选择器搜索是只读目录查询，与上面的合同目录同属历史读取。
+	"/api/v1/approved-contract-options":         true,
 	"/api/v1/projects/:id/supplement-contracts": true,
 	"/api/v1/projects/:id":                      true, "/api/v1/delivery-events": true, "/api/v1/delivery/sla-overdue": true,
 	"/api/v1/service-items": true, "/api/v1/service-items/:id/penetration-work-package": true,
+	// PRJ-01：现场证据/缺项判定已下推服务端（BIZ-PROJECT-06），该接口只回读事件流推算
+	// 缺项，不写业务状态。漏分类会在许可到期只读期把它判成 MUTATE_BUSINESS，
+	// 前端 fail-closed 因而无法渲染"现场完成"前置条件。
+	"/api/v1/service-items/:id/field-evidence":                            true,
 	"/api/v1/service-items/:id/penetration-work-package/report-revisions": true, "/api/v1/service-items/:id/report-revisions": true,
 	"/api/v1/personnel": true, "/api/v1/qualified-personnel": true, "/api/v1/personnel/names": true,
 	"/api/v1/capabilities": true, "/api/v1/capabilities/import/template": true, "/api/v1/equipment": true,
@@ -44,7 +50,9 @@ func commercialOperation(method, path string) core.Operation {
 		(method == http.MethodPost && path == "/api/v1/audit-outbox/failed/:id/retry") {
 		return core.ESSENTIAL_SERVICE
 	}
-	for _, route := range []string{"/healthz", "/readyz", "/auth/login", "/auth/callback", "/auth/logout", "/auth/local-logout", "/auth/backchannel-logout", "/logged-out", "/api/v1/auth/me"} {
+	// 会话状态查询与显式活动续期和 /auth/me 同级：都属于基础会话服务，不因
+	// 商业授权到期而阻断，避免用户无法登录/续期却看到"授权不可用"。
+	for _, route := range []string{"/healthz", "/readyz", "/auth/login", "/auth/callback", "/auth/logout", "/auth/local-logout", "/auth/backchannel-logout", "/logged-out", "/api/v1/auth/me", "/api/v1/auth/activity"} {
 		if path == route {
 			return core.ESSENTIAL_SERVICE
 		}

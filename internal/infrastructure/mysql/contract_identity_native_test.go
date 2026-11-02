@@ -18,7 +18,7 @@ func (identityContractDirectory) List(context.Context, int) ([]platform.Approved
 func (identityContractDirectory) Get(context.Context, string) (platform.ApprovedContract, error) {
 	return platform.ApprovedContract{}, errors.New("unexpected get")
 }
-func (identityContractDirectory) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (identityContractDirectory) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", errors.New("unexpected references")
 }
 func (identityContractDirectory) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {

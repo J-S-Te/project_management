@@ -49,7 +49,9 @@ func TestSupplementCatalogDependencyFailureReturns503(t *testing.T) {
 
 func TestCompatibilityActivationHTTPWithoutNumberUsesAuthorityOrFailsClosed(t *testing.T) {
 	p := platform.Principal{TenantID: "tenant-1", UserID: "contract", Permissions: map[string]bool{"project.contract.import": true}, DataScopes: []platform.DataScope{{RoleCode: "system_integration", ScopeType: "APPLICATION"}}}
-	input := `{"contract_id":"canonical","contract_version":"2","customer":"示例客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"S1","site":"上海","batch":"B1","category":"等保","test_mode":"STANDARD"}]}`
+	// 用户会话入口只提供 contract_id、所选 source_id 与现场字段；合同号/客户/服务项
+	// 归类来自合同服务权威回读（BIZ-PROJECT-01）。
+	input := `{"contract_id":"canonical","contract_version":"1","customer":"伪造客户","effective_at":"2026-08-10T00:00:00Z","services":[{"source_id":"SVC-1","site":"上海"}]}`
 	for _, tc := range []struct {
 		name       string
 		verifier   platform.ApprovedContractVerifier

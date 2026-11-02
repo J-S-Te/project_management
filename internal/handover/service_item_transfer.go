@@ -24,7 +24,11 @@ func transferServiceItemOwnership(tx *gorm.DB, in TransferInput, now, expected t
 		return scalar.Error
 	}
 	if scalar.RowsAffected == 1 {
-		return writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:service_item:"+in.ResourceID, outcome)
+		if err := writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:service_item:"+in.ResourceID, outcome); err != nil {
+			return err
+		}
+		// 与项目经理交接同口径：责任改派与资源级审计同事务落库。
+		return writeHandoverAudit(tx, in)
 	}
 	engineer := tx.Exec("UPDATE pm_service_item SET "+
 		"engineer_ids = JSON_REPLACE(engineer_ids, JSON_UNQUOTE(JSON_SEARCH(engineer_ids, 'one', ?)), ?), "+
@@ -36,7 +40,10 @@ func transferServiceItemOwnership(tx *gorm.DB, in TransferInput, now, expected t
 		return engineer.Error
 	}
 	if engineer.RowsAffected == 1 {
-		return writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:service_item:"+in.ResourceID, outcome)
+		if err := writeReceipt(tx, in, now, ReceiptApplied, uint64(now.UTC().UnixMilli()), "", "pm:service_item:"+in.ResourceID, outcome); err != nil {
+			return err
+		}
+		return writeHandoverAudit(tx, in)
 	}
 	return writeReceipt(tx, in, now, ReceiptRejected, 0, versionConflictReason, "", outcome)
 }

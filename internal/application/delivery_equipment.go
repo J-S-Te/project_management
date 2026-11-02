@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"strings"
@@ -97,8 +98,8 @@ func (s *Service) resolvePreparationEquipment(ctx context.Context, repo Delivery
 		if err != nil {
 			return nil, ValidationError(line + "：" + err.Error())
 		}
-		// 行内时段留空表示全程，占用区间即计划起止。
-		windowStart, windowEnd := dayOf(planStart), dayOf(planEnd)
+		// 行内时段留空表示全程，占用区间即计划起止（按北京日历日归日）。
+		windowStart, windowEnd := businessclock.CalendarDay(planStart), businessclock.CalendarDay(planEnd)
 		if row.WindowStart != "" {
 			windowStart, _ = time.Parse("2006-01-02", row.WindowStart)
 			windowEnd, _ = time.Parse("2006-01-02", row.WindowEnd)
@@ -197,10 +198,9 @@ func (s *Service) ListEquipment(ctx context.Context, p platform.Principal) ([]do
 }
 
 // equipmentInUseAt 找出当前处于占用中的设备，并把占用记录按设备编号索引，供在位状态与冲突提示复用。
-
-// equipmentInUseAt 找出当前处于占用中的设备，并把占用记录按设备编号索引，供在位状态与冲突提示复用。
+// “今天”取北京业务日：占用时段是业务日历值，用 UTC 日期会在北京时间凌晨把昨天当成今天。
 func equipmentInUseAt(reservations []domain.EquipmentReservation, now time.Time) map[string]domain.EquipmentReservation {
-	today := now.Format("2006-01-02")
+	today := businessclock.DateKey(now)
 	active := map[string]domain.EquipmentReservation{}
 	for _, reservation := range reservations {
 		if reservation.WindowStart <= today && today <= reservation.WindowEnd {

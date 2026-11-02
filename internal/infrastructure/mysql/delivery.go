@@ -295,6 +295,15 @@ func actorPointer(value string) *string {
 	return &value
 }
 
+// auditRequestID 把请求关联号写进 prj_audit_outbox.request_id；
+// 空值保持 NULL，由投递器回退到平台生成的 request_id。
+func auditRequestID(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
 func auditIPBytes(value string) []byte {
 	parsed := net.ParseIP(strings.TrimSpace(value))
 	if parsed == nil {

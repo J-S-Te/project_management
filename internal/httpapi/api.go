@@ -9,15 +9,17 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/auditctx"
+	"github.com/j-s-te/project-management/internal/config"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/handover"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -35,12 +37,30 @@ type OIDCFlow interface {
 	BackchannelLogout(http.ResponseWriter, *http.Request)
 }
 
+// SessionActivityReporter 由支持"空闲 + 绝对"双期限的身份实现：GET /auth/me 读取
+// 剩余时间，POST /auth/activity 消费显式用户交互续期。未实现该接口的身份（测试桩、
+// 纯机器装配）保持既有行为：/auth/me 不追加字段，/auth/activity 返回身份未配置。
+type SessionActivityReporter interface {
+	SessionIdleStatus(context.Context, *http.Request) (platform.SessionIdleStatus, error)
+	TouchSessionActivity(context.Context, *http.Request) (platform.SessionIdleStatus, error)
+}
+
 type Handler struct {
-	handover *handover.Service
-	service  *application.Service
-	identity Identity
-	audit    platform.AuditReporter
-	logger   *slog.Logger
+	handover        *handover.Service
+	service         *application.Service
+	identity        Identity
+	sessionActivity SessionActivityReporter
+	audit           platform.AuditReporter
+	logger          *slog.Logger
+}
+
+// IntegrationDestinationStatus 是启动期审计/通知目的地的只读状态（BIZ-XAPI-10）。
+// 只包含开关与是否配置，不包含任何凭据值；/readyz 用它区分 503 与 degraded。
+type IntegrationDestinationStatus struct {
+	AuditRequired          bool
+	AuditConfigured        bool
+	NotificationRequired   bool
+	NotificationConfigured bool
 }
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
@@ -54,6 +74,8 @@ type RouterOptions struct {
 	HandoverService       *handover.Service
 	DashboardIntegration  *DashboardIntegrationOptions
 	ProjectSnapshotLimits application.ProjectSnapshotLimits
+	// IntegrationDestinations 是审计/通知目的地配置状态；未注入时沿用进程环境判定。
+	IntegrationDestinations *IntegrationDestinationStatus
 	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
 	// 就绪检查直接判为 not_ready，避免带着缺失的列/表对外提供写服务（写路径只会报 500）。
 	PendingMigrations []string
@@ -64,6 +86,11 @@ type RouterOptions struct {
 // 返回值：装配完成的Gin路由。
 func NewRouter(service *application.Service, identity Identity, audit platform.AuditReporter, logger *slog.Logger, options ...RouterOptions) *gin.Engine {
 	h := &Handler{service: service, identity: identity, audit: audit, logger: logger}
+	// 只有实现了 SessionActivityReporter 的身份才启用空闲续期行为；未实现时保持
+	// 既有装配兼容（/auth/me 不追加字段、/auth/activity 返回身份未配置）。
+	if reporter, ok := identity.(SessionActivityReporter); ok {
+		h.sessionActivity = reporter
+	}
 	if len(options) > 0 {
 		h.handover = options[0].HandoverService
 	}
@@ -87,6 +114,12 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		panic(err)
 	}
 	pendingMigrations := routerOptions.PendingMigrations
+	// 未显式注入时沿用进程环境判定，保持既有调用方行为不变。
+	integrationDestinations := routerOptions.IntegrationDestinations
+	explicitIntegrationStatus := integrationDestinations != nil
+	if integrationDestinations == nil {
+		integrationDestinations = &IntegrationDestinationStatus{AuditRequired: auditRequired(), AuditConfigured: audit != nil}
+	}
 	router.Use(commercialLicenseMiddleware(routerOptions.CommercialLicense))
 	router.GET("/healthz", func(c *gin.Context) {
 		writeData(c, http.StatusOK, map[string]any{"status": "ok", "audit": auditStatus, "pending_migrations": len(pendingMigrations)})
@@ -94,14 +127,33 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	router.GET("/readyz", func(c *gin.Context) {
 		status := http.StatusOK
 		state := "ready"
+		degraded := make([]string, 0, 2)
 		body := map[string]any{"status": state, "audit": auditStatus, "pending_migrations": pendingMigrations}
+		if explicitIntegrationStatus {
+			body["integrations"] = map[string]any{
+				"audit":        map[string]any{"required": integrationDestinations.AuditRequired, "configured": integrationDestinations.AuditConfigured},
+				"notification": map[string]any{"required": integrationDestinations.NotificationRequired, "configured": integrationDestinations.NotificationConfigured},
+			}
+		}
 		if len(pendingMigrations) > 0 {
 			status = http.StatusServiceUnavailable
 			body["status"] = "migrations_pending"
 			body["hint"] = "库结构落后于代码，请先执行 project-migrate（后端镜像内的 /usr/local/bin/project-migrate）再放量"
-		} else if auditRequired() && audit == nil {
+		} else if integrationDestinations.AuditRequired && !integrationDestinations.AuditConfigured {
+			// BIZ-XAPI-10：审计必开但目的地缺失 → 失败关闭（503）。
 			status = http.StatusServiceUnavailable
 			body["status"] = "not_ready"
+			degraded = append(degraded, "PLATFORM_AUDIT")
+		}
+		if integrationDestinations.NotificationRequired && !integrationDestinations.NotificationConfigured {
+			// 通知缺失不阻断启动：/readyz 200 degraded，让部署与巡检看见积压风险。
+			if status == http.StatusOK {
+				body["status"] = "degraded"
+			}
+			degraded = append(degraded, "PLATFORM_NOTIFICATION")
+		}
+		if len(degraded) > 0 && explicitIntegrationStatus {
+			body["degraded_destinations"] = degraded
 		}
 		writeData(c, status, body)
 	})
@@ -153,6 +205,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 放在 auditWrites 之后，使跨站拒绝尝试同样进入审计。
 	api.Use(h.authenticate(), h.auditWrites(), h.requireSameOriginWrite())
 	api.GET("/auth/me", h.me)
+	// 显式用户交互续期：只有该接口推进 last_interactive_at；普通业务请求只更新
+	// last_seen_at。空闲到期由前端探测 401 后回本系统登录，不写全账号登出。
+	api.POST("/auth/activity", h.activity)
 	api.GET("/navigation", require("project.read"), h.navigation)
 	api.GET("/role-catalog", require("project.read"), h.roleCatalog)
 	api.GET("/rule-configuration-catalog", require("project.read"), h.ruleConfigurationCatalog)
@@ -162,16 +217,28 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/projects", require("project.read"), h.listProjects)
 	api.GET("/projects-monitoring", require("project.read"), h.monitorProjects)
 	api.GET("/approved-contracts", require("project.create"), h.listApprovedContracts)
+	// BIZ-XAPI-09：已审批合同选择器按关键字 + 游标搜索。不能复用
+	// /approved-contracts/search：与 /approved-contracts/:contractID 同段静态/参数
+	// 混用会触发 gin 路由冲突。
+	api.GET("/approved-contract-options", require("project.create"), h.searchApprovedContractOptions)
 	api.GET("/projects/:id/supplement-contracts", require("project.decomposition.manage"), h.listSupplementContracts)
 	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
 	api.POST("/projects", require("project.create"), h.createProject)
-	api.POST("/contracts/activate", require("project.contract.import"), h.activateContract)
+	// 用户会话建项：合同号、客户与服务项必须由应用层按 contract_id 权威回读，
+	// 浏览器提交的同名字段不作为依据（见 activateContractFromUser）。
+	api.POST("/contracts/activate", require("project.contract.import"), h.activateContractFromUser)
 	api.GET("/projects/:id", require("project.read"), h.getProject)
 	api.POST("/projects/:id/decomposition-adjustments", require("project.decomposition.manage"), h.adjustDecomposition)
+	// 补充协议分支的受控退出（BIZ-PROJECT-04）：确认拆解不再静默清零 supplement_status，
+	// 拆解已推进、无法重建清单时必须走这次显式关账。
+	api.POST("/projects/:id/supplement-closure", require("project.decomposition.manage"), h.closeSupplement)
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.GET("/delivery/sla-overdue", require("project.read"), h.listSlaOverdue)
 	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
 	api.POST("/service-items/:id/field-complete", require("project.field.complete"), h.completeServiceItemField)
+	// 缺项判定下推服务端（BIZ-PROJECT-06）：按服务项完整事件流给出缺项与已具备的证据明细，
+	// 前端不再用"租户最近 500 条事件"的窗口近似推导缺项。
+	api.GET("/service-items/:id/field-evidence", require("project.read"), h.getServiceItemFieldEvidence)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	api.GET("/service-items/:id/penetration-work-package", require("project.read"), h.getPenetrationWorkPackage)
 	api.POST("/service-items/:id/penetration-work-package", require("project.implementation.plan"), h.ensurePenetrationWorkPackage)
@@ -262,13 +329,11 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	return router
 }
 
+// auditRequired 是审计中间件与默认就绪判定共用的必开口径（BIZ-XAPI-10）：
+// PROJECT_AUDIT_REQUIRED 优先，兼容既有 PLATFORM_AUDIT_REQUIRED，其次生产环境。
+// 非法显式值按失败关闭处理，避免拼写错误静默关闭审计拒绝。
 func auditRequired() bool {
-	raw := strings.TrimSpace(os.Getenv("PLATFORM_AUDIT_REQUIRED"))
-	if raw != "" {
-		required, err := strconv.ParseBool(raw)
-		return err == nil && required
-	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("PLATFORM_ENVIRONMENT_CODE")), "prod")
+	return config.AuditRequiredFromEnvironment()
 }
 
 func requestID() gin.HandlerFunc {
@@ -533,6 +598,11 @@ func containsAnyAudit(value string, candidates ...string) bool {
 
 // skipAudit 跳过普通读请求；写请求和敏感读（下载/导出/令牌签发）仍会审计。
 func skipAudit(method, path string) bool {
+	// 会话活动心跳只推进空闲时间、没有业务副作用；按 /auth/me 同级处理，避免每秒级
+	// 前端续期请求刷爆平台审计。
+	if method == http.MethodPost && path == "/api/v1/auth/activity" {
+		return true
+	}
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return !sensitiveRead(path)
@@ -688,7 +758,47 @@ func (h *Handler) me(c *gin.Context) {
 		}
 	}
 	sort.Strings(permissions)
-	writeData(c, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "username": p.Username, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion})
+	data := map[string]any{"tenant_id": p.TenantID, "identity_id": p.IdentityID, "person_id": p.PersonID, "user_id": p.UserID, "display_name": p.DisplayName, "username": p.Username, "roles": p.Roles, "permissions": permissions, "data_scopes": p.DataScopes, "authorization_revision": p.AuthorizationRevision, "authz_revision": p.AuthorizationRevision, "catalog_version": p.CatalogVersion}
+	// 追加字段向后兼容：拿不到会话状态时仍返回既有主体字段，不改变原校验语义。
+	if h.sessionActivity != nil {
+		if status, err := h.sessionActivity.SessionIdleStatus(c.Request.Context(), c.Request); err == nil {
+			for key, value := range idleStatusData(status) {
+				data[key] = value
+			}
+		}
+	}
+	writeData(c, http.StatusOK, data)
+}
+
+// activity 是浏览器显式交互续期入口（鼠标/键盘等真实操作触发的前端节流调用）。
+// 只有当前会话仍满足绝对与空闲期限时才推进 last_interactive_at；无效会话返回 401，
+// 已过期会话不会因为调用本接口而复活。
+func (h *Handler) activity(c *gin.Context) {
+	if h.sessionActivity == nil {
+		writeError(c, http.StatusServiceUnavailable, "PM_IDENTITY_UNAVAILABLE", "身份服务未配置")
+		return
+	}
+	status, err := h.sessionActivity.TouchSessionActivity(c.Request.Context(), c.Request)
+	if err != nil {
+		if errors.Is(err, platform.ErrUnauthenticated) {
+			writeError(c, http.StatusUnauthorized, "PM_UNAUTHENTICATED", "项目系统登录状态已失效")
+			return
+		}
+		if h.logger != nil {
+			h.logger.Error("touch session activity", "error", err)
+		}
+		writeError(c, http.StatusServiceUnavailable, "PM_AUTHORIZATION_UNAVAILABLE", "授权服务暂不可用")
+		return
+	}
+	writeData(c, http.StatusOK, idleStatusData(status))
+}
+
+// idleStatusData 渲染统一会话契约字段；毫秒剩余量始终为非负整数。
+func idleStatusData(status platform.SessionIdleStatus) map[string]any {
+	return map[string]any{
+		"idle_timeout_seconds": int64(status.IdleTimeout / time.Second),
+		"idle_remaining_ms":    status.IdleRemaining.Milliseconds(),
+	}
 }
 
 // navigation 是服务端定义的工作台契约。浏览器可以隐藏或排序
@@ -869,6 +979,35 @@ func (h *Handler) listApprovedContracts(c *gin.Context) {
 	writeData(c, http.StatusOK, items)
 }
 
+// searchApprovedContractOptions 返回可按关键字跨页搜索的已审批合同选项。
+// 参数：keyword 去空白且不超过 100 字符；after_id 为上一页返回的游标；
+// limit 默认 50、上限 100（旧 /approved-contracts 仍保持 200 上限不变）。
+// 返回值：{contracts, next_after_id}，next_after_id 为空表示没有更多。
+func (h *Handler) searchApprovedContractOptions(c *gin.Context) {
+	limit, err := optionalPositiveInt(c.Query("limit"))
+	if err != nil || limit > 100 {
+		writeServiceError(c, application.ValidationError("合同查询数量必须在 1 到 100 之间"))
+		return
+	}
+	if limit == 0 {
+		limit = 50
+	}
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	if utf8.RuneCountInString(keyword) > 100 {
+		writeServiceError(c, application.ValidationError("搜索关键字不能超过 100 个字符"))
+		return
+	}
+	items, nextAfterID, err := h.service.SearchAvailableApprovedContracts(c.Request.Context(), principal(c), keyword, strings.TrimSpace(c.Query("after_id")), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	if items == nil {
+		items = []platform.ApprovedContract{}
+	}
+	writeData(c, http.StatusOK, map[string]any{"contracts": items, "next_after_id": nextAfterID})
+}
+
 func (h *Handler) listApprovedContractServiceItems(c *gin.Context) {
 	catalog, err := h.service.ListApprovedContractServiceItems(c.Request.Context(), principal(c), c.Param("contractID"))
 	if err != nil {
@@ -905,7 +1044,9 @@ func (h *Handler) createProject(c *gin.Context) {
 	writeData(c, http.StatusCreated, item)
 }
 
-// activateContract 接收普通合同激活，导入来源须使用专用命令。
+// activateContract 接收合同服务投递的合同生效事件（机器入口 /internal/v1）。
+// 该路径的载荷来自经机器令牌验证的合同管理系统，属于可信投递：合同号、客户与
+// 服务项由合同服务权威生成，因此按既有语义落库。浏览器会话不得到达这里。
 // 参数：c 为通过授权的HTTP上下文。
 // 返回值：无；响应项目或业务错误。
 func (h *Handler) activateContract(c *gin.Context) {
@@ -914,6 +1055,24 @@ func (h *Handler) activateContract(c *gin.Context) {
 		return
 	}
 	item, err := h.service.ActivateContract(c.Request.Context(), principal(c), input)
+	if err != nil {
+		writeContractImportError(c, err)
+		return
+	}
+	writeData(c, http.StatusCreated, item)
+}
+
+// activateContractFromUser 接收用户会话建项（/api/v1）。
+// 请求体只能提供 contract_id、所选 source_id、现场补充字段与 effective_at；合同号、
+// 客户、客户 ID、合同版本与服务项归类由应用层回读合同服务重建（BIZ-PROJECT-01）。
+// 参数：c 为通过授权的HTTP上下文。
+// 返回值：无；响应项目或业务错误。
+func (h *Handler) activateContractFromUser(c *gin.Context) {
+	var input domain.ContractActivation
+	if !decode(c, &input) {
+		return
+	}
+	item, err := h.service.ActivateContractFromUser(c.Request.Context(), principal(c), input)
 	if err != nil {
 		writeContractImportError(c, err)
 		return
@@ -930,6 +1089,17 @@ func (h *Handler) adjustDecomposition(c *gin.Context) {
 		return
 	}
 	h.writeProjectStatus(c, http.StatusAccepted, c.Param("id"))
+}
+func (h *Handler) closeSupplement(c *gin.Context) {
+	var input domain.SupplementClosureInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.CloseSupplement(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	h.writeProjectStatus(c, http.StatusOK, c.Param("id"))
 }
 func (h *Handler) listDeliveryEvents(c *gin.Context) {
 	items, err := h.service.ListDeliveryEvents(c.Request.Context(), principal(c), c.Query("project_id"))
@@ -960,6 +1130,17 @@ func (h *Handler) completeServiceItemField(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": "现场实施完成"})
+}
+
+// getServiceItemFieldEvidence 返回服务项的现场证据完整性判定与已具备的证据明细。
+// 判定口径由服务端按该服务项的完整事件流计算，前端的缺项展示与完成门禁都只消费它。
+func (h *Handler) getServiceItemFieldEvidence(c *gin.Context) {
+	evidence, err := h.service.ServiceItemFieldEvidence(c.Request.Context(), principal(c), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, evidence)
 }
 
 // writeProjectStatus 返回项目的唯一派生状态，避免写接口另起一套状态词汇。
@@ -1949,6 +2130,12 @@ func writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusServiceUnavailable, "PM_PERSONNEL_UNAVAILABLE", "基础平台人员目录尚未配置或暂不可用")
 	case errors.Is(err, application.ErrContractUnavailable):
 		writeError(c, http.StatusServiceUnavailable, "PM_CONTRACT_UNAVAILABLE", "已审批合同服务暂不可用，请稍后重试")
+	case errors.Is(err, application.ErrFieldEvidenceWindowExceeded):
+		// 该服务项的事件已超过单次可核验上限：判定不可信，读写都拒绝。
+		// 不能退化成"按部分事件下结论"，否则缺项判定又变回窗口近似。
+		writeError(c, http.StatusInternalServerError, "PM_FIELD_EVIDENCE_WINDOW_EXCEEDED", "该服务项的现场证据事件超过单次可核验上限（1000 条），请归档历史事件后再确认完成")
+	case errors.Is(err, application.ErrFieldEvidenceUnavailable):
+		writeError(c, http.StatusServiceUnavailable, "PM_FIELD_EVIDENCE_UNAVAILABLE", "现场证据核验能力不可用，暂时无法判定缺项，请稍后重试")
 	default:
 		writeError(c, http.StatusInternalServerError, "PM_INTERNAL_ERROR", "服务暂不可用")
 	}

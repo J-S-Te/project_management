@@ -171,6 +171,14 @@ type DecompositionAdjustmentInput struct {
 	Items                []ContractService `json:"items"`
 }
 
+// SupplementClosureInput 是「补充协议已回写并关账」的受控退出输入（BIZ-PROJECT-04）。
+// 补充协议分支不能靠"再确认一次拆解"静默退出：必须显式提交，绑定同客户已审批的
+// 补充协议并给出原因，供审计追溯。
+type SupplementClosureInput struct {
+	SupplementContractID string `json:"supplement_contract_id"`
+	Reason               string `json:"reason"`
+}
+
 type TeamAssignmentInput struct {
 	TeamLeadID string `json:"team_lead_id"`
 	// ExpectedVersion 是客户端读取到的服务项版本；非 0 且与服务端不一致时返回 409，

@@ -3,6 +3,9 @@ package httpapi
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/j-s-te/project-management/internal/domain"
 )
 
 func TestCapabilitiesFromImportCSVByColumnName(t *testing.T) {
@@ -62,5 +65,65 @@ func TestCapabilitiesFromImportCSVReportsMalformedLines(t *testing.T) {
 	}
 	if !strings.HasPrefix(errs[0], "csv 第 3 行") {
 		t.Fatalf("errs=%v", errs)
+	}
+}
+
+// 能力/设备导出必须按 SEC-B6 口径转义公式注入载荷：=、+、-、@ 前缀与前导 tab/CR
+// 一律加 ' 前缀；普通文本保持原样（既有口径没有纯数字豁免，-1 同样按 '-' 前缀处理）。
+func TestEscapeCSVFormulaCellNeutralizesFormulaPayloads(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "等号公式", input: "=cmd|'/c calc'!A0", want: "'=cmd|'/c calc'!A0"},
+		{name: "加号公式", input: "+SUM(1)", want: "'+SUM(1)"},
+		{name: "AT符号公式", input: "@x", want: "'@x"},
+		{name: "减号字面值", input: "-1", want: "'-1"},
+		{name: "前导tab公式", input: "\t=1+1", want: "'\t=1+1"},
+		{name: "前导CR公式", input: "\r=1+1", want: "'\r=1+1"},
+		{name: "普通文本不动", input: "张三-高压电工证", want: "张三-高压电工证"},
+		{name: "空串不动", input: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := escapeCSVFormulaCell(test.input); got != test.want {
+				t.Fatalf("escapeCSVFormulaCell(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+// 导出行的每个用户可控单元格都要转义，且列顺序、列数保持不变。
+func TestCapabilityExportRowEscapesUserControlledCells(t *testing.T) {
+	row := capabilityExportRow(domain.Capability{
+		ResourceType: "PERSON",
+		ResourceID:   "=cmd|'/c calc'!A0",
+		ResourceName: "@SUM(A1)",
+		Codes:        []string{"+SUM(1)", "低压电工证"},
+		Status:       "ACTIVE",
+	})
+	if len(row) != len(capabilityImportColumns) {
+		t.Fatalf("列数=%d, want %d", len(row), len(capabilityImportColumns))
+	}
+	if row[1] != "'=cmd|'/c calc'!A0" {
+		t.Fatalf("resource_id 未转义: %q", row[1])
+	}
+	if row[2] != "'@SUM(A1)" {
+		t.Fatalf("resource_name 未转义: %q", row[2])
+	}
+	if row[3] != "'+SUM(1);低压电工证" {
+		t.Fatalf("codes 未转义: %q", row[3])
+	}
+	if row[0] != "PERSON" || row[4] != "ACTIVE" || row[5] != "" || row[6] != "" {
+		t.Fatalf("普通单元格被改写: %v", row)
+	}
+
+	equipment := capabilityExportRow(domain.Capability{
+		ResourceType: "EQUIPMENT", ResourceID: "E-1", ResourceName: "基站A", Codes: []string{"巡检"},
+		Status: "ACTIVE", ValidFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ValidUntil: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+	})
+	if equipment[5] != "2026-01-01" || equipment[6] != "2026-12-31" {
+		t.Fatalf("设备有效期被改写: %v", equipment)
 	}
 }

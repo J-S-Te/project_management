@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 )
@@ -270,7 +271,10 @@ func TestActivitiesSlaUsesExecutionUtcAndExistingDedup(t *testing.T) {
 	if m.OccurredAt.Location() != time.UTC || m.OccurredAt.Before(before) || m.OccurredAt.After(after) {
 		t.Fatalf("not execution UTC: %v", m.OccurredAt)
 	}
-	if m.EventType != "SLA_STATUS_DEADLINE_OVERDUE" || !strings.HasPrefix(m.IdempotencyKey, "sla-item-1-STATUS_DEADLINE_OVERDUE-") || !strings.HasSuffix(m.IdempotencyKey, m.OccurredAt.Format("2006-01-02")) {
+	// 幂等键按业务日（北京时间）分段，而 OccurredAt 保留 UTC；直接拿 UTC 日期比较会在
+	// 北京时间 00:00–08:00（对应 UTC 前一日）误报。这里按同一业务日口径推导期望值。
+	businessDay := m.OccurredAt.In(businessclock.Location()).Format("2006-01-02")
+	if m.EventType != "SLA_STATUS_DEADLINE_OVERDUE" || !strings.HasPrefix(m.IdempotencyKey, "sla-item-1-STATUS_DEADLINE_OVERDUE-") || !strings.HasSuffix(m.IdempotencyKey, businessDay) {
 		t.Fatalf("threshold/dedup changed: %+v", m)
 	}
 	got, err = a.RunOne(context.Background(), TickInput{TenantID: "tenant-a", Kind: TaskSLA})

@@ -12,6 +12,7 @@ import (
 
 	"github.com/j-s-te/project-management/internal/platform"
 
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 )
 
@@ -23,14 +24,26 @@ type supplementContractVerifier struct {
 func (v supplementContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return nil, v.err
 }
-func (v supplementContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (v supplementContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", v.err
 }
 func (v supplementContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {
 	return v.contract, v.err
 }
+
+// GetServiceItems 返回与合同版本一致的单个服务项目录：拆解调整必须按服务项目录
+// 重建范围（BIZ-PROJECT-02），因此桩也要给出可用于重建的权威条目。
 func (v supplementContractVerifier) GetServiceItems(context.Context, string) (platform.ApprovedContractServiceCatalog, error) {
-	return platform.ApprovedContractServiceCatalog{}, v.err
+	if v.err != nil {
+		return platform.ApprovedContractServiceCatalog{}, v.err
+	}
+	return platform.ApprovedContractServiceCatalog{
+		ContractID:      v.contract.ID,
+		ContractVersion: v.contract.Version,
+		ServiceItems: []platform.ApprovedContractService{
+			{SourceID: "S1", Name: "等保测评", ServiceType: "等保测评", Site: "默认场所", Batch: "第一批", Category: "等保测评", System: "核心系统", SystemLevel: "三级", Requirement: "按标准执行", TestMode: "STANDARD"},
+		},
+	}, nil
 }
 
 func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) {
@@ -61,7 +74,7 @@ func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			service := &Service{Contracts: supplementContractVerifier{contract: testCase.contract}}
-			err := service.verifyApprovedSupplementContract(context.Background(), project, testCase.id)
+			_, err := service.verifyApprovedSupplementContract(context.Background(), project, testCase.id)
 			if testCase.want == nil {
 				if err != nil {
 					t.Fatalf("approved supplement rejected: %v", err)
@@ -75,14 +88,14 @@ func TestSupplementAgreementMustBeApprovedDistinctAndSameCustomer(t *testing.T) 
 	}
 	t.Run("legacy project contract number is still the original contract", func(t *testing.T) {
 		service := &Service{Contracts: supplementContractVerifier{contract: platform.ApprovedContract{ID: "HT-LEGACY-1", CustomerName: "示例客户", Status: "active", ApprovalPassed: true}}}
-		err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Contract: "HT-LEGACY-1", Customer: "示例客户"}, "HT-LEGACY-1")
+		_, err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Contract: "HT-LEGACY-1", Customer: "示例客户"}, "HT-LEGACY-1")
 		if !errors.Is(err, ErrValidation) || !strings.Contains(UserMessage(err), "不能与原合同相同") {
 			t.Fatalf("legacy original contract accepted as supplement: %v", err)
 		}
 	})
 	t.Run("legacy project matches authoritative customer name", func(t *testing.T) {
 		service := &Service{Contracts: supplementContractVerifier{contract: platform.ApprovedContract{ID: "SUP-1", CustomerName: "示例客户", Status: "approved", ApprovalPassed: true}}}
-		if err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Customer: "示例客户"}, "SUP-1"); err != nil {
+		if _, err := service.verifyApprovedSupplementContract(context.Background(), domain.Project{Customer: "示例客户"}, "SUP-1"); err != nil {
 			t.Fatalf("legacy project supplement rejected: %v", err)
 		}
 	})
@@ -114,7 +127,7 @@ func TestActiveSupplementContractFromContractServiceIsAccepted(t *testing.T) {
 	}
 	service := &Service{Contracts: verifier}
 	project := domain.Project{ContractID: "CONTRACT-1", CustomerID: "CUSTOMER-1", Customer: "示例客户"}
-	if err := service.verifyApprovedSupplementContract(context.Background(), project, "SUP-1"); err != nil {
+	if _, err := service.verifyApprovedSupplementContract(context.Background(), project, "SUP-1"); err != nil {
 		t.Fatalf("contract management persists active after normal approval; project rejected it: %v", err)
 	}
 }
@@ -459,7 +472,8 @@ func TestDeriveCapabilityEffectiveStatusMarksExpiredEquipmentInvalid(t *testing.
 // 设备借出规则：仅在公司使用的设备不可借出；当前不在公司（他人借出中）的设备也不可再借；
 // 归还后不再占用、也不再生效为「不在公司」。
 func TestResolvePreparationEquipmentEnforcesUsageScopeAndPresence(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
+	// “今天”是业务日历值：占用时段与在位判定都按北京业务日，不能用 UTC 日期。
+	today := businessclock.DateKey(time.Now())
 	repo := &capabilityRepository{
 		capabilities: []domain.Capability{
 			{ResourceType: "EQUIPMENT", ResourceID: "EQ-COMPANY", ResourceName: "机房专用设备", Status: "ACTIVE", UsageScope: domain.EquipmentUsageCompanyOnly},
@@ -470,8 +484,11 @@ func TestResolvePreparationEquipmentEnforcesUsageScopeAndPresence(t *testing.T) 
 		},
 	}
 	service := &Service{Repo: repo}
-	start := time.Now().UTC().AddDate(0, 0, -1)
-	end := time.Now().UTC().AddDate(0, 0, 5)
+	// 计划起止同样按业务日（北京时间）推导：用 UTC 的 now 构造会在北京时间 00:00–08:00
+	// 与 businessclock.DateKey 的日期错位，导致占用时段被误判为落在计划之外。
+	businessNow := businessclock.Now()
+	start := businessNow.AddDate(0, 0, -1)
+	end := businessNow.AddDate(0, 0, 5)
 
 	_, err := service.resolvePreparationEquipment(context.Background(), repo, "tenant-1", "SI-SELF",
 		[]domain.PlanResourceInput{{ResourceType: "EQUIPMENT", ResourceID: "EQ-COMPANY", WindowStart: start.Format("2006-01-02"), WindowEnd: end.Format("2006-01-02")}}, start, end)
@@ -495,9 +512,10 @@ func TestResolvePreparationEquipmentEnforcesUsageScopeAndPresence(t *testing.T) 
 
 // 设备在位状态由占用时段派生：覆盖今天即为不在公司，并带出占用方与时段。
 func TestEquipmentPresenceDerivesFromReservations(t *testing.T) {
-	today := time.Now().UTC()
-	yesterday := today.AddDate(0, 0, -1).Format("2006-01-02")
-	tomorrow := today.AddDate(0, 0, 1).Format("2006-01-02")
+	// 窗口与“今天”都按北京业务日构造，避免 UTC 与北京跨日时测试自身漂移。
+	today := businessclock.Now()
+	yesterday := businessclock.DateKey(today.AddDate(0, 0, -1))
+	tomorrow := businessclock.DateKey(today.AddDate(0, 0, 1))
 	reservations := []domain.EquipmentReservation{
 		{ServiceItemID: "SI-1", ProjectID: "PJ-1", ResourceID: "EQ-1", WindowStart: yesterday, WindowEnd: tomorrow},
 		{ServiceItemID: "SI-2", ProjectID: "PJ-2", ResourceID: "EQ-2", WindowStart: tomorrow, WindowEnd: tomorrow},
@@ -879,7 +897,7 @@ type versionedContractVerifier struct{ version uint64 }
 func (v versionedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: v.version, Status: "in_progress", ApprovalPassed: true}}, nil
 }
-func (v versionedContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (v versionedContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", nil
 }
 func (v versionedContractVerifier) Get(_ context.Context, id string) (platform.ApprovedContract, error) {
@@ -997,6 +1015,19 @@ func (r *assignmentRevokeRepository) FindProjectForDeviation(_ context.Context, 
 	return r.item.ProjectID, r.item.ID, nil
 }
 
+// ListServiceItemDeliveryEvents 让测试桩具备按服务项读取完整事件流的能力（BIZ-PROJECT-06）：
+// 现场完成门禁必须基于该服务项的证据链，能力缺失会被判为"无法核验"并拒绝完成。
+func (r *assignmentRevokeRepository) ListServiceItemDeliveryEvents(_ context.Context, filter platform.ScopeFilter, itemID string) ([]domain.DeliveryEvent, error) {
+	r.lastFilter = filter
+	events := make([]domain.DeliveryEvent, 0, len(r.events))
+	for _, event := range r.events {
+		if event.ServiceItemID == itemID {
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
 type reportCorrectionRepository struct {
 	capabilityRepository
 	item   domain.ServiceItem
@@ -1063,6 +1094,8 @@ func TestFieldExecutionRequiresExplicitStartBeforeRecords(t *testing.T) {
 	repository.item.Status = "实施中"
 	repository.item.Version = 8
 	evidence := domain.ReportArtifactInput{FileID: "FILE-FIELD-1", FileName: "field.jpg", MIME: "image/jpeg", Size: 128, SHA256: strings.Repeat("b", 64)}
+	// BIZ-PROJECT-03：现场证据必须回源文件网关核验，事件流用例补上已核验的网关桩。
+	service.EvidenceFiles = testEvidenceGateway(evidence)
 	if err := service.SubmitFieldRecord(context.Background(), manager, repository.item.ID, domain.FieldRecordInput{
 		RawData: "现场测评记录", Environment: "客户现场", EvidenceFiles: []domain.ReportArtifactInput{evidence}, ExpectedVersion: 8,
 	}); err != nil {
@@ -1107,6 +1140,8 @@ func TestOfflineFieldEvidenceCarriesReplayIdentityAndCaptureTime(t *testing.T) {
 	}
 
 	signature := domain.ReportArtifactInput{FileID: "FILE-SIGN-1", FileName: "signature.png", MIME: "image/png", Size: 128, SHA256: strings.Repeat("a", 64)}
+	// BIZ-PROJECT-03：电子签名同样必须回源文件网关核验。
+	service.EvidenceFiles = testEvidenceGateway(signature)
 	if err := service.CaptureFieldSignature(context.Background(), engineer, repository.item.ID, domain.FieldSignatureInput{
 		SignatureFile: signature, ClientOperationID: "signature-01M2TEST", CapturedAt: captured.Format(time.RFC3339), ExpectedVersion: 3,
 	}); err != nil {

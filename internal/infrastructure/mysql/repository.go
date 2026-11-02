@@ -227,7 +227,8 @@ func (r *Repository) CreateProject(ctx context.Context, item domain.Project) err
 			ID: ulid.Make().String(), TenantID: item.TenantID, EventID: ulid.Make().String(),
 			ActorID: actorPointer(actor), ActorType: "USER", Action: "PROJECT_MANAGEMENT:PROJECT_CREATED",
 			ResourceType: "project", ResourceID: item.ID,
-			LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
+			RequestID: auditRequestID(meta.RequestID),
+			LoginIP:   auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
 			Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
 		}).Error
 	})
@@ -391,10 +392,11 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 			if pending > 0 {
 				continue
 			}
-			// 拆解全部确认即退出补充协议分支：supplement_status 是派生状态的短路条件，
-			// 不回写 NONE 会让项目永久停在「补充协议处理中」，此后任何推进都不再改变状态。
-			if err := tx.Model(&projectRecord{}).Where("tenant_id = ? AND id = ?", tenant, projectID).
-				Updates(map[string]any{"supplement_status": "NONE", "updated_at": now}).Error; err != nil {
+			// BIZ-PROJECT-04：拆解全部确认并不等于补充协议已处理完。修复前这里无条件把
+			// supplement_status 清零，"再点一次确认"就能抹掉补充协议分支；现在只有最近
+			// 一次拆解调整已把补充协议服务目录应用到拆解结果、且当前范围未再漂移时才清零，
+			// 其余情况失败关闭并提示先做拆解调整或显式关账。
+			if err := clearSupplementStatusAfterConfirm(tx, tenant, projectID, now); err != nil {
 				return err
 			}
 			// 状态与进度一律走单一派生口径，不再手写目标状态（手写会让进度停在 0）。

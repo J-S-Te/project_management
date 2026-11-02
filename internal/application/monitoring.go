@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 )
@@ -230,7 +231,8 @@ func buildMonitoringProject(project domain.Project, items []domain.ServiceItem, 
 				if resource.ReturnedAt != "" {
 					releasedEquipment++
 				}
-				if resource.ValidUntil != "" && resource.ValidUntil[:min(10, len(resource.ValidUntil))] < time.Now().UTC().Format("2006-01-02") {
+				// 检定有效期是业务日历值，与“今天”都按北京业务日比较。
+				if resource.ValidUntil != "" && resource.ValidUntil[:min(10, len(resource.ValidUntil))] < businessclock.DateKey(time.Now()) {
 					expiredEquipment++
 				}
 			}

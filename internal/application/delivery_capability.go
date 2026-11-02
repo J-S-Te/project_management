@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"sort"
@@ -49,13 +50,15 @@ func deriveCapabilityEffectiveStatus(item domain.Capability, now time.Time) doma
 	if item.ResourceType != "EQUIPMENT" {
 		return item
 	}
-	today := dayOf(now.UTC())
-	if !item.ValidFrom.IsZero() && dayOf(item.ValidFrom).After(today) {
+	// 检定有效期是业务日历值：按北京业务日判定“今天”。
+	// 用 UTC 日期会在北京时间 00:00–08:00 之间把昨天当成今天，让过期设备继续可派。
+	today := businessclock.CalendarDay(now)
+	if !item.ValidFrom.IsZero() && businessclock.CalendarDay(item.ValidFrom).After(today) {
 		item.EffectiveStatus = capabilityEffectiveNotYetEffective
 		item.StatusReason = "检定有效期尚未开始"
 		return item
 	}
-	if !item.ValidUntil.IsZero() && dayOf(item.ValidUntil).Before(today) {
+	if !item.ValidUntil.IsZero() && businessclock.CalendarDay(item.ValidUntil).Before(today) {
 		item.EffectiveStatus = capabilityEffectiveExpired
 		item.StatusReason = "检定有效期已过期"
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func setValidEnvironment(t *testing.T) {
@@ -201,7 +202,7 @@ func TestLoadRequiresCompleteFileGatewayConfiguration(t *testing.T) {
 	t.Setenv("FILE_GATEWAY_APPLICATION_ID", "app-1")
 	t.Setenv("FILE_GATEWAY_CLIENT_ID", "client")
 	t.Setenv("FILE_GATEWAY_CLIENT_SECRET", "secret")
-	t.Setenv("FILE_GATEWAY_SCOPE", "platform:file:upload platform:file:bind")
+	t.Setenv("FILE_GATEWAY_SCOPE", "platform:file:upload platform:file:bind platform:file:download")
 	config, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -219,5 +220,136 @@ func TestSettlementReferenceRequiresIndependentMachineConfig(t *testing.T) {
 	t.Setenv("SETTLEMENT_REFERENCE_ENABLED", "true")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SETTLEMENT_REFERENCE") {
 		t.Fatalf("缺失机器配置未拒绝：%v", err)
+	}
+}
+
+// setSettlementReferenceEnvironment 填充结算引用除 client id 外的完整信任绑定。
+func setSettlementReferenceEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("SETTLEMENT_REFERENCE_ENABLED", "true")
+	t.Setenv("SETTLEMENT_REFERENCE_AUDIENCE", "basic-platform-application")
+	t.Setenv("SETTLEMENT_REFERENCE_ISSUER", "basic-platform")
+	t.Setenv("SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH", "/app/data/keys/jwt-ed25519-public.pem")
+	t.Setenv("SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE", "prod")
+}
+
+// TestSettlementReferenceAllowAnyClientAcceptsEmptyClientID 验证解耦后 client id 可为空，
+// 但 issuer/audience/public key/caller env 仍必须完整。
+func TestSettlementReferenceAllowAnyClientAcceptsEmptyClientID(t *testing.T) {
+	setValidEnvironment(t)
+	setSettlementReferenceEnvironment(t)
+	t.Setenv("SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT", "true")
+	t.Setenv("SETTLEMENT_REFERENCE_CLIENT_ID", "")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("allow-any settlement reference rejected: %v", err)
+	}
+	if !config.SettlementReferenceEnabled || !config.SettlementReferenceAllowAnyClient || config.SettlementReferenceClientID != "" {
+		t.Fatalf("unexpected settlement reference config: enabled=%v allow_any=%v client_id=%q",
+			config.SettlementReferenceEnabled, config.SettlementReferenceAllowAnyClient, config.SettlementReferenceClientID)
+	}
+	for name, clear := range map[string]func(){
+		"SETTLEMENT_REFERENCE_ISSUER":                  func() { t.Setenv("SETTLEMENT_REFERENCE_ISSUER", "") },
+		"SETTLEMENT_REFERENCE_AUDIENCE":                func() { t.Setenv("SETTLEMENT_REFERENCE_AUDIENCE", "") },
+		"SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH":         func() { t.Setenv("SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH", "") },
+		"SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE": func() { t.Setenv("SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE", "") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			setValidEnvironment(t)
+			setSettlementReferenceEnvironment(t)
+			t.Setenv("SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT", "true")
+			clear()
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s missing not rejected: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestSettlementReferenceRequiresClientIDWhenSubjectPinned 验证未解耦时仍要求 client id。
+func TestSettlementReferenceRequiresClientIDWhenSubjectPinned(t *testing.T) {
+	setValidEnvironment(t)
+	setSettlementReferenceEnvironment(t)
+	t.Setenv("SETTLEMENT_REFERENCE_ALLOW_ANY_CLIENT", "false")
+	t.Setenv("SETTLEMENT_REFERENCE_CLIENT_ID", "")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "SETTLEMENT_REFERENCE_CLIENT_ID") {
+		t.Fatalf("empty client id accepted while subject is pinned: %v", err)
+	}
+	t.Setenv("SETTLEMENT_REFERENCE_CLIENT_ID", "settlement-prod-project-reference")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("pinned settlement reference rejected: %v", err)
+	}
+	if config.SettlementReferenceAllowAnyClient || config.SettlementReferenceClientID != "settlement-prod-project-reference" {
+		t.Fatalf("unexpected pinned config: allow_any=%v client_id=%q", config.SettlementReferenceAllowAnyClient, config.SettlementReferenceClientID)
+	}
+}
+
+// TestLoadUsesUnifiedIdleAndAbsoluteSessionDefaults 验证统一会话默认值：
+// 空闲 30 分钟、绝对 8 小时，而不是旧实现的单一绝对期限。
+func TestLoadUsesUnifiedIdleAndAbsoluteSessionDefaults(t *testing.T) {
+	setValidEnvironment(t)
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.OIDCSessionIdleTTL != 30*time.Minute || config.OIDCSessionAbsoluteTTL != 8*time.Hour {
+		t.Fatalf("session TTLs = idle %s absolute %s, want 30m/8h", config.OIDCSessionIdleTTL, config.OIDCSessionAbsoluteTTL)
+	}
+}
+
+// TestLoadKeepsLegacySessionTTLAsAbsoluteDeadline 验证旧键兼容：新绝对期限未显式
+// 设置时旧 OIDC_SESSION_TTL 必须继续生效，不能被静默放大成默认 8 小时。
+func TestLoadKeepsLegacySessionTTLAsAbsoluteDeadline(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_SESSION_TTL", "2h")
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.OIDCSessionAbsoluteTTL != 2*time.Hour || config.OIDCSessionIdleTTL != 30*time.Minute {
+		t.Fatalf("legacy compatibility = idle %s absolute %s, want 30m/2h", config.OIDCSessionIdleTTL, config.OIDCSessionAbsoluteTTL)
+	}
+}
+
+// TestLoadPrefersNewAbsoluteKeyOverLegacy 验证新旧键同时存在时以新键为准。
+func TestLoadPrefersNewAbsoluteKeyOverLegacy(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_SESSION_TTL", "2h")
+	t.Setenv("OIDC_SESSION_ABSOLUTE_TTL", "6h")
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.OIDCSessionAbsoluteTTL != 6*time.Hour {
+		t.Fatalf("absolute TTL = %s, want 6h (new key wins)", config.OIDCSessionAbsoluteTTL)
+	}
+}
+
+// TestLoadRejectsInvalidUnifiedSessionTTLs 验证无效配置失败关闭：空闲越界、
+// 绝对期限不足或无法解析都不得以默认值继续启动。
+func TestLoadRejectsInvalidUnifiedSessionTTLs(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		env       map[string]string
+		wantError string
+	}{
+		{"legacy absolute shorter than idle default", map[string]string{"OIDC_SESSION_TTL": "15m"}, "OIDC_SESSION_ABSOLUTE_TTL"},
+		{"idle below lower bound", map[string]string{"OIDC_SESSION_IDLE_TTL": "30s"}, "OIDC_SESSION_IDLE_TTL"},
+		{"idle above upper bound", map[string]string{"OIDC_SESSION_IDLE_TTL": "25h", "OIDC_SESSION_ABSOLUTE_TTL": "48h"}, "OIDC_SESSION_IDLE_TTL"},
+		{"absolute not greater than idle", map[string]string{"OIDC_SESSION_IDLE_TTL": "8h", "OIDC_SESSION_ABSOLUTE_TTL": "8h"}, "OIDC_SESSION_ABSOLUTE_TTL"},
+		{"absolute shorter than idle", map[string]string{"OIDC_SESSION_IDLE_TTL": "2h", "OIDC_SESSION_ABSOLUTE_TTL": "1h"}, "OIDC_SESSION_ABSOLUTE_TTL"},
+		{"malformed legacy value", map[string]string{"OIDC_SESSION_TTL": "十五分钟"}, "OIDC_SESSION_TTL"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setValidEnvironment(t)
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %s", err, test.wantError)
+			}
+		})
 	}
 }

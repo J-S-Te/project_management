@@ -66,7 +66,7 @@ type importedReferenceDirectory struct{ approvedContractVerifierStub }
 // ListReferences 提供普通与历史来源混合目录以验证项目补建计数边界。
 // 参数：ctx 为请求，after 为游标，limit 为分页大小。
 // 返回值：两个引用及结束游标。
-func (importedReferenceDirectory) ListReferences(ctx context.Context, after string, limit int) ([]platform.ApprovedContract, string, error) {
+func (importedReferenceDirectory) ListReferences(ctx context.Context, keyword, after string, limit int) ([]platform.ApprovedContract, string, error) {
 	return []platform.ApprovedContract{{ID: "normal"}, {ID: "normal-batch", OriginKind: "NORMAL", ImportMode: "NORMAL", OriginImportItemID: "batch-item"}, {ID: "archive", OriginKind: "IMPORTED", ImportMode: "ARCHIVE_ONLY", OriginImportItemID: "item"}}, "", nil
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/auditctx"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/oklog/ulid/v2"
 	"gorm.io/gorm"
@@ -470,6 +471,14 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 		updates["services"] = len(items)
 		updates["supplement_status"] = "REQUIRED"
 		updates["status"] = "补充协议处理中"
+	case application.EventSupplementClosed:
+		// 受控退出补充协议（BIZ-PROJECT-04）：只有显式关账动作能把 REQUIRED 清零。
+		// 权限、已审批补充协议、原因与关账时接受的范围指纹都在事件里留痕；这里再核对
+		// 项目确实仍在补充协议分支，避免事件重放或并发把已推进的项目改写。
+		if !strings.EqualFold(strings.TrimSpace(project.SupplementStatus), "REQUIRED") {
+			return application.ErrConflict
+		}
+		updates["supplement_status"] = "NONE"
 	}
 	if len(updates) == 1 {
 		return nil
@@ -579,7 +588,8 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 		ActorID: actorPointer(event.ActorUserID), ActorType: actorType,
 		Action:       "PROJECT_MANAGEMENT:" + string(event.Type),
 		ResourceType: "project", ResourceID: event.ProjectID,
-		LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
+		RequestID: auditRequestID(meta.RequestID),
+		LoginIP:   auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource),
 		Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
 	}).Error
 }
@@ -844,8 +854,8 @@ func syncEquipmentReservations(tx *gorm.DB, item *serviceItemRecord, event domai
 		}
 		master, exists := locked[strings.ToLower(strings.TrimSpace(resource.ResourceID))]
 		if !exists || master.Status != "ACTIVE" || master.UsageScope == domain.EquipmentUsageCompanyOnly ||
-			(master.ValidFrom != nil && dayOnly(*master.ValidFrom).After(start)) ||
-			(master.ValidUntil != nil && dayOnly(*master.ValidUntil).Before(end)) {
+			(master.ValidFrom != nil && businessclock.CalendarDay(*master.ValidFrom).After(start)) ||
+			(master.ValidUntil != nil && businessclock.CalendarDay(*master.ValidUntil).Before(end)) {
 			return fmt.Errorf("%w: 设备「%s」已删除、停用或不再适用于使用时段，请重新选择设备", application.ErrConflict, resource.ResourceID)
 		}
 		for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
@@ -867,7 +877,7 @@ func equipmentWindow(item *serviceItemRecord, resource domain.PlanResource) (tim
 		if item.PlannedStart == nil || item.PlannedEnd == nil {
 			return time.Time{}, time.Time{}, application.ErrValidation
 		}
-		return dayOnly(*item.PlannedStart), dayOnly(*item.PlannedEnd), nil
+		return businessclock.CalendarDay(*item.PlannedStart), businessclock.CalendarDay(*item.PlannedEnd), nil
 	}
 	start, err := time.Parse("2006-01-02", startText)
 	if err != nil {
@@ -880,9 +890,8 @@ func equipmentWindow(item *serviceItemRecord, resource domain.PlanResource) (tim
 	return start, end, nil
 }
 
-func dayOnly(value time.Time) time.Time {
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
-}
+// 设备占用落库前统一归日：读侧与应用层同用 businessclock.CalendarDay，
+// 保证 DATE 行、占用时段与北京日历日三者可比较。
 
 func clearImplPlan(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent, clearPlan bool) error {
 	updates := map[string]any{"equipment": nil, "updated_at": event.CreatedAt, "updated_by": event.ActorUserID}

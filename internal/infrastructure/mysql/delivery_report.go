@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -206,6 +207,21 @@ func persistEvidenceFiles(tx *gorm.DB, item *serviceItemRecord, event domain.Del
 		return application.ErrValidation
 	}
 	for _, file := range files {
+		// 证据台账的唯一键是 (tenant_id, file_id)：同一文件只能归属一个服务项。
+		// 先查后写，把"同一文件被别的服务项复用"翻译成可解释的 422，而不是让
+		// 唯一键冲突一路兜底成 500 服务暂不可用（BIZ-PROJECT-03）。
+		var existing evidenceFileRecord
+		lookupErr := tx.Where("tenant_id=? AND file_id=?", item.TenantID, file.FileID).Take(&existing).Error
+		switch {
+		case lookupErr == nil:
+			if reuseErr := evidenceFileReuseError(existing.ServiceItemID, item.ID); reuseErr != nil {
+				return reuseErr
+			}
+			// 同一服务项重复提交同一文件（例如重放现场记录）保持幂等。
+			continue
+		case !errors.Is(lookupErr, gorm.ErrRecordNotFound):
+			return lookupErr
+		}
 		record := evidenceFileRecord{
 			TenantID: item.TenantID, ServiceItemID: item.ID, EvidenceKind: kind,
 			FileID: file.FileID, FileName: file.FileName, FileMIME: file.MIME,
@@ -213,10 +229,32 @@ func persistEvidenceFiles(tx *gorm.DB, item *serviceItemRecord, event domain.Del
 			CreatedBy: event.ActorUserID, CreatedAt: event.CreatedAt,
 		}
 		if err = tx.Create(&record).Error; err != nil {
-			return err
+			if !isDuplicateKey(err) {
+				return err
+			}
+			// 并发提交时另一个事务可能刚刚占用了同一 (tenant, file_id)：重新读取归属，
+			// 同一服务项按幂等处理，其它服务项仍返回 422，绝不上抛 500。
+			var owner evidenceFileRecord
+			if findErr := tx.Where("tenant_id=? AND file_id=?", item.TenantID, file.FileID).Take(&owner).Error; findErr != nil {
+				return application.ErrConflict
+			}
+			if reuseErr := evidenceFileReuseError(owner.ServiceItemID, item.ID); reuseErr != nil {
+				return reuseErr
+			}
+			continue
 		}
 	}
 	return nil
+}
+
+// evidenceFileReuseError 判定一条既有证据台账记录能否被当前服务项复用。
+// pm_evidence_file 的唯一键是 (tenant_id, file_id)，所以同一文件只能归属一个服务项：
+// 同一服务项重复提交保持幂等（返回 nil 由调用方跳过写入），其它服务项复用返回 422。
+func evidenceFileReuseError(existingServiceItemID, serviceItemID string) error {
+	if existingServiceItemID == serviceItemID {
+		return nil
+	}
+	return application.ValidationError("证据文件已登记到其它服务项，请重新上传属于本服务项的文件")
 }
 
 func formatOptionalTime(value *time.Time) string {

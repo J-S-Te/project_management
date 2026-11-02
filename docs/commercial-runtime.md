@@ -14,6 +14,12 @@
 固定持久状态目录不存在或为空的组件；已有状态或绑定残留时会拒绝启动，不会因环境
 文件丢失而静默放开。不可通过删状态卷或修改开关解除既有执行保护。
 
+兼容模式必须显式 opt-in：`COMMERCIAL_LICENSE_ENABLED` 为空或 `false` 时还必须
+`COMMERCIAL_LICENSE_COMPATIBILITY=true`（归一大小写和首尾空白后严格等于 `true`），
+否则启动即 `ErrConfiguration`；`1`、`yes` 等非法取值按未开启处理并同样拒绝启动。
+反过来，生产不得用 `false` 加兼容开关冒充已授权：受控交付一律 `ENABLED=true`，
+该路径不受兼容开关影响。
+
 目录权威为 `license-core/catalog/catalog.go`（工作区路径）；本仓库构建使用审核过的
 `third_party/license-core/catalog/catalog.go` 镜像。组件目录/发布批准与原业务授权均须满足。
 部署、检查与恢复入口见[统一交付流程](../../platform/deploy/production/DELIVERY_WORKFLOW.md)。
@@ -27,7 +33,10 @@ the platform verification key is mounted read-only. Vendor trust is compiled
 into the reviewed `third_party/license-core` consumer; no signing key is shipped.
 
 Only never-enrolled components with no binding fields and no persisted runtime state
-may use disabled compatibility mode; enrolled components cannot silently downgrade.
+may use disabled compatibility mode, and only after explicit
+`COMMERCIAL_LICENSE_COMPATIBILITY=true` (normalized exact `true`; empty, `1` or
+`yes` fail startup); no persisted runtime state may remain. Enrolled components
+cannot silently downgrade, and the switch is not an authorization substitute.
 When `COMMERCIAL_LICENSE_ENABLED=true`, incomplete bindings fail startup;
 missing/invalid signed state denies nonessential operations. A polling failure
 does not extend the signed absolute expiry. Existing permission and data-scope

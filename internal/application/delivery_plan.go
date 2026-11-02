@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"strings"
@@ -115,12 +116,12 @@ func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, i
 	validUntil := ""
 	if resourceType == "EQUIPMENT" {
 		// 设备检定时段以日期表达：覆盖到当天即算覆盖，不因时分量产生边界误判。
-		if !capability.ValidFrom.IsZero() && dayOf(capability.ValidFrom).After(dayOf(validationStart)) {
+		if !capability.ValidFrom.IsZero() && businessclock.CalendarDay(capability.ValidFrom).After(businessclock.CalendarDay(validationStart)) {
 			return domain.PlanResource{}, fmt.Errorf("%s「%s」的检定有效期从 %s 开始，不覆盖使用时段开始日 %s",
 				label, capability.ResourceName, capability.ValidFrom.Format("2006-01-02"), start.Format("2006-01-02"))
 		}
 		if !capability.ValidUntil.IsZero() {
-			if dayOf(capability.ValidUntil).Before(dayOf(end)) {
+			if businessclock.CalendarDay(capability.ValidUntil).Before(businessclock.CalendarDay(end)) {
 				return domain.PlanResource{}, fmt.Errorf("%s「%s」的检定有效期至 %s，不覆盖使用时段截止日 %s",
 					label, capability.ResourceName, capability.ValidUntil.Format("2006-01-02"), end.Format("2006-01-02"))
 			}
@@ -138,14 +139,8 @@ func (s *Service) buildPlanResource(byResourceID map[string]domain.Capability, i
 	return row, nil
 }
 
-// dayOf 把时间截断到 UTC 日期：计划窗口与设备检定有效期都以"天"为业务粒度，
-// 直接比较时间戳会把同一天判成越界或超期。
-
-// dayOf 把时间截断到 UTC 日期：计划窗口与设备检定有效期都以"天"为业务粒度，
-// 直接比较时间戳会把同一天判成越界或超期。
-func dayOf(value time.Time) time.Time {
-	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
-}
+// 计划窗口与设备检定有效期都以"天"为业务粒度，直接比较时间戳会把同一天判成越界或超期；
+// 归日口径统一走 businessclock.CalendarDay（北京日历日 + UTC 零点），不在应用层各写一份。
 
 // planResourceWindow 解析行级使用时段：两端要么都留空（表示全程），要么都填写且不早于计划开始、
 // 不晚于计划结束；返回值同时作为设备检定有效期校验的边界。
@@ -171,7 +166,7 @@ func planResourceWindow(input domain.PlanResourceInput, planStart, planEnd time.
 	if end.Before(start) {
 		return time.Time{}, time.Time{}, errors.New("使用时段结束不能早于开始")
 	}
-	if dayOf(start).Before(dayOf(planStart)) || dayOf(end).After(dayOf(planEnd)) {
+	if businessclock.CalendarDay(start).Before(businessclock.CalendarDay(planStart)) || businessclock.CalendarDay(end).After(businessclock.CalendarDay(planEnd)) {
 		return time.Time{}, time.Time{}, fmt.Errorf("使用时段必须落在计划起止 %s ~ %s 之内",
 			planStart.Format("2006-01-02"), planEnd.Format("2006-01-02"))
 	}

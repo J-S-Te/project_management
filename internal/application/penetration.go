@@ -391,6 +391,11 @@ func (s *Service) RegisterPenetrationReportArtifact(ctx context.Context, p platf
 	if err := normalizeFileEvidence(&input.ReportArtifactInput, "渗透测试专项报告"); err != nil {
 		return domain.PenetrationWorkPackage{}, err
 	}
+	// 专项报告同样必须回源文件网关核验（存在性/租户/应用/SHA/绑定），
+	// 不能只凭客户端回执形状登记证据（BIZ-PROJECT-03）。
+	if err := s.verifyFileEvidence(ctx, p, itemID, input.ReportArtifactInput, "渗透测试专项报告"); err != nil {
+		return domain.PenetrationWorkPackage{}, err
+	}
 	key, err := requireIdempotencyKey(input.IdempotencyKey)
 	if err != nil {
 		return domain.PenetrationWorkPackage{}, err

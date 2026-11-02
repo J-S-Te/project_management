@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"github.com/j-s-te/project-management/internal/businessclock"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
@@ -141,8 +142,10 @@ func deliveryEvent(p platform.Principal, projectID, itemID, typ string, payload 
 	return domain.DeliveryEvent{ID: ulid.Make().String(), TenantID: p.TenantID, ProjectID: projectID, ServiceItemID: itemID, Type: typ, ActorUserID: p.UserID, Payload: payload, CreatedAt: time.Now().UTC()}
 }
 
+// projectID 生成项目编号 PJ-<北京业务年>-<后缀>。年份取业务日历：
+// UTC 12-31 16:00 之后已是北京时间新年，不能再把新项目写进上一年。
 func projectID(now time.Time) string {
-	return "PJ-" + now.Format("2006") + "-" + strings.ToUpper(ulid.Make().String()[20:])
+	return "PJ-" + strconv.Itoa(businessclock.YearOf(now)) + "-" + strings.ToUpper(ulid.Make().String()[20:])
 }
 
 func firstNonEmpty(values ...string) string {

@@ -83,6 +83,9 @@ func (c *Config) loadFeatures() error {
 	if c.Background.Engine == "temporal" && len(c.SlaScanTenants) == 0 {
 		c.SlaScanTenants = []string{c.OIDCTenantID}
 	}
+	if err := c.loadFieldCheckIn(); err != nil {
+		return err
+	}
 	return nil
 }
 

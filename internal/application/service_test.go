@@ -18,7 +18,7 @@ type approvedContractVerifierStub struct{}
 func (approvedContractVerifierStub) List(_ context.Context, _ int) ([]platform.ApprovedContract, error) {
 	return []platform.ApprovedContract{{ID: "C-1", Number: "HT-1", CustomerName: "客户", Version: 1, Status: "approved", ApprovalPassed: true}}, nil
 }
-func (approvedContractVerifierStub) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (approvedContractVerifierStub) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return []platform.ApprovedContract{
 		{ID: "C-1", Number: "HT-1", Version: 1},
 		{ID: "C-2", Number: "HT-2", Version: 1},
@@ -44,7 +44,7 @@ type failingApprovedContractVerifier struct{}
 func (failingApprovedContractVerifier) List(context.Context, int) ([]platform.ApprovedContract, error) {
 	return nil, errors.New("contract service unavailable")
 }
-func (failingApprovedContractVerifier) ListReferences(context.Context, string, int) ([]platform.ApprovedContract, string, error) {
+func (failingApprovedContractVerifier) ListReferences(context.Context, string, string, int) ([]platform.ApprovedContract, string, error) {
 	return nil, "", errors.New("contract service unavailable")
 }
 func (failingApprovedContractVerifier) Get(context.Context, string) (platform.ApprovedContract, error) {

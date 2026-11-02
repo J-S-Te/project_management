@@ -25,10 +25,13 @@ type ClientCredentialsTokenVerifier interface {
 }
 
 // ClientCredentialsVerifierOptions 定义本地接收端接受的唯一机器信任域。
+// AllowAnyClientSubject=true 表示接收端按平台应用与 scope 授权，不固定令牌主体；
+// 此时 ClientID 可为空，但 issuer/audience/token_use/应用/环境/scope/公钥绑定不变。
 type ClientCredentialsVerifierOptions struct {
 	Issuer, Audience, PublicKeyPath, ClientID, TenantID string
 	CallerApplicationCode, CallerEnvironmentCode        string
 	RequiredScope                                       string
+	AllowAnyClientSubject                               bool
 }
 
 // ServiceTokenIdentity 是经过平台签名和完整调用方绑定校验后的机器身份。
@@ -44,6 +47,7 @@ type platformApplicationTokenVerifier struct {
 	clientID, tenantID               string
 	applicationCode, environmentCode string
 	requiredScope                    string
+	allowAnyClientSubject            bool
 }
 
 type platformApplicationTokenClaims struct {
@@ -63,8 +67,12 @@ type platformApplicationTokenClaims struct {
 
 // NewClientCredentialsTokenVerifier 从只读公钥构建平台机器令牌验证器。
 // options 缺失或公钥无效时返回错误；成功时返回失败关闭的本地验证器。
+// AllowAnyClientSubject=true 时不要求固定 ClientID；其余信任绑定仍必须完整。
 func NewClientCredentialsTokenVerifier(_ context.Context, options ClientCredentialsVerifierOptions) (ClientCredentialsTokenVerifier, error) {
-	values := []string{options.Issuer, options.Audience, options.PublicKeyPath, options.ClientID, options.TenantID, options.CallerApplicationCode, options.CallerEnvironmentCode, options.RequiredScope}
+	values := []string{options.Issuer, options.Audience, options.PublicKeyPath, options.TenantID, options.CallerApplicationCode, options.CallerEnvironmentCode, options.RequiredScope}
+	if !options.AllowAnyClientSubject {
+		values = append(values, options.ClientID)
+	}
 	for _, value := range values {
 		if strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%w: machine token trust binding is incomplete", ErrInvalidServiceToken)
@@ -78,7 +86,7 @@ func NewClientCredentialsTokenVerifier(_ context.Context, options ClientCredenti
 		publicKey: publicKey, issuer: options.Issuer, audience: options.Audience,
 		clientID: options.ClientID, tenantID: options.TenantID,
 		applicationCode: options.CallerApplicationCode, environmentCode: options.CallerEnvironmentCode,
-		requiredScope: options.RequiredScope,
+		requiredScope: options.RequiredScope, allowAnyClientSubject: options.AllowAnyClientSubject,
 	}, nil
 }
 
@@ -106,8 +114,9 @@ func (verifier *platformApplicationTokenVerifier) VerifyClientCredentials(_ cont
 }
 
 func (verifier *platformApplicationTokenVerifier) validClaims(claims platformApplicationTokenClaims, now time.Time) bool {
+	subjectBound := verifier.allowAnyClientSubject || claims.Subject == verifier.clientID
 	return claims.Issuer == verifier.issuer && claims.Audience == verifier.audience && claims.TokenUse == "application" &&
-		claims.Subject == verifier.clientID && claims.OAuthClientID != "" && claims.TenantID == verifier.tenantID &&
+		subjectBound && claims.OAuthClientID != "" && claims.TenantID == verifier.tenantID &&
 		claims.ApplicationCode == verifier.applicationCode && claims.EnvironmentCode == verifier.environmentCode &&
 		len(claims.Scopes) == 1 && claims.Scopes[0] == verifier.requiredScope && claims.IssuedAt > 0 &&
 		claims.NotBefore >= claims.IssuedAt && claims.ExpiresAt > claims.NotBefore &&
