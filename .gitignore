@@ -9,3 +9,4 @@
 
 # macOS Finder metadata is never part of the project.
 .DS_Store
+.ai

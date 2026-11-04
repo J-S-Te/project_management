@@ -18,9 +18,10 @@ type ProjectMonitoringRepository interface {
 	LoadProjectMonitoringPage(context.Context, platform.ScopeFilter, domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error)
 }
 
-// MonitorProjects 返回授权一致的监控快照。项目、服务
-// 项、SLA 决策和事件均经过已有范围限定及字段脱敏读取
-// 路径；浏览器不得根据普通项目列表重建租户和角色边界。
+// MonitorProjects 返回授权一致的监控快照。项目、服务项、SLA 决策和事件均经过已有范围限定及字段脱
+// 敏读取路径；浏览器不得根据普通项目列表重建租户和角色边界。
+// 参数：ctx 为请求上下文，p 为可信主体，query 为分页与筛选条件。
+// 返回值：受范围及字段权限约束的监控快照；读取失败时返回错误。
 func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
 	if _, err := authorizeProjectScope(p, "project.read"); err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
@@ -92,14 +93,20 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 		}
 		rows = append(rows, row)
 		statusCounts[project.Status]++
-		if project.Team != "" {
+		// 掩码占位值不是真实取值：兜底路径的分面收集跳过它，让内存路径与
+		// 数据库分页路径（hidden 时清空分面）输出同一种形态。
+		if project.Team != "" && project.Team != maskedFieldValue {
 			teamFacets[project.Team] = struct{}{}
 		}
 		for _, category := range row.Categories {
-			categoryFacets[category] = struct{}{}
+			if category != maskedFieldValue {
+				categoryFacets[category] = struct{}{}
+			}
 		}
 		for _, managerID := range row.ProjectManagerIDs {
-			managerFacets[managerID] = struct{}{}
+			if managerID != maskedFieldValue {
+				managerFacets[managerID] = struct{}{}
+			}
 		}
 		if row.UpdatedAt.After(latestVersionTime) {
 			latestVersionTime = row.UpdatedAt
@@ -140,6 +147,9 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}, nil
 }
 
+// monitorProjectsFromDatabasePage 从数据库分页投影生成受范围与字段权限约束的监控快照。
+// 参数：ctx 为请求上下文，p 为可信主体，repository 为分页读取接口，query 为分页筛选条件。
+// 返回值：脱敏后的监控快照；规则或数据读取失败时返回错误。
 func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platform.Principal, repository ProjectMonitoringRepository, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
@@ -149,10 +159,14 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
 	}
-	projects, items, err := s.applyFieldPermissions(ctx, p, data.Projects, data.ServiceItems)
+	projectHidden, itemHidden, err := s.hiddenFieldsFor(ctx, p)
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
 	}
+	// 分页投影里的项目、服务项、事件与分面来自同一次数据库读取，hidden 规则
+	// 必须一次性作用到全部四类输出，否则事件 payload 和分面会成为脱敏旁路。
+	maskProjectAndItemFields(data.Projects, data.ServiceItems, projectHidden, itemHidden)
+	projects, items := data.Projects, data.ServiceItems
 	rules, err := s.Repo.ListRules(ctx, p.TenantID, "sla")
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
@@ -172,6 +186,20 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 	slaByProject := map[string][]domain.SlaOverdueItem{}
 	for _, item := range slaItems {
 		slaByProject[item.ProjectID] = append(slaByProject[item.ProjectID], item)
+	}
+	// 事件必须先脱敏再挑选 latest_event / recent_events：payload 里带着
+	// 指派和拆解快照，顺序颠倒会把未掩码的副本留在响应里。
+	data.Events = maskEventPayloads(data.Events, itemHidden)
+	// 分面来自与明细同一批行的聚合：被隐藏的字段不能再以取值列表的形式
+	// 从快照顶层漏出，因此清空为显式空切片（保持 JSON 数组形态）。
+	if _, hide := projectHidden["team"]; hide {
+		data.Teams = []string{}
+	}
+	if _, hide := itemHidden["category"]; hide {
+		data.Categories = []string{}
+	}
+	if _, hide := itemHidden["project_manager_id"]; hide {
+		data.ProjectManagerIDs = []string{}
 	}
 	latestEventByProject := map[string]domain.DeliveryEvent{}
 	for _, event := range data.Events {
