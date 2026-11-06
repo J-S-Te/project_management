@@ -18,9 +18,10 @@ type ProjectMonitoringRepository interface {
 	LoadProjectMonitoringPage(context.Context, platform.ScopeFilter, domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error)
 }
 
-// MonitorProjects 返回授权一致的监控快照。项目、服务
-// 项、SLA 决策和事件均经过已有范围限定及字段脱敏读取
-// 路径；浏览器不得根据普通项目列表重建租户和角色边界。
+// MonitorProjects 返回授权一致的监控快照。项目、服务项、SLA 决策和事件均经过已有范围限定及字段脱
+// 敏读取路径；浏览器不得根据普通项目列表重建租户和角色边界。
+// 参数：ctx 为请求上下文，p 为可信主体，query 为分页与筛选条件。
+// 返回值：受范围及字段权限约束的监控快照；读取失败时返回错误。
 func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
 	if _, err := authorizeProjectScope(p, "project.read"); err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
@@ -157,6 +158,9 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}, nil
 }
 
+// monitorProjectsFromDatabasePage 从数据库分页投影生成受范围与字段权限约束的监控快照。
+// 参数：ctx 为请求上下文，p 为可信主体，repository 为分页读取接口，query 为分页筛选条件。
+// 返回值：脱敏后的监控快照；规则或数据读取失败时返回错误。
 func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platform.Principal, repository ProjectMonitoringRepository, query domain.ProjectMonitoringQuery) (domain.ProjectMonitoringSnapshot, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {

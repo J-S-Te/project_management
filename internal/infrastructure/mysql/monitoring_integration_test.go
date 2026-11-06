@@ -12,9 +12,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestMonitoringPageUsesDatabasePagination 验证详情聚合
-// 仅限选中数据库页，同时总数及分面仍覆盖
-// 完整筛选结果集。
+// TestMonitoringPageUsesDatabasePagination 验证详情聚合仅限选中数据库页，同时总数及分面仍覆盖完整
+// 筛选结果集。
+// 参数：t 为测试上下文。
+// 返回值：无；实际行为偏离断言时用例失败。
 func TestMonitoringPageUsesDatabasePagination(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
@@ -85,8 +86,10 @@ func TestMonitoringPageUsesDatabasePagination(t *testing.T) {
 	}
 }
 
-// TestMonitoringPageHonoursFieldPermissionsOnMySQL 验证数据库分页路径在真实
-// pm_field_permission 规则下不绕过字段级脱敏：事件 payload 掩码、分面清空。
+// TestMonitoringPageHonoursFieldPermissionsOnMySQL 验证数据库分页路径在真实pm_field_permission 规
+// 则下不绕过字段级脱敏：事件 payload 掩码、分面清空。
+// 参数：t 为测试上下文。
+// 返回值：无；实际行为偏离断言时用例失败。
 func TestMonitoringPageHonoursFieldPermissionsOnMySQL(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {

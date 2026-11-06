@@ -17,10 +17,16 @@ type stubMonitoringPageRepository struct {
 	err  error
 }
 
+// LoadProjectMonitoringPage 返回预置监控数据库页以隔离验证脱敏流程。
+// 参数：上下文、范围过滤和分页查询为生产服务传入的读取条件，本替身不执行数据库读取。
+// 返回值：预置监控页和预置错误。
 func (r stubMonitoringPageRepository) LoadProjectMonitoringPage(context.Context, platform.ScopeFilter, domain.ProjectMonitoringQuery) (domain.ProjectMonitoringPageData, error) {
 	return r.data, r.err
 }
 
+// monitoringFieldPermissionPrincipal 构造用于监控字段权限验证的工程师主体。
+// 参数：无。
+// 返回值：具备项目读取能力和应用范围的测试主体。
 func monitoringFieldPermissionPrincipal() platform.Principal {
 	return platform.Principal{
 		TenantID: "tenant-1", UserID: "user-1", IdentityID: "user-1",
@@ -30,6 +36,9 @@ func monitoringFieldPermissionPrincipal() platform.Principal {
 	}
 }
 
+// monitoringFieldPermissionPage 构造包含事件快照及分面的监控测试页。
+// 参数：无。
+// 返回值：一个项目、服务项、嵌套事件及三类分面的完整页。
 func monitoringFieldPermissionPage() domain.ProjectMonitoringPageData {
 	now := time.Date(2026, 9, 20, 3, 0, 0, 0, time.UTC)
 	return domain.ProjectMonitoringPageData{
@@ -63,8 +72,10 @@ func monitoringFieldPermissionPage() domain.ProjectMonitoringPageData {
 	}
 }
 
-// 数据库分页路径必须与内存兜底路径同口径：latest_event / recent_events
-// 的 payload 掩码，分面在字段隐藏时清空（安全审计 M-8）。
+// TestMonitoringDatabasePageHonoursFieldPermissions 数据库分页路径必须与内存兜底路径同口径：
+// latest_event / recent_events的 payload 掩码，分面在字段隐藏时清空（安全审计 M-8）。
+// 参数：t 为测试上下文。
+// 返回值：无；实际行为偏离断言时用例失败。
 func TestMonitoringDatabasePageHonoursFieldPermissions(t *testing.T) {
 	rules := []domain.Rule{
 		{Kind: "permissions", Enabled: true, RoleCode: "engineer", FieldName: "team", AccessLevel: "hidden"},
@@ -129,7 +140,10 @@ func TestMonitoringDatabasePageHonoursFieldPermissions(t *testing.T) {
 	}
 }
 
-// 未配置 hidden 规则时分页投影逐字段直通：脱敏不能改变正常响应。
+// TestMonitoringDatabasePagePassThroughWithoutHiddenRules 未配置 hidden 规则时分页投影逐字段直通
+// ：脱敏不能改变正常响应。
+// 参数：t 为测试上下文。
+// 返回值：无；实际行为偏离断言时用例失败。
 func TestMonitoringDatabasePagePassThroughWithoutHiddenRules(t *testing.T) {
 	page := monitoringFieldPermissionPage()
 	service := Service{Repo: &hookRepository{}}

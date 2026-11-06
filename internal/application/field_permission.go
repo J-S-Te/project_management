@@ -138,8 +138,10 @@ func principalHasRole(p platform.Principal, roleCode string) bool {
 	return false
 }
 
-// applyFieldPermissions 对读出的项目与服务项按字段级权限规则执行 hidden 脱敏。
-// 任一集合为空时该项保持原样返回，不影响请求路径。
+// applyFieldPermissions 对读出的项目与服务项按字段级权限规则执行 hidden 脱敏。任一集合为空时该项
+// 保持原样返回，不影响请求路径。
+// 参数：ctx 为请求上下文，p 为可信主体，projects/items 为待脱敏项目和服务项。
+// 返回值：脱敏后的集合；字段规则读取失败时返回错误。
 func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principal, projects []domain.Project, items []domain.ServiceItem) ([]domain.Project, []domain.ServiceItem, error) {
 	projectHidden, itemHidden, err := s.hiddenFieldsFor(ctx, p)
 	if err != nil {
@@ -149,9 +151,10 @@ func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principa
 	return projects, items, nil
 }
 
-// maskProjectAndItemFields 用已加载的 hidden 集合脱敏项目和服务项。
-// 抽出纯函数是为了让需要一次性读取规则的复合读路径（如监控快照）
-// 复用同一份 hidden，而不是重复查规则表或各写一套掩码。
+// maskProjectAndItemFields 用已加载的 hidden 集合脱敏项目和服务项。抽出纯函数是为了让需要一次性读
+// 取规则的复合读路径（如监控快照）复用同一份 hidden，而不是重复查规则表或各写一套掩码。
+// 参数：projects/items 为待脱敏集合，projectHidden/itemHidden 为已加载的隐藏字段集合。
+// 返回值：无；直接更新传入集合中的字段。
 func maskProjectAndItemFields(projects []domain.Project, items []domain.ServiceItem, projectHidden, itemHidden map[string]struct{}) {
 	if len(projectHidden) > 0 && len(projects) > 0 {
 		for field := range projectHidden {
@@ -208,9 +211,11 @@ func (s *Service) applyFieldPermissionsToReservations(ctx context.Context, p pla
 	return reservations, nil
 }
 
-// applyFieldPermissionsToEvents 对交付事件流执行与服务项读路径完全相同的字段脱敏。
-// 事件 payload 里带着指派快照与拆解快照，若不处理，配置为 hidden 的字段会从
-// /delivery-events 整条漏出去——脱敏只有覆盖所有读路径才算生效。
+// applyFieldPermissionsToEvents 对交付事件流执行与服务项读路径完全相同的字段脱敏。事件 payload 里
+// 带着指派快照与拆解快照，若不处理，配置为 hidden 的字段会从/delivery-events 整条漏出去——脱敏只有
+// 覆盖所有读路径才算生效。
+// 参数：ctx 为请求上下文，p 为可信主体，events 为待脱敏事件流。
+// 返回值：脱敏后的事件；字段规则读取失败时返回错误。
 func (s *Service) applyFieldPermissionsToEvents(ctx context.Context, p platform.Principal, events []domain.DeliveryEvent) ([]domain.DeliveryEvent, error) {
 	_, itemHidden, err := s.hiddenFieldsFor(ctx, p)
 	if err != nil {
@@ -219,9 +224,10 @@ func (s *Service) applyFieldPermissionsToEvents(ctx context.Context, p platform.
 	return maskEventPayloads(events, itemHidden), nil
 }
 
-// maskEventPayloads 是事件脱敏的纯函数形式：已加载 hidden 规则后按同一口径
-// 递归掩码 payload。监控快照等由已加载规则的读路径复用它，避免再查一次规则表，
-// 也避免各读路径各写一套脱敏逻辑。
+// maskEventPayloads 是事件脱敏的纯函数形式：已加载 hidden 规则后按同一口径递归掩码 payload。监控
+// 快照等由已加载规则的读路径复用它，避免再查一次规则表，也避免各读路径各写一套脱敏逻辑。
+// 参数：events 为待脱敏事件，hidden 为已加载的服务项隐藏字段集合。
+// 返回值：递归脱敏后的事件集合。
 func maskEventPayloads(events []domain.DeliveryEvent, hidden map[string]struct{}) []domain.DeliveryEvent {
 	if len(hidden) == 0 || len(events) == 0 {
 		return events
