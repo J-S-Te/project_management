@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/j-s-te/project-management/internal/shutdown"
 )
 
 func quietLogger() *slog.Logger {
@@ -127,4 +131,27 @@ func waitForServer(t *testing.T, addr string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("server on %s never accepted connections", addr)
+}
+
+// B2：退出时先取消后台上下文，再按预算 join 后台 goroutine；
+// 预算内没退出必须点名并返回错误（main 据此非零退出）。
+func TestDrainRuntimeJoinsBackgroundGoroutines(t *testing.T) {
+	group := shutdown.NewGroup()
+	joined := make(chan struct{})
+	cancel := func() { close(joined) }
+	group.Go("audit-outbox-dispatcher", func() { <-joined })
+	if err := drainRuntime(context.Background(), cancel, group, time.Second, quietLogger()); err != nil {
+		t.Fatalf("drainRuntime = %v, want nil", err)
+	}
+}
+
+func TestDrainRuntimeNamesPendingGoroutinesOnBudgetExceeded(t *testing.T) {
+	group := shutdown.NewGroup()
+	release := make(chan struct{})
+	defer close(release)
+	group.Go("stuck-notifier", func() { <-release })
+	err := drainRuntime(context.Background(), func() {}, group, 50*time.Millisecond, quietLogger())
+	if err == nil || !strings.Contains(err.Error(), "stuck-notifier") {
+		t.Fatalf("drainRuntime = %v, want deadline error naming stuck-notifier", err)
+	}
 }

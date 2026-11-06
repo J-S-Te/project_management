@@ -41,6 +41,7 @@ type Runtime struct {
 	legacyOperation             string
 	socket                      net.Listener
 	controlServer               *http.Server
+	serveDone                   chan struct{}
 	newWorker                   func() workerRunner
 	checkRouting                func(context.Context) error
 }
@@ -121,9 +122,13 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return e
 	}
 	r.socket = listener
-	r.controlServer = &http.Server{Handler: r.controlHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
+	controlServer := &http.Server{Handler: r.controlHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second}
+	r.controlServer = controlServer
+	// B2：登记 Serve goroutine，Stop 时 join，避免退出时还有 socket handler 在跑。
+	r.serveDone = make(chan struct{})
 	go func() {
-		if e := r.controlServer.Serve(listener); e != nil && !errors.Is(e, http.ErrServerClosed) {
+		defer close(r.serveDone)
+		if e := controlServer.Serve(listener); e != nil && !errors.Is(e, http.ErrServerClosed) {
 			r.mu.Lock()
 			r.bootstrap = false
 			r.mu.Unlock()
@@ -145,12 +150,17 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	r.blocked = true
 	cancel := r.cancel
 	w := r.worker
+	serveDone := r.serveDone
 	r.mu.Unlock()
 	if r.controlServer != nil {
 		_ = r.controlServer.Close()
 	}
 	done := make(chan struct{})
 	go func() {
+		// B2：control server 的 Serve goroutine 必须在 Stop 返回前 join。
+		if serveDone != nil {
+			<-serveDone
+		}
 		if w != nil {
 			w.Stop()
 		}

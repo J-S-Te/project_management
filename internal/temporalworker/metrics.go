@@ -140,14 +140,29 @@ func (registry *MetricsRegistry) ServeHTTP(writer http.ResponseWriter, _ *http.R
 	}
 }
 
+// MetricsServer 是可 join 的独立指标端口：Done 在监听 goroutine 退出后关闭。
+type MetricsServer struct {
+	server *http.Server
+	done   chan struct{}
+}
+
+// Done 在指标端口的监听 goroutine 退出后关闭，供停机有界 join 使用。
+func (m *MetricsServer) Done() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	return m.done
+}
+
 // StartMetricsServer 启动独立指标端口，并在上下文取消时有界关闭。
-func StartMetricsServer(ctx context.Context, address string, registry *MetricsRegistry, logger *slog.Logger) error {
+func StartMetricsServer(ctx context.Context, address string, registry *MetricsRegistry, logger *slog.Logger) (*MetricsServer, error) {
 	if registry == nil || logger == nil || strings.TrimSpace(address) == "" {
-		return fmt.Errorf("Temporal metrics server requires address, registry and logger")
+		return nil, fmt.Errorf("Temporal metrics server requires address, registry and logger")
 	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", registry)
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	metricsServer := &MetricsServer{server: server, done: make(chan struct{})}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -157,11 +172,22 @@ func StartMetricsServer(ctx context.Context, address string, registry *MetricsRe
 		}
 	}()
 	go func() {
+		defer close(metricsServer.done)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("Temporal metrics server failed", "error", err)
 		}
 	}()
-	return nil
+	return metricsServer, nil
+}
+
+// ClearGauges 移除指定无标签 gauge，使本次抓取缺失该指标（未知），
+// 而不是沿用上一次成功采集的陈旧值。
+func (registry *MetricsRegistry) ClearGauges(names ...string) {
+	registry.mu.Lock()
+	for _, name := range names {
+		delete(registry.gauges, sanitizeMetricName(name))
+	}
+	registry.mu.Unlock()
 }
 
 func metricKey(name string, tags map[string]string) string {

@@ -14,6 +14,7 @@ import (
 	"github.com/j-s-te/project-management/internal/config"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
 	"github.com/j-s-te/project-management/internal/platform"
+	"github.com/j-s-te/project-management/internal/shutdown"
 	"github.com/j-s-te/project-management/internal/temporalworker"
 	"go.temporal.io/sdk/client"
 )
@@ -33,6 +34,7 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	}
 	lifeCtx, lifeCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer lifeCancel()
+	group := shutdown.NewGroup()
 	gate, e := bootstrap.OpenCommercialLicense(lifeCtx, logger)
 	if e != nil {
 		return errors.New("commercial license configuration unavailable")
@@ -59,9 +61,11 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	var tc client.Client
 	if o.Engine == EngineTemporal {
 		metrics := temporalworker.NewMetricsRegistry()
-		if e = temporalworker.StartMetricsServer(lifeCtx, cfg.TemporalMetricsAddress, metrics, logger); e != nil {
+		metricsServer, metricsErr := temporalworker.StartMetricsServer(lifeCtx, cfg.TemporalMetricsAddress, metrics, logger)
+		if metricsErr != nil {
 			return errors.New("background metrics unavailable")
 		}
+		group.Go("temporal-metrics-server", func() { <-metricsServer.Done() })
 		co := client.Options{HostPort: cfg.TemporalAddress, Namespace: cfg.TemporalNamespace, Logger: quietTemporalLogger{logger}, MetricsHandler: metrics}
 		if cfg.TemporalTLS {
 			co.ConnectionOptions.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -94,10 +98,12 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		stopCtx, cancel := context.WithTimeout(context.Background(), o.WorkflowRunTimeout+time.Minute)
 		defer cancel()
 		_ = r.Stop(stopCtx)
+		// 启动失败也要把已登记的指标端口 goroutine 有界 join 掉再退出。
+		_ = drainBackground(lifeCancel, group, nil, logger)
 		return e
 	}
 	healthErr := make(chan error, 1)
-	go func() { healthErr <- health.Serve(healthListener) }()
+	group.Go("health-server", func() { healthErr <- health.Serve(healthListener) })
 	select {
 	case <-ctx.Done():
 	case <-healthErr:
@@ -107,8 +113,30 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if e = r.Stop(stopCtx); e != nil {
 		return e
 	}
+	// B2：Runtime.Stop 已 join worker / legacy / control server；这里再取消生命周期上下文，
+	// 把 health 与指标端口的 goroutine 按预算 join，超预算点名失败（进程非零退出）。
+	if e = drainBackground(lifeCancel, group, health, logger); e != nil {
+		return e
+	}
 	if ctx.Err() == nil {
 		return errors.New("background health server stopped")
+	}
+	return nil
+}
+
+// drainBackground 取消后台生命周期上下文，关闭 health 端口，并在预算内 join 登记的后台 goroutine。
+// 参数：lifeCancel 取消后台循环；group 为 goroutine 登记表；health 可为 nil；logger 记录点名日志。
+// 返回值：全部 join 成功为 nil；预算耗尽返回点名错误（调用方返回错误，进程非零退出）。
+func drainBackground(lifeCancel context.CancelFunc, group *shutdown.Group, health *http.Server, logger *slog.Logger) error {
+	lifeCancel()
+	if health != nil {
+		_ = health.Close()
+	}
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdown.Budget())
+	defer cancelDrain()
+	if err := group.Drain(drainCtx); err != nil {
+		logger.Error("background shutdown drain exceeded budget", "error_code", "SHUTDOWN_DRAIN_DEADLINE", "error", err.Error())
+		return err
 	}
 	return nil
 }
