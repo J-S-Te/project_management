@@ -21,13 +21,6 @@ type EquipmentImportCreator interface {
 	CreateEquipmentForImport(context.Context, domain.Capability, string) (domain.Capability, error)
 }
 
-func (s *Service) ConfirmEquipmentImportRow(ctx context.Context, p platform.Principal, row CapabilityImportPreviewRow) (domain.Capability, error) {
-	if row.Status != "READY" || (row.Action != "CREATE" && row.Action != "UPDATE") {
-		return domain.Capability{}, ErrValidation
-	}
-	return s.upsertEquipment(ctx, p, row.Capability, row.Action == "CREATE")
-}
-
 // PreviewEquipmentImport 校验整个文件，不修改设备。
 func (s *Service) PreviewEquipmentImport(ctx context.Context, p platform.Principal, inputs []EquipmentImportInput) (CapabilityImportPreview, error) {
 	result := CapabilityImportPreview{Rows: []CapabilityImportPreviewRow{}}

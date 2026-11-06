@@ -72,6 +72,9 @@ func TestPermissionManifestCoversEveryRoutePermission(t *testing.T) {
 	}
 }
 
+// TestFieldExecutionPermissionBelongsToProjectManagerNotEngineers 保留现场执行授权并校验最新目录版本。
+// 参数：t 为测试上下文。
+// 返回值：无；项目经理与工程师权限混淆时失败。
 func TestFieldExecutionPermissionBelongsToProjectManagerNotEngineers(t *testing.T) {
 	var manifest struct {
 		CatalogVersion string `json:"catalog_version"`
@@ -83,8 +86,8 @@ func TestFieldExecutionPermissionBelongsToProjectManagerNotEngineers(t *testing.
 	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
 		t.Fatalf("decode permission manifest: %v", err)
 	}
-	if manifest.CatalogVersion != "8" {
-		t.Fatalf("catalog_version=%q, want 8 for field workflow permission migration", manifest.CatalogVersion)
+	if manifest.CatalogVersion != "9" {
+		t.Fatalf("catalog_version=%q, want 9 for native scope approval permission", manifest.CatalogVersion)
 	}
 
 	roles := make(map[string]map[string]bool, len(manifest.Roles))

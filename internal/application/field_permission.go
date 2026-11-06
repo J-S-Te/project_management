@@ -145,6 +145,14 @@ func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principa
 	if err != nil {
 		return nil, nil, err
 	}
+	maskProjectAndItemFields(projects, items, projectHidden, itemHidden)
+	return projects, items, nil
+}
+
+// maskProjectAndItemFields 用已加载的 hidden 集合脱敏项目和服务项。
+// 抽出纯函数是为了让需要一次性读取规则的复合读路径（如监控快照）
+// 复用同一份 hidden，而不是重复查规则表或各写一套掩码。
+func maskProjectAndItemFields(projects []domain.Project, items []domain.ServiceItem, projectHidden, itemHidden map[string]struct{}) {
 	if len(projectHidden) > 0 && len(projects) > 0 {
 		for field := range projectHidden {
 			for i := range projects {
@@ -159,7 +167,6 @@ func (s *Service) applyFieldPermissions(ctx context.Context, p platform.Principa
 			}
 		}
 	}
-	return projects, items, nil
 }
 
 // applyFieldPermissionsToSlaItems 对 SLA 超期列表执行与服务项读路径相同的字段脱敏。
@@ -209,13 +216,20 @@ func (s *Service) applyFieldPermissionsToEvents(ctx context.Context, p platform.
 	if err != nil {
 		return nil, err
 	}
-	if len(itemHidden) == 0 || len(events) == 0 {
-		return events, nil
+	return maskEventPayloads(events, itemHidden), nil
+}
+
+// maskEventPayloads 是事件脱敏的纯函数形式：已加载 hidden 规则后按同一口径
+// 递归掩码 payload。监控快照等由已加载规则的读路径复用它，避免再查一次规则表，
+// 也避免各读路径各写一套脱敏逻辑。
+func maskEventPayloads(events []domain.DeliveryEvent, hidden map[string]struct{}) []domain.DeliveryEvent {
+	if len(hidden) == 0 || len(events) == 0 {
+		return events
 	}
 	for index := range events {
-		events[index].Payload = maskEventPayload(events[index].Payload, itemHidden)
+		events[index].Payload = maskEventPayload(events[index].Payload, hidden)
 	}
-	return events, nil
+	return events
 }
 
 // maskEventPayload 递归掩码 payload 中命中隐藏字段的键；拆解事件里的 service_items

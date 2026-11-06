@@ -5,10 +5,13 @@ import "time"
 // ProjectMonitoringQuery 是服务端定义的在途控制台筛选契约。
 // 全部业务筛选之后再分页，使总数和分页描述同一快照。
 type ProjectMonitoringQuery struct {
-	Page             int
-	PageSize         int
-	Keyword          string
-	Status           string
+	Page     int
+	PageSize int
+	Keyword  string
+	Status   string
+	// ReportStage 是项目级报告阶段筛选（与 Status 正交、可组合）：
+	// 只接受 ReportPhaseStages 中的码，非法值由应用层返回 422。
+	ReportStage      string
 	Customer         string
 	Category         string
 	Team             string
@@ -52,17 +55,20 @@ type MonitoringProject struct {
 }
 
 type ProjectMonitoringSnapshot struct {
-	Items             []MonitoringProject `json:"items"`
-	RecentEvents      []DeliveryEvent     `json:"recent_events"`
-	StatusCounts      map[string]int      `json:"status_counts"`
-	Categories        []string            `json:"categories"`
-	Teams             []string            `json:"teams"`
-	ProjectManagerIDs []string            `json:"project_manager_ids"`
-	Total             int                 `json:"total"`
-	Page              int                 `json:"page"`
-	PageSize          int                 `json:"page_size"`
-	ServerTime        time.Time           `json:"server_time"`
-	SnapshotVersion   string              `json:"snapshot_version"`
+	Items        []MonitoringProject `json:"items"`
+	RecentEvents []DeliveryEvent     `json:"recent_events"`
+	StatusCounts map[string]int      `json:"status_counts"`
+	// ReportStageCounts 是按派生报告阶段对同一筛选集分组的计数；
+	// 键为报告阶段码，不出现的阶段不补零。
+	ReportStageCounts map[string]int `json:"report_stage_counts"`
+	Categories        []string       `json:"categories"`
+	Teams             []string       `json:"teams"`
+	ProjectManagerIDs []string       `json:"project_manager_ids"`
+	Total             int            `json:"total"`
+	Page              int            `json:"page"`
+	PageSize          int            `json:"page_size"`
+	ServerTime        time.Time      `json:"server_time"`
+	SnapshotVersion   string         `json:"snapshot_version"`
 }
 
 // ProjectMonitoringPageData 是单个数据库页的仓储到应用投影。
@@ -74,6 +80,7 @@ type ProjectMonitoringPageData struct {
 	SLACandidates     []SlaOverdueItem
 	Events            []DeliveryEvent
 	StatusCounts      map[string]int
+	ReportStageCounts map[string]int
 	Categories        []string
 	Teams             []string
 	ProjectManagerIDs []string

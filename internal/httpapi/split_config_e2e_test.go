@@ -7,16 +7,20 @@ package httpapi_test
 // 「分组规则缺失时」口径默认标记「待人工确认」并通知业务管理员。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/j-s-te/project-management/internal/application"
+	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/httpapi"
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
 	"github.com/j-s-te/project-management/internal/platform"
@@ -431,8 +435,9 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 
 	repository := store.NewRepository(db)
 	service := &application.Service{
-		Repo:      repository,
-		Contracts: splitCodesContractVerifier(),
+		Repo:          repository,
+		EvidenceFiles: splitCodesImportGateway{},
+		Contracts:     splitCodesContractVerifier(),
 		Personnel: staticRolePersonnelDirectory{
 			"team_lead":       {{UserID: "team_lead", DisplayName: "团队负责人"}},
 			"project_manager": {{UserID: "project_manager", DisplayName: "项目经理"}},
@@ -561,7 +566,7 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 		t.Fatalf("持证工程师应校验通过，实际 %q", conflictStatus)
 	}
 
-	// 批量导入：合法行写入、非法行跳过并给出行号原因。
+	// 批量导入：确认环节必须带 Idempotency-Key，且整批单事务全有或全无。
 	for _, code := range []string{"A1", "A2"} {
 		status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/rules",
 			fmt.Sprintf(`{"kind":"capability-codes","name":"%s","scope":"%s","check_type":"PERSON","enabled":true}`, code, code))
@@ -569,8 +574,26 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 			t.Fatalf("保存导入用人员资质编码 %s 失败: HTTP %d %s", code, status, body)
 		}
 	}
-	status, body = e2eCall(handler, "admin", http.MethodPost, "/api/v1/detection-categories/import",
-		`{"items":[{"category":"导入类别A","system_standard":"ISO 27001","required_codes":"A1，A2","special_method":"MARKABLE","enabled":true},{"category":"","special_method":"NO","enabled":true},{"category":"导入类别B","special_method":"不存在的取值","enabled":true}]}`)
+	header := "检测类别,默认体系要求,必备资质（默认）,必检能力码,是否特殊方法,状态\n"
+	mixed := header + "导入类别A,ISO 27001,,A1，A2,MARKABLE,启用\n,,,,NO,启用\n导入类别B,,,,不存在的取值,启用\n"
+	status, body = e2eUpload(handler, "admin", "/api/v1/detection-categories/import", "categories.csv", mixed, "[2,3,4]", "")
+	if status != http.StatusBadRequest || !strings.Contains(body, "PM_INVALID_IDEMPOTENCY_KEY") {
+		t.Fatalf("缺少幂等键应返回 400: HTTP %d %s", status, body)
+	}
+	status, body = e2eUpload(handler, "admin", "/api/v1/detection-categories/import", "categories.csv", mixed, "[2,3,4]", "e2e-detection-import-0001")
+	if status != http.StatusUnprocessableEntity || !strings.Contains(body, "第 3 行") {
+		t.Fatalf("含非法行的整批导入应回滚并返回 422 行号: HTTP %d %s", status, body)
+	}
+	var rejected int64
+	if err := db.WithContext(ctx).Table("pm_detection_category").
+		Where("tenant_id = ? AND category LIKE '导入类别%'", tenant).Count(&rejected).Error; err != nil {
+		t.Fatalf("读取回滚结果失败: %v", err)
+	}
+	if rejected != 0 {
+		t.Fatalf("整批失败不得留下部分类别写入，实际 %d 行", rejected)
+	}
+	valid := header + "导入类别A,ISO 27001,,A1，A2,MARKABLE,启用\n"
+	status, body = e2eUpload(handler, "admin", "/api/v1/detection-categories/import", "categories.csv", valid, "[2]", "e2e-detection-import-0002")
 	if status != http.StatusOK {
 		t.Fatalf("导入检测类别失败: HTTP %d %s", status, body)
 	}
@@ -585,8 +608,20 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 		t.Fatalf("解析导入结果失败: %v (%s)", err, body)
 	}
 	t.Logf("导入结果：成功 %d，跳过 %d，原因 %v", imported.Data.Imported, imported.Data.Skipped, imported.Data.Errors)
-	if imported.Data.Imported != 1 || imported.Data.Skipped != 2 {
-		t.Fatalf("导入应有 1 行成功、2 行跳过，实际 %+v", imported.Data)
+	if imported.Data.Imported != 1 || imported.Data.Skipped != 0 {
+		t.Fatalf("导入应整批成功 1 行，实际 %+v", imported.Data)
+	}
+	// 同键同内容重试返回首次响应，不重复写入。
+	replayStatus, replayBody := e2eUpload(handler, "admin", "/api/v1/detection-categories/import", "categories.csv", valid, "[2]", "e2e-detection-import-0002")
+	if replayStatus != http.StatusOK || replayBody != body {
+		t.Fatalf("同键重试应返回首次响应: HTTP %d %s", replayStatus, replayBody)
+	}
+	var storedCount int64
+	if err := db.WithContext(ctx).Table("pm_detection_category").Where("tenant_id = ? AND category = '导入类别A'", tenant).Count(&storedCount).Error; err != nil {
+		t.Fatalf("读取导入结果失败: %v", err)
+	}
+	if storedCount != 1 {
+		t.Fatalf("同键重试不得重复写入，实际 %d 行", storedCount)
 	}
 	var storedCodes string
 	if err := db.WithContext(ctx).Raw(`SELECT required_codes FROM pm_detection_category WHERE tenant_id = ? AND category = '导入类别A'`, tenant).
@@ -596,4 +631,47 @@ func TestDetectionCategoryRequiredCodesDriveCapabilityCheck(t *testing.T) {
 	if storedCodes != "A1,A2" {
 		t.Fatalf("中文逗号分隔的能力码应被规范化，实际 %q", storedCodes)
 	}
+}
+
+// splitCodesImportGateway 只满足检测类别导入链路的文件网关接口：
+// 本用例验证导入事务与幂等，不重复验证文件网关自身的行为。
+type splitCodesImportGateway struct{}
+
+func (splitCodesImportGateway) UploadEvidence(context.Context, string, string, string, string, string, io.Reader) (domain.ReportArtifactInput, error) {
+	return domain.ReportArtifactInput{}, nil
+}
+func (splitCodesImportGateway) UploadImport(context.Context, string, string, string, string, io.Reader) (domain.ReportArtifactInput, error) {
+	return domain.ReportArtifactInput{}, nil
+}
+func (splitCodesImportGateway) StatEvidence(context.Context, string, string, string) (platform.EvidenceMetadata, error) {
+	return platform.EvidenceMetadata{}, nil
+}
+
+// e2eUpload 以 multipart 提交导入文件；key 为空时模拟缺失 Idempotency-Key 的客户端。
+func e2eUpload(handler http.Handler, role, path, filename, content, selection, key string) (int, string) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	file, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return 0, err.Error()
+	}
+	if _, err := file.Write([]byte(content)); err != nil {
+		return 0, err.Error()
+	}
+	if err := writer.WriteField("selected_rows", selection); err != nil {
+		return 0, err.Error()
+	}
+	if err := writer.Close(); err != nil {
+		return 0, err.Error()
+	}
+	request := httptest.NewRequest(http.MethodPost, path, body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-E2E-Role", role)
+	request.Header.Set("Origin", "http://example.com")
+	if key != "" {
+		request.Header.Set("Idempotency-Key", key)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder.Code, recorder.Body.String()
 }

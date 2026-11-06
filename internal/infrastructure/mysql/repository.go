@@ -29,8 +29,13 @@ func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 // total_items 为服务项总数，terminated_items 为其中已终止的数量，
 // lowest_rank 取非终止服务项的最滞后推进等级（已终止计为哨兵值 9，
 // 只有「全部终止」时才会胜出，而该情形由外层 CASE 的终止分支先行接住）。
+// lowest_report_phase 是同一聚合里的报告阶段最小 Phase（0..5，-1 表示未知码），
+// 供项目级 report_stage 过滤；它与 lowest_rank 必须来自**同一个**子查询，
+// 否则两次聚合可能看到不同的服务项集合。
 // 等级分支由 domain.ServiceItemStatusStages / ServiceItemReportStages 生成，
 // 与 domain.DeriveProjectStatus 共用同一套状态表，避免两处实现漂移。
+// archived_at IS NULL 与 Go 侧 projectStatusInputQuery（GORM 软删除）保持一致：
+// 归档服务项不参与项目派生，否则会把已归档的历史项重新算回项目阶段。
 // 注意：SQL 的 TRIM 只去除空格，与 Go strings.TrimSpace 在制表符/换行等
 // 极端输入上存在理论差异；状态词汇表由本系统写入、不含此类字符。
 func derivedProjectStatusJoin() string {
@@ -50,6 +55,29 @@ func derivedProjectStatusJoin() string {
 		reportCases.WriteString(strconv.Itoa(stage.Rank))
 		reportCases.WriteString(" ")
 	}
+	// 报告阶段 phase 分支由 domain.ReportPhaseStages 派生：NONE 单独走 0 分支，
+	// 未知码落到 -1（不可判定），与 domain.DeriveProjectReportStage 一致。
+	var phaseCases strings.Builder
+	for _, stage := range domain.ReportPhaseStages() {
+		if stage.Phase == 0 {
+			continue
+		}
+		phaseCases.WriteString("WHEN UPPER(TRIM(COALESCE(aggregated.report_status, ''))) = '")
+		phaseCases.WriteString(strings.ReplaceAll(stage.Code, "'", "''"))
+		phaseCases.WriteString("' THEN ")
+		phaseCases.WriteString(strconv.Itoa(stage.Phase))
+		phaseCases.WriteString(" ")
+	}
+	noneCondition := ""
+	for _, stage := range domain.ReportPhaseStages() {
+		if stage.Phase != 0 {
+			continue
+		}
+		if noneCondition != "" {
+			noneCondition += ", "
+		}
+		noneCondition += "'" + strings.ReplaceAll(stage.Code, "'", "''") + "'"
+	}
 	join := `LEFT JOIN (
 		SELECT aggregated.project_id AS project_id,
 		       COUNT(*) AS total_items,
@@ -62,19 +90,29 @@ func derivedProjectStatusJoin() string {
 		           END
 		           ` + rankCases.String() + `
 		           ELSE 0
-		       END) AS lowest_rank
+		       END) AS lowest_rank,
+		       MIN(CASE
+		           WHEN TRIM(aggregated.status) = '` + domain.ProjectStatusTerminated + `' THEN NULL
+		           WHEN TRIM(aggregated.status) = '` + domain.ProjectStatusFieldCompleted + `' THEN CASE
+		               ` + phaseCases.String() + `
+		               WHEN UPPER(TRIM(COALESCE(aggregated.report_status, ''))) IN ('', ` + noneCondition + `) THEN 0
+		               ELSE -1
+		           END
+		           ELSE NULL
+		       END) AS lowest_report_phase
 		FROM pm_service_item AS aggregated
 		WHERE aggregated.tenant_id = ?
+		  AND aggregated.archived_at IS NULL
 		GROUP BY aggregated.project_id
 	) AS derived_status ON derived_status.project_id = pm_project.id`
 	return join
 }
 
-// derivedProjectStatusPredicate 按派生状态还原表达式过滤项目，短路顺序与
-// domain.DeriveProjectStatus 完全一致：补充协议 → 无服务项回退存储状态 →
-// 全部终止 → 最滞后推进等级对应的线性节点。该条件只用于 COUNT 与 LIMIT/OFFSET
-// 的分页下推（AUD-2026-028）；返回行的派生状态仍由 Go 侧 applyDerivedProjectMetrics 计算。
-func derivedProjectStatusPredicate(wanted string) string {
+// derivedProjectStatusExpression 返回派生项目状态的 SQL 表达式（含聚合 join 的列引用）。
+// 与 domain.DeriveProjectStatus 短路顺序完全一致：补充协议 → 无服务项回退存储状态 →
+// 全部终止 → 最滞后推进等级对应的线性节点。监控页的状态计数必须对同一表达式
+// GROUP BY（不能按存储列 pm_project.status 分组），否则计数与行派生口径分裂。
+func derivedProjectStatusExpression() string {
 	nodes := domain.ProjectStatusNodes()
 	nodeList := make([]string, 0, len(nodes))
 	for _, node := range nodes {
@@ -88,8 +126,22 @@ func derivedProjectStatusPredicate(wanted string) string {
 		END
 		WHEN derived_status.terminated_items = derived_status.total_items THEN '` + domain.ProjectStatusTerminated + `'
 		ELSE ELT(COALESCE(derived_status.lowest_rank, 0) + 1, ` + strings.Join(nodeList, ", ") + `)
-	END = ?`
+	END`
 }
+
+// derivedProjectStatusPredicate 按派生状态还原表达式过滤项目。该条件只用于
+// COUNT 与 LIMIT/OFFSET 的分页下推（AUD-2026-028）；返回行的派生状态仍由
+// Go 侧 applyDerivedProjectMetrics 计算。
+func derivedProjectStatusPredicate(wanted string) string {
+	return derivedProjectStatusExpression() + ` = ?`
+}
+
+// derivedProjectReportStagePredicate 把项目级报告阶段过滤下推到 SQL：
+// 先要求「全部非终止服务项都已到现场实施完成及以上」（lowest_rank 6..8），
+// 再比较最小报告 Phase。COALESCE(-1) 让未知报告码（-1）与"没有服务项/全部终止"
+// 都不匹配任何合法阶段，与 domain.DeriveProjectReportStage 返回 "" 等价。
+// 绑定值必须是 int 阶段序号，禁止拼接字符串。
+const derivedProjectReportStagePredicate = `(COALESCE(derived_status.lowest_rank, 0) BETWEEN 6 AND 8 AND COALESCE(derived_status.lowest_report_phase, -1) = ?)`
 
 // quotedSQLList 把字符串列表渲染为转义后的 SQL 字面量清单（仅用于编译期常量，
 // 用户输入一律走参数占位符）。
@@ -101,27 +153,45 @@ func quotedSQLList(values []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// ListProjects 把租户/范围/关键字/派生状态过滤与分页全部下推到 SQL：
+// ListProjects 把租户/范围/关键字/派生状态/报告阶段过滤与分页全部下推到 SQL：
 // 主查询 COUNT 取 total，LIMIT/OFFSET 只取本页记录；服务项聚合补查仅覆盖本页 ID。
-// 排序保持 id DESC 与全量口径一致；派生状态（status/progress/risk）仍只在
+// 排序保持 id DESC 与全量口径一致；派生状态（status/report_stage/progress/risk）仍只在
 // Go 侧对本页记录计算，输出结构与历史全量口径完全一致（AUD-2026-028）。
-func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, q, status string, page, pageSize int) ([]domain.Project, int, error) {
+//
+// 两个筛选（status / report_stage）可组合：它们共用**同一个**聚合 join，
+// 且该 join 只添加一次。绑定顺序固定为 Joins(join, tenantID) → Where(status 谓词)
+// → Where(report_stage 谓词)，避免 GORM 按调用顺序压栈导致的参数错位。
+func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilter, query domain.ProjectListQuery) ([]domain.Project, int, error) {
 	base := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project")
-	if q = strings.TrimSpace(q); q != "" {
+	if q := strings.TrimSpace(query.Keyword); q != "" {
 		like := "%" + q + "%"
-		base = base.Where("id LIKE ? OR name LIKE ? OR customer LIKE ? OR contract LIKE ? OR category LIKE ? OR manager LIKE ?", like, like, like, like, like, like)
+		// 整组 OR 必须加括号：与 status/report_stage 谓词 AND 组合时，
+		// 裸 OR 会因优先级把筛选行"或"回来，导致 total 与行集同时虚高。
+		base = base.Where("(id LIKE ? OR name LIKE ? OR customer LIKE ? OR contract LIKE ? OR category LIKE ? OR manager LIKE ?)", like, like, like, like, like, like)
 	}
-	wanted := strings.TrimSpace(status)
+	wanted := strings.TrimSpace(query.Status)
+	reportStage := strings.ToUpper(strings.TrimSpace(query.ReportStage))
+	if wanted != "" || reportStage != "" {
+		base = base.Joins(derivedProjectStatusJoin(), filter.TenantID)
+	}
 	if wanted != "" {
-		base = base.Joins(derivedProjectStatusJoin(), filter.TenantID).Where(derivedProjectStatusPredicate(wanted), wanted)
+		base = base.Where(derivedProjectStatusPredicate(wanted), wanted)
+	}
+	if reportStage != "" {
+		phase := domain.ReportPhaseRank(reportStage)
+		if phase < 0 {
+			// 应用层已校验；这里防御未知码，不能让它退化成"匹配 unknown 行"（-1）。
+			return []domain.Project{}, 0, nil
+		}
+		base = base.Where(derivedProjectReportStagePredicate, phase)
 	}
 	var total int64
 	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	list := base.Session(&gorm.Session{}).Order("id DESC")
-	if pageSize > 0 {
-		list = list.Offset(max(0, (page-1)*pageSize)).Limit(pageSize)
+	if query.PageSize > 0 {
+		list = list.Offset(max(0, (query.Page-1)*query.PageSize)).Limit(query.PageSize)
 	}
 	var records []projectRecord
 	if err := list.Find(&records).Error; err != nil {
@@ -135,9 +205,12 @@ func (r *Repository) ListProjects(ctx context.Context, filter platform.ScopeFilt
 	for _, record := range records {
 		project := projectFromRecord(record)
 		applyDerivedProjectMetrics(&project, inputs[record.ID])
-		// SQL 分页已按派生状态筛选；这里用 Go 侧派生函数保留同一过滤作为最终口径：
-		// 若两套实现漂移，宁可少返回行（等价性集成测试可发现），也不返回状态不符的行。
+		// SQL 分页已按派生状态/报告阶段筛选；这里用 Go 侧派生函数保留同一过滤作为最终口径：
+		// 若两套实现漂移，宁可少返回行（等价性集成测试可发现），也不返回与筛选不符的行。
 		if wanted != "" && project.Status != wanted {
+			continue
+		}
+		if reportStage != "" && project.ReportStage != reportStage {
 			continue
 		}
 		items = append(items, project)
@@ -162,10 +235,12 @@ func (r *Repository) GetProject(ctx context.Context, filter platform.ScopeFilter
 	return project, nil
 }
 
-// applyDerivedProjectMetrics 用同一份服务项投影刷新项目的唯一状态与进度。
-// 两者必须同源：只派生状态而让进度读存储列，会让确认拆解后的项目显示「待分配 · 0%」。
+// applyDerivedProjectMetrics 用同一份服务项投影刷新项目的唯一状态、报告阶段与进度。
+// 三者必须同源：只派生状态而让进度读存储列，会让确认拆解后的项目显示「待分配 · 0%」；
+// 报告阶段若读存储列，则报告推进后项目级阶段不会跟着变。
 func applyDerivedProjectMetrics(project *domain.Project, items []domain.ProjectStatusItem) {
 	project.Status = domain.DeriveProjectStatus(items, project.SupplementStatus, project.Status)
+	project.ReportStage = domain.DeriveProjectReportStage(items)
 	project.Progress = domain.DeriveProjectProgress(items)
 	project.Risk = domain.IsRiskProject(project.Status, items)
 }
@@ -331,6 +406,9 @@ func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFi
 
 func pointerTo[T any](value T) *T { return &value }
 
+// ConfirmServiceItems 在行锁内确认可见服务项并核验本地范围审批围栏。
+// 参数：ctx/filter 为当前授权，ids 为服务项主键，actor 为真实操作者。
+// 返回值：确认结果；越权、待审批、范围漂移及存储失败均拒绝。
 func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.ScopeFilter, ids []string, actor string) ([]domain.ServiceItem, error) {
 	tenant := filter.TenantID
 	var result []domain.ServiceItem
@@ -348,6 +426,9 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 			return application.ErrNotFound
 		}
 		for _, record := range records {
+			if err := guardNativeScopeConfirmation(tx, tenant, record.ProjectID); err != nil {
+				return err
+			}
 			if record.Status != "待确认" && record.Status != "待复核" && record.Status != "待分配" {
 				return application.ErrValidation
 			}
@@ -712,7 +793,7 @@ func ruleRecordFor(item domain.Rule, now time.Time) (any, error) {
 	}
 }
 func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter) (domain.Dashboard, error) {
-	result := domain.Dashboard{StatusCounts: map[string]int{}}
+	result := domain.Dashboard{StatusCounts: map[string]int{}, ReportStageCounts: map[string]int{}}
 	// 统计口径必须与列表/详情一致：先派生唯一状态，再计数，避免仪表盘与项目列表对不上。
 	var projects []projectRecord
 	if err := applyProjectScope(r.db.WithContext(ctx).Model(&projectRecord{}), filter, "pm_project").Select("id, status, supplement_status").Find(&projects).Error; err != nil {
@@ -736,6 +817,11 @@ func (r *Repository) Dashboard(ctx context.Context, filter platform.ScopeFilter)
 		}
 		if len(domain.UnknownServiceItemStatuses(inputs[project.ID])) > 0 {
 			result.UnknownStatusItems++
+		}
+		// 报告阶段与列表/监控同一派生函数、同一服务项集合；空阶段表示未进入
+		// 报告段或不可判定，不进桶（不能当成某个阶段的 0 或额外桶计数）。
+		if stage := domain.DeriveProjectReportStage(inputs[project.ID]); stage != "" {
+			result.ReportStageCounts[stage]++
 		}
 	}
 	var count int64
@@ -851,8 +937,12 @@ func unique(values []string) map[string]bool {
 	}
 	return result
 }
+
+// projectFromRecord 恢复项目业务投影，旧行保持合同来源兼容。
+// 参数：r 为持久化项目行。
+// 返回值：含显式来源及范围版本的项目。
 func projectFromRecord(r projectRecord) domain.Project {
-	return domain.Project{TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractID: r.ContractID, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: r.Version}
+	return domain.Project{SourceKind: firstValue(r.SourceKind, "CONTRACT"), SourceID: firstValue(r.SourceID, firstValue(r.ContractID, r.Contract)), ScopeVersion: r.ScopeVersion, TenantID: r.TenantID, OwnerOrgID: r.OwnerOrgID, ID: r.ID, Name: r.Name, Customer: r.Customer, CustomerID: r.CustomerID, Contract: r.Contract, ContractID: r.ContractID, ContractVersion: r.ContractVersion, SupplementStatus: r.SupplementStatus, Services: r.Services, Category: r.Category, Team: r.Team, Manager: r.Manager, OwnerIdentityID: r.OwnerIdentityID, ManagerIdentityID: r.ManagerIdentityID, Status: r.Status, Progress: r.Progress, Due: r.Due, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, Version: r.Version}
 }
 
 func applyProjectScope(query *gorm.DB, filter platform.ScopeFilter, alias string) *gorm.DB {

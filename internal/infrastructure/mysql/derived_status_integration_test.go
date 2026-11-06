@@ -31,7 +31,7 @@ var integrationFixture = []string{
 	`INSERT INTO pm_service_item (id, tenant_id, project_id, source_service_id, requirement, test_mode, status, report_status, conflict_status, created_at, updated_at) VALUES
 	   ('SI-TEST-LAG-001',    'PM-TEST-TENANT', 'PJ-TEST-LAG',        'S1', 'r', 'STANDARD', '待分配',       'NONE',      'UNCHECKED', NOW(3), NOW(3)),
 	   ('SI-TEST-LAG-002',    'PM-TEST-TENANT', 'PJ-TEST-LAG',        'S2', 'r', 'STANDARD', '实施中',       'NONE',      'PASSED',    NOW(3), NOW(3)),
-	   ('SI-TEST-REPORT-001', 'PM-TEST-TENANT', 'PJ-TEST-REPORT',     'S1', 'r', 'STANDARD', '现场实施完成', 'COMPILING', 'PASSED',    NOW(3), NOW(3)),
+	   ('SI-TEST-REPORT-001', 'PM-TEST-TENANT', 'PJ-TEST-REPORT',     'S1', 'r', 'STANDARD', '现场实施完成', 'RECTIFYING', 'PASSED',    NOW(3), NOW(3)),
 	   ('SI-TEST-REPORT-002', 'PM-TEST-TENANT', 'PJ-TEST-REPORT',     'S2', 'r', 'STANDARD', '现场实施完成', 'ISSUED',    'PASSED',    NOW(3), NOW(3)),
 	   ('SI-TEST-DONE-001',   'PM-TEST-TENANT', 'PJ-TEST-DONE',       'S1', 'r', 'STANDARD', '现场实施完成', 'ARCHIVED',  'PASSED',    NOW(3), NOW(3)),
 	   ('SI-TEST-DONE-002',   'PM-TEST-TENANT', 'PJ-TEST-DONE',       'S2', 'r', 'STANDARD', '现场实施完成', 'ARCHIVED',  'PASSED',    NOW(3), NOW(3)),
@@ -68,7 +68,7 @@ func TestDerivedProjectStatusAgainstRealDatabase(t *testing.T) {
 	repo := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: integrationTenant, AllowAll: true}
 
-	projects, _, err := repo.ListProjects(ctx, filter, "", "", 0, 0)
+	projects, _, err := repo.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 0, PageSize: 0})
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestDerivedProjectStatusAgainstRealDatabase(t *testing.T) {
 	}
 
 	// 状态筛选必须作用于派生值：这些行的存储列都是 待分配，按 已完成 过滤应只命中归档项目。
-	completed, _, err := repo.ListProjects(ctx, filter, "", "已完成", 0, 0)
+	completed, _, err := repo.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "已完成", Page: 0, PageSize: 0})
 	if err != nil {
 		t.Fatalf("list by derived status: %v", err)
 	}
@@ -135,6 +135,19 @@ func TestDerivedProjectStatusAgainstRealDatabase(t *testing.T) {
 	}
 	if dashboard.InFlightProjects != 5 {
 		t.Fatalf("in_flight_projects = %d, want 5 (only 已完成 is settled)", dashboard.InFlightProjects)
+	}
+	// 仪表盘报告阶段口径与 DeriveProjectReportStage 一致：REPORT 取最滞后阶段
+	// RECTIFYING，DONE 两份归档记 ARCHIVED；未进入报告段的项目不进桶。
+	if dashboard.ReportStageCounts == nil {
+		t.Fatal("report_stage_counts 必须非 nil")
+	}
+	for stage, expected := range map[string]int{domain.ReportPhaseRectifying: 1, domain.ReportPhaseArchived: 1} {
+		if dashboard.ReportStageCounts[stage] != expected {
+			t.Fatalf("dashboard report_stage_counts[%s] = %d, want %d (all=%#v)", stage, dashboard.ReportStageCounts[stage], expected, dashboard.ReportStageCounts)
+		}
+	}
+	if len(dashboard.ReportStageCounts) != 2 {
+		t.Fatalf("report_stage_counts = %#v，期望仅 RECTIFYING 与 ARCHIVED 两个桶", dashboard.ReportStageCounts)
 	}
 }
 

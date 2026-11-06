@@ -53,7 +53,7 @@ func TestListProjectsPushesCountAndPaginationIntoSQL(t *testing.T) {
 	repository := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: "tenant-1", AllowAll: true}
 
-	if _, _, err := repository.ListProjects(context.Background(), filter, "", "", 3, 25); err != nil {
+	if _, _, err := repository.ListProjects(context.Background(), filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 3, PageSize: 25}); err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
 	if len(capture.queries) != 2 {
@@ -76,14 +76,15 @@ func TestListProjectsPushesCountAndPaginationIntoSQL(t *testing.T) {
 	}
 }
 
-// 状态过滤走派生状态：SQL 必须带服务项聚合 JOIN 与与 Go 侧同源的等级 CASE，
-// 而不是读可能滞后的存储状态列。
+// TestListProjectsStatusFilterUsesDerivedStatusPredicateInSQL 验证 SQL 状态过滤使用共用等级表。
+// 参数：t 为测试上下文。
+// 返回值：无；SQL 缺少整改等派生阶段时测试失败。
 func TestListProjectsStatusFilterUsesDerivedStatusPredicateInSQL(t *testing.T) {
 	db, capture := captureDB(t)
 	repository := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: "tenant-1", AllowAll: true}
 
-	if _, _, err := repository.ListProjects(context.Background(), filter, "", "已完成", 1, 25); err != nil {
+	if _, _, err := repository.ListProjects(context.Background(), filter, domain.ProjectListQuery{Keyword: "", Status: "已完成", Page: 1, PageSize: 25}); err != nil {
 		t.Fatalf("list projects by status: %v", err)
 	}
 	joined := strings.Join(capture.queries, "\n")
@@ -92,7 +93,7 @@ func TestListProjectsStatusFilterUsesDerivedStatusPredicateInSQL(t *testing.T) {
 		"pm_service_item AS aggregated",
 		"GROUP BY aggregated.project_id",
 		"TRIM(aggregated.status) IN ('待确认', '待复核') THEN 0",
-		"UPPER(TRIM(COALESCE(aggregated.report_status, ''))) IN ('COMPILING', 'REVIEWED', 'ISSUED') THEN 7",
+		"UPPER(TRIM(COALESCE(aggregated.report_status, ''))) IN ('RECTIFYING', 'COMPILING', 'REVIEWED', 'ISSUED') THEN 7",
 		"IN ('ARCHIVED') THEN 8",
 		"ELT(",
 		"WHEN UPPER(TRIM(COALESCE(pm_project.supplement_status, ''))) = 'REQUIRED'",
@@ -114,7 +115,7 @@ func TestListProjectsWithoutPaginationKeepsFullQuery(t *testing.T) {
 	repository := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: "tenant-1", AllowAll: true}
 
-	if _, _, err := repository.ListProjects(context.Background(), filter, "", "", 0, 0); err != nil {
+	if _, _, err := repository.ListProjects(context.Background(), filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 0, PageSize: 0}); err != nil {
 		t.Fatalf("list projects unpaged: %v", err)
 	}
 	if len(capture.queries) != 2 {

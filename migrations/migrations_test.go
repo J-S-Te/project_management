@@ -455,7 +455,45 @@ func TestEmbeddedMigrationVersionsRemainUniqueAndContiguous(t *testing.T) {
 		}
 		expected++
 	}
-	if expected != 40 {
-		t.Fatalf("migration count=%d want=39", expected-1)
+	if expected != 44 {
+		t.Fatalf("migration count=%d want=43", expected-1)
+	}
+}
+
+// TestImportOperationMigrationKeepsIdempotencyAndReplayBoundaries 固定导入确认幂等台账的结构：
+// 同租户同键唯一（并发兜底）、请求指纹与响应快照必须落库，且迁移只新增表、不改写历史数据。
+// 参数：t 为测试上下文。
+// 返回值：无；缺少唯一键、请求指纹或响应快照列时失败。
+func TestImportOperationMigrationKeepsIdempotencyAndReplayBoundaries(t *testing.T) {
+	body, err := Files.ReadFile("000043_import_operation.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS pm_import_operation",
+		"tenant_id VARCHAR(64) NOT NULL",
+		"idempotency_key VARCHAR(128) NOT NULL",
+		"operation_type VARCHAR(64) NOT NULL",
+		"request_hash CHAR(64) NOT NULL",
+		"response_json LONGTEXT NOT NULL",
+		"created_at DATETIME(3) NOT NULL",
+		"UNIQUE KEY uq_pm_import_operation_key (tenant_id, idempotency_key)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("import operation migration missing %q", required)
+		}
+	}
+	upper := strings.ToUpper(sql)
+	for _, forbidden := range []string{"DELETE FROM", "UPDATE PM_", "DROP TABLE", "TRUNCATE", "ALTER TABLE PM_CAPABILITY"} {
+		if strings.Contains(upper, forbidden) {
+			t.Fatalf("import operation migration must stay additive, found %q", forbidden)
+		}
+	}
+	// 唯一键必须与响应快照处于同一张表：先声明列再声明唯一键，重放才能读到首次结果。
+	uniqueKey := strings.Index(sql, "UNIQUE KEY uq_pm_import_operation_key")
+	responseColumn := strings.Index(sql, "response_json LONGTEXT NOT NULL")
+	if uniqueKey < 0 || responseColumn < 0 || uniqueKey < responseColumn {
+		t.Fatal("unique key must be declared after the replay columns in the same table definition")
 	}
 }

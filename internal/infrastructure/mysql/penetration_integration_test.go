@@ -16,6 +16,9 @@ import (
 
 const penetrationIntegrationTenant = "PM-PENETRATION-TEST-TENANT"
 
+// TestEmbeddedPenetrationLifecycleAgainstRealDatabase 验证内嵌渗透专项门禁与主报告整改链兼容。
+// 参数：t 为测试上下文；需要明确隔离的 PM_TEST_DSN。
+// 返回值：无；角色、状态或业务门禁不符时测试失败。
 func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
@@ -68,7 +71,9 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 			ServiceItemID: item.ID, Type: eventType, ActorUserID: actor, Payload: payload, CreatedAt: time.Now().UTC(),
 		})
 	}
-	if err = apply("pm-1", application.EventFieldCompleted, map[string]any{}); err == nil {
+	// 本用例隔离验证专项门禁，主现场证据缺项通过既有业务说明显式记录。
+	fieldCompletion := map[string]any{"incomplete_reason": "专项仓储回归未采集主现场签到、记录和签名"}
+	if err = apply("pm-1", application.EventFieldCompleted, fieldCompletion); err == nil {
 		t.Fatal("pending embedded decision must block parent field completion")
 	}
 
@@ -101,7 +106,7 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("complete execution: %v", err)
 	}
-	if err = apply("pm-1", application.EventFieldCompleted, map[string]any{}); err != nil {
+	if err = apply("pm-1", application.EventFieldCompleted, fieldCompletion); err != nil {
 		t.Fatalf("completed package should allow parent field completion: %v", err)
 	}
 
@@ -128,6 +133,9 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 		if err != nil {
 			t.Fatalf("advance package report to %s: %v", step.phase, err)
 		}
+	}
+	if err = apply("pm-1", application.EventReportStatusUpdated, map[string]any{"phase": "RECTIFYING"}); err != nil {
+		t.Fatalf("start parent rectifying: %v", err)
 	}
 	if err = apply("pm-1", application.EventReportStatusUpdated, map[string]any{"phase": "COMPILING"}); err != nil {
 		t.Fatalf("start parent report: %v", err)

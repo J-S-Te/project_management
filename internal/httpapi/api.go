@@ -79,6 +79,9 @@ type RouterOptions struct {
 	// PendingMigrations 是启动时检测到的未应用迁移。非空表示库结构落后于代码：
 	// 就绪检查直接判为 not_ready，避免带着缺失的列/表对外提供写服务（写路径只会报 500）。
 	PendingMigrations []string
+	// Capabilities 是 C14 的能力维度快照（原生项目、合同联动、审批校验等），
+	// 由装配层按配置注入；可选未启用只反映在 state=disabled，不影响整体就绪。
+	Capabilities map[string]any
 }
 
 // NewRouter 构造业务和受控机器接口的HTTP路由。
@@ -134,6 +137,10 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 				"audit":        map[string]any{"required": integrationDestinations.AuditRequired, "configured": integrationDestinations.AuditConfigured},
 				"notification": map[string]any{"required": integrationDestinations.NotificationRequired, "configured": integrationDestinations.NotificationConfigured},
 			}
+		}
+		// C14：能力维度快照（装配层按配置注入）；可选未启用不进入 degraded。
+		if routerOptions.Capabilities != nil {
+			body["capabilities"] = routerOptions.Capabilities
 		}
 		if len(pendingMigrations) > 0 {
 			status = http.StatusServiceUnavailable
@@ -230,6 +237,12 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/approved-contract-options", require("project.create"), h.searchApprovedContractOptions)
 	api.GET("/projects/:id/supplement-contracts", require("project.decomposition.manage"), h.listSupplementContracts)
 	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
+	api.GET("/project-creation-capabilities", requireAny("project.read", "project.create"), h.projectCreationCapabilities)
+	api.POST("/native-projects", require("project.create"), h.createNativeProject)
+	api.GET("/projects/:id/native-scope", require("project.read"), h.nativeScope)
+	api.POST("/projects/:id/native-scope-changes", require("project.decomposition.manage"), h.requestNativeScope)
+	api.POST("/projects/:id/native-scope-changes/:changeID/decision", require("project.native_scope.approve"), h.decideNativeScope)
+	api.POST("/projects/:id/native-scope-changes/:changeID/withdraw", require("project.decomposition.manage"), h.withdrawNativeScope)
 	api.POST("/projects", require("project.create"), h.createProject)
 	// 用户会话建项：合同号、客户与服务项必须由应用层按 contract_id 权威回读，
 	// 浏览器提交的同名字段不作为依据（见 activateContractFromUser）。
@@ -917,7 +930,13 @@ func (h *Handler) listProjects(c *gin.Context) {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
 	}
-	items, total, err := h.service.ListProjectsPage(c.Request.Context(), principal(c), c.Query("q"), c.Query("status"), page, pageSize)
+	// report_stage 是新增的项目级报告阶段筛选：大小写不敏感，只接受 6 个报告阶段码，
+	// 非法值由应用层返回 422。既有 status 参数保持宽松（刻意不对称，见
+	// application.normalizeReportStageFilter）。两个筛选 AND 组合，共用同一个聚合 join。
+	items, total, err := h.service.ListProjectsPage(c.Request.Context(), principal(c), domain.ProjectListQuery{
+		Keyword: c.Query("q"), Status: c.Query("status"), ReportStage: c.Query("report_stage"),
+		Page: page, PageSize: pageSize,
+	})
 	if err != nil {
 		writeServiceError(c, err)
 		return
@@ -932,7 +951,7 @@ func (h *Handler) monitorProjects(c *gin.Context) {
 	}
 	truthy := func(value string) bool { return value == "1" || strings.EqualFold(value, "true") }
 	result, err := h.service.MonitorProjects(c.Request.Context(), principal(c), domain.ProjectMonitoringQuery{
-		Page: page, PageSize: pageSize, Keyword: c.Query("q"), Status: c.Query("status"),
+		Page: page, PageSize: pageSize, Keyword: c.Query("q"), Status: c.Query("status"), ReportStage: c.Query("report_stage"),
 		Customer: c.Query("customer"), Category: c.Query("category"), Team: c.Query("team"),
 		ProjectManagerID: c.Query("project_manager_id"), RiskOnly: truthy(c.Query("risk")),
 		SLAOnly: truthy(c.Query("sla")), ConflictOnly: truthy(c.Query("conflict")),
@@ -1023,6 +1042,10 @@ func (h *Handler) listApprovedContractServiceItems(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, catalog)
 }
+
+// createProject 依据审批合同和权威服务项建立合同来源项目。
+// 参数：c 为具备 project.create 权限的用户请求。
+// 返回值：无；输出项目或业务错误。
 func (h *Handler) createProject(c *gin.Context) {
 	var request struct {
 		domain.Project
@@ -1030,6 +1053,10 @@ func (h *Handler) createProject(c *gin.Context) {
 		ServiceItems []domain.ContractService `json:"service_items"`
 	}
 	if !decode(c, &request) {
+		return
+	}
+	if request.SourceKind != "" && request.SourceKind != "CONTRACT" {
+		writeServiceError(c, application.ValidationError("合同建项入口不接受其他项目来源"))
 		return
 	}
 	if strings.TrimSpace(request.ContractID) == "" {
@@ -2102,9 +2129,23 @@ func (h *Handler) updateReportStatus(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]string{"status": strings.ToUpper(strings.TrimSpace(input.Phase))})
 }
 
+// maxJSONBodyBytes 是普通JSON写接口的请求体读取上限（2MiB）。
+// 证据上传（uploadEvidence，21MiB）与合同导入等大载荷入口各自在本文件内直接
+// 调用 http.MaxBytesReader 并跳过 decode，因此不经过本上限。
+const maxJSONBodyBytes = 2 << 20
+
+// decode 读取并校验单个JSON请求体，把读取范围限制在 maxJSONBodyBytes 之内。
+// 参数：c 为请求上下文，target 为待绑定的输入结构。
+// 返回值：绑定成功为真；超限返回413，其他格式错误保留原有400错误模型。
+// 注意：本轮不启用 DisallowUnknownFields，避免破坏既有客户端的多余字段。
 func decode(c *gin.Context, target any) bool {
-	decoder := c.ShouldBindJSON(target)
-	if decoder != nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBodyBytes)
+	if err := c.ShouldBindJSON(target); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(c, http.StatusRequestEntityTooLarge, "PM_BODY_TOO_LARGE", "请求内容超出大小上限")
+			return false
+		}
 		writeError(c, http.StatusBadRequest, "PM_INVALID_JSON", "请求内容不合法")
 		return false
 	}
@@ -2125,6 +2166,9 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrResourceConflict):
 		// 设备等资源的占用冲突必须把占用方与日期返给用户，否则无法调整时段。
 		writeError(c, http.StatusConflict, "PM_RESOURCE_CONFLICT", serviceMessage(err, "该资源在所选时段已被占用"))
+	case errors.Is(err, application.ErrIdempotencyConflict):
+		// 同一个 Idempotency-Key 被用于另一份导入内容：既不能覆盖首次结果，也不能重复写入。
+		writeError(c, http.StatusConflict, "PM_IMPORT_IDEMPOTENCY_CONFLICT", serviceMessage(err, "该幂等键已用于另一份导入内容，请重新检测后再确认"))
 	case errors.Is(err, application.ErrDuplicateProject):
 		// 同一合同版本已有项目：这是业务可判断的重复操作，必须给出项目编号与替代动作，
 		// 不能让它以 MySQL 1062 的形式兜底成 500「服务暂不可用」。

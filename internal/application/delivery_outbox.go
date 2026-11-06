@@ -100,7 +100,7 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 			ReferenceID:    item.ID,
 			Recipients:     recipients,
 			OccurredAt:     now.UTC(),
-			IdempotencyKey: fmt.Sprintf("sla-%s-%s-%s", item.ID, item.Kind, day),
+			IdempotencyKey: slaIdempotencyKey(item, day),
 		}
 		if s.CheckBusinessLicense != nil {
 			if err := s.CheckBusinessLicense(ctx); err != nil {
@@ -118,18 +118,45 @@ func (s *Service) ScanSlaNotifications(ctx context.Context, tenantID string, now
 	return published, nil
 }
 
-// slaNotificationText 生成 SLA 提醒的标题与正文；超期按高优先级，临近按普通。
+// slaIdempotencyKey 生成 SLA 通知的业务幂等键：服务项 + 口径 + 规则维度 +
+// 规则状态 + 业务日。带上维度与规则状态是必需的：同一服务项同一天可能同时命中
+// 「现场实施完成」状态规则与「RECTIFYING」报告阶段规则，两者 Kind 相同，
+// 只按 itemID+Kind+业务日去重会让后一条静默丢失。
+func slaIdempotencyKey(item domain.SlaOverdueItem, day string) string {
+	return fmt.Sprintf("sla-%s-%s-%s-%s-%s", item.ID, item.Kind, slaIdempotencyDimension(item), item.RuleStatus, day)
+}
+
+// slaIdempotencyDimension 返回幂等键中的规则维度段。
+// 计划完成口径不属于任何规则维度，用 PLAN 占位（Kind 本身已能区分）。
+func slaIdempotencyDimension(item domain.SlaOverdueItem) string {
+	if item.RuleDimension != "" {
+		return item.RuleDimension
+	}
+	return "PLAN"
+}
 
 // slaNotificationText 生成 SLA 提醒的标题与正文；超期按高优先级，临近按普通。
+// 报告阶段的停留用「报告·整改中」这类阶段名，避免与现场状态名混淆。
 func slaNotificationText(item domain.SlaOverdueItem) (string, string) {
+	stage := slaStageLabel(item)
 	switch item.Kind {
 	case domain.SlaKindStatusApproaching:
-		return "服务项临近 SLA 时限", fmt.Sprintf("服务项 %s 停留在「%s」的剩余时间不足，请及时推进。", item.ID, item.Status)
+		return "服务项临近 SLA 时限", fmt.Sprintf("服务项 %s 停留在「%s」的剩余时间不足，请及时推进。", item.ID, stage)
 	case domain.SlaKindStatusOverdue:
-		return "服务项状态停留超期", fmt.Sprintf("服务项 %s 停留在「%s」已超过规则时限 %d 小时（超期 %d 小时）。", item.ID, item.Status, item.DeadlineHours, item.OverdueHours)
+		return "服务项状态停留超期", fmt.Sprintf("服务项 %s 停留在「%s」已超过规则时限 %d 小时（超期 %d 小时）。", item.ID, stage, item.DeadlineHours, item.OverdueHours)
 	default:
 		return "服务项计划完成超期", fmt.Sprintf("服务项 %s 的计划完成时间已过 %d 小时。", item.ID, item.OverdueHours)
 	}
+}
+
+// slaStageLabel 返回通知里的阶段展示名：报告阶段规则显示「报告·<阶段名>」，
+// 状态规则沿用服务项状态文案。报告阶段名由 domain 报告阶段表派生，
+// 与规则目录、监控 SQL 使用同一份清单。
+func slaStageLabel(item domain.SlaOverdueItem) string {
+	if item.ReportStage != "" {
+		return "报告·" + domain.ReportPhaseLabel(item.ReportStage)
+	}
+	return item.Status
 }
 
 // slaNotificationPriority 让超期类提醒不被淹没在普通通知里。

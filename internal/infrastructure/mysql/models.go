@@ -7,11 +7,14 @@ import (
 )
 
 type projectRecord struct {
-	ID         string `gorm:"primaryKey;size:32"`
-	TenantID   string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
-	OwnerOrgID string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
-	Name       string `gorm:"size:255;not null"`
-	Customer   string `gorm:"size:255;not null"`
+	SourceKind   string `gorm:"size:16;not null;default:CONTRACT"`
+	SourceID     string `gorm:"size:64;not null;default:''"`
+	ScopeVersion uint64 `gorm:"not null;default:0"`
+	ID           string `gorm:"primaryKey;size:32"`
+	TenantID     string `gorm:"size:64;not null;index:idx_pm_project_tenant_status,priority:1"`
+	OwnerOrgID   string `gorm:"size:64;not null;index:idx_pm_project_tenant_owner_org,priority:2"`
+	Name         string `gorm:"size:255;not null"`
+	Customer     string `gorm:"size:255;not null"`
 	// CustomerID 是合同系统传来的客户标识（源自 CRM 客户主数据），
 	// 让按客户聚合与对账不必依赖客户名称的字符串匹配。
 	CustomerID        string `gorm:"size:64;not null"`

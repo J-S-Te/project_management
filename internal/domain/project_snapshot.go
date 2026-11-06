@@ -9,29 +9,34 @@ import (
 )
 
 type ProjectProjection struct {
-	Type              string    `json:"type"`
-	TenantID          string    `json:"tenant_id"`
-	SnapshotID        string    `json:"snapshot_id"`
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Customer          string    `json:"customer"`
-	CustomerID        string    `json:"customer_id"`
-	Contract          string    `json:"contract"`
-	ContractID        string    `json:"contract_id"`
-	Category          string    `json:"category"`
-	Team              string    `json:"team"`
-	Manager           string    `json:"manager"`
-	ManagerIdentityID string    `json:"manager_identity_id"`
-	OwnerOrgID        string    `json:"owner_org_id"`
-	OwnerIdentityID   string    `json:"owner_identity_id"`
-	Status            string    `json:"status"`
-	Progress          int       `json:"progress"`
-	Risk              bool      `json:"risk"`
-	InFlight          bool      `json:"in_flight"`
-	ServiceItems      int       `json:"service_items"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
-	SourceUpdatedAt   time.Time `json:"source_updated_at"`
+	Type              string `json:"type"`
+	TenantID          string `json:"tenant_id"`
+	SnapshotID        string `json:"snapshot_id"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Customer          string `json:"customer"`
+	CustomerID        string `json:"customer_id"`
+	Contract          string `json:"contract"`
+	ContractID        string `json:"contract_id"`
+	Category          string `json:"category"`
+	Team              string `json:"team"`
+	Manager           string `json:"manager"`
+	ManagerIdentityID string `json:"manager_identity_id"`
+	OwnerOrgID        string `json:"owner_org_id"`
+	OwnerIdentityID   string `json:"owner_identity_id"`
+	Status            string `json:"status"`
+	// ReportStage 是服务端派生的项目级报告阶段（与 status 正交的维度）：
+	// NONE/RECTIFYING/COMPILING/REVIEWED/ISSUED/ARCHIVED；"" 表示未进入报告段
+	// （仍有服务项未到现场实施完成）或不可判定（未知报告状态、无服务项、全部终止）。
+	// 该键始终输出（无 omitempty）：下游以空字符串区分"未进入报告段"，缺失即协议不一致。
+	ReportStage     string    `json:"report_stage"`
+	Progress        int       `json:"progress"`
+	Risk            bool      `json:"risk"`
+	InFlight        bool      `json:"in_flight"`
+	ServiceItems    int       `json:"service_items"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	SourceUpdatedAt time.Time `json:"source_updated_at"`
 }
 
 type ProjectSnapshotHeader struct {
@@ -81,11 +86,13 @@ func NewProjectProjection(project Project, snapshotID string, items []ProjectSna
 		active = append(active, ProjectStatusItem{Status: item.Status, ReportStatus: item.ReportStatus})
 	}
 	status := DeriveProjectStatus(active, project.SupplementStatus, project.Status)
+	// 报告阶段与状态同源同集合：都只看未归档、未终止的服务项，禁止另写阶段表。
+	reportStage := DeriveProjectReportStage(active)
 	return ProjectProjection{
 		Type: "project", TenantID: project.TenantID, SnapshotID: snapshotID, ID: project.ID, Name: project.Name,
 		Customer: project.Customer, CustomerID: project.CustomerID, Contract: project.Contract, ContractID: project.ContractID,
 		Category: project.Category, Team: project.Team, Manager: project.Manager, ManagerIdentityID: project.ManagerIdentityID,
-		OwnerOrgID: project.OwnerOrgID, OwnerIdentityID: project.OwnerIdentityID, Status: status,
+		OwnerOrgID: project.OwnerOrgID, OwnerIdentityID: project.OwnerIdentityID, Status: status, ReportStage: reportStage,
 		Progress: DeriveProjectProgress(active), Risk: IsRiskProject(status, active), InFlight: status != ProjectStatusCompleted,
 		ServiceItems: len(active), CreatedAt: project.CreatedAt.UTC(), UpdatedAt: project.UpdatedAt.UTC(), SourceUpdatedAt: latest.UTC(),
 	}

@@ -4,14 +4,16 @@ x-project-runtime: &project-runtime
     - ${PROJECT_RUNTIME_ENV_FILE:-.env.local}
   environment:
     PM_HTTP_ADDR: :8082
-    PROJECT_RUN_WORKER_WITH_API: ${PROJECT_RUN_WORKER_WITH_API:-true}
+    PROJECT_RUN_WORKER_WITH_API: "false"
     PLATFORM_BASE_URL: ${PROJECT_PLATFORM_BACKCHANNEL_BASE_URL:-http://platform-api:8080}
     OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
-    TEMPORAL_WORKER_DEPLOYMENT_NAME: ${PROJECT_TEMPORAL_WORKER_DEPLOYMENT_NAME:-project-management}
-    TEMPORAL_WORKER_BUILD_ID: ${PROJECT_TEMPORAL_WORKER_BUILD_ID:-project-worker-v1}
-    TEMPORAL_WORKER_VERSIONING_ENABLED: ${PROJECT_TEMPORAL_WORKER_VERSIONING_ENABLED:-true}
-    TEMPORAL_WORKER_VERSIONING_POLICY: ${PROJECT_TEMPORAL_WORKER_VERSIONING_POLICY:-PINNED}
+    PROJECT_BACKGROUND_ENGINE: ${PROJECT_BACKGROUND_ENGINE:-temporal}
+    # Build、专用 queue/deployment 与 Temporal 连接从 runtime env_file 读取，
+    # 不用旧 TEMPORAL_WORKER_* 身份，也不以空宿主变量覆盖不可变 Build。
     TEMPORAL_METRICS_ADDRESS: :9092
+  networks: [platform]
+  volumes:
+    - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
 
 services:
   migrate:
@@ -21,6 +23,13 @@ services:
 
   project-api:
     <<: *project-runtime
+    env_file:
+      - ${PROJECT_RUNTIME_ENV_FILE:-.env.local}
+      - path: runtime/license-project-api.env
+        required: false
+    volumes:
+      - license-state-project-api:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -37,13 +46,41 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  worker:
-    profiles: ["split-runtime"]
+  sla-notifier: &project-background
     <<: *project-runtime
-    entrypoint: ["/usr/local/bin/project-worker"]
+    env_file:
+      - ${PROJECT_RUNTIME_ENV_FILE:-.env.local}
+      - path: runtime/license-project-sla-notifier.env
+        required: false
+    entrypoint: ["/usr/local/bin/sla-notifier"]
+    volumes:
+      - license-state-project-sla-notifier:/var/lib/commercial-license
+      - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     expose:
       - "9092"
+    healthcheck:
+      # 只检查 bootstrap；许可、routing 与 execution 由受控发布另行核验。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$${PROJECT_BACKGROUND_HEALTH_ADDRESS:-127.0.0.1:9093}/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    stop_grace_period: 420s
     restart: unless-stopped
+
+  # 仅用于显式替代 sla-notifier，沿用同一许可身份，不能作为第三消费者并行运行。
+  worker:
+    <<: *project-background
+    profiles: ["split-runtime"]
+    scale: 0
+    entrypoint: ["/usr/local/bin/project-worker"]
+
+volumes:
+  license-state-project-api:
+  license-state-project-sla-notifier:
 
 networks:
   platform:

@@ -35,6 +35,13 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	if query.DueFrom != "" && query.DueTo != "" && query.DueFrom > query.DueTo {
 		return domain.ProjectMonitoringSnapshot{}, ValidationError("计划完成起始日期不能晚于结束日期")
 	}
+	// 报告阶段筛选与项目列表共用同一校验/归一化：数据库分页路径与内存回退路径
+	// 的过滤条件必须完全一致，否则两条路径的 total 与行集口径分裂。
+	reportStage, err := normalizeReportStageFilter(query.ReportStage)
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	query.ReportStage = reportStage
 	page, pageSize := query.Page, query.PageSize
 	if page <= 0 {
 		page = 1
@@ -80,6 +87,7 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 
 	rows := make([]domain.MonitoringProject, 0, len(projects))
 	statusCounts := map[string]int{}
+	reportStageCounts := map[string]int{}
 	categoryFacets, teamFacets, managerFacets := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
 	latestVersionTime := time.Time{}
 	for _, project := range projects {
@@ -92,14 +100,23 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 		}
 		rows = append(rows, row)
 		statusCounts[project.Status]++
-		if project.Team != "" {
+		if project.ReportStage != "" {
+			reportStageCounts[project.ReportStage]++
+		}
+		// 掩码占位值不是真实取值：兜底路径的分面收集跳过它，让内存路径与
+		// 数据库分页路径（hidden 时清空分面）输出同一种形态。
+		if project.Team != "" && project.Team != maskedFieldValue {
 			teamFacets[project.Team] = struct{}{}
 		}
 		for _, category := range row.Categories {
-			categoryFacets[category] = struct{}{}
+			if category != maskedFieldValue {
+				categoryFacets[category] = struct{}{}
+			}
 		}
 		for _, managerID := range row.ProjectManagerIDs {
-			managerFacets[managerID] = struct{}{}
+			if managerID != maskedFieldValue {
+				managerFacets[managerID] = struct{}{}
+			}
 		}
 		if row.UpdatedAt.After(latestVersionTime) {
 			latestVersionTime = row.UpdatedAt
@@ -133,7 +150,7 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}
 	now := time.Now().UTC()
 	return domain.ProjectMonitoringSnapshot{
-		Items: paged, RecentEvents: recentEvents, StatusCounts: statusCounts,
+		Items: paged, RecentEvents: recentEvents, StatusCounts: statusCounts, ReportStageCounts: reportStageCounts,
 		Categories: sortedKeys(categoryFacets), Teams: sortedKeys(teamFacets), ProjectManagerIDs: sortedKeys(managerFacets),
 		Total: total, Page: page, PageSize: pageSize, ServerTime: now,
 		SnapshotVersion: fmt.Sprintf("%d-%d", latestVersionTime.UnixNano(), total),
@@ -149,10 +166,14 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
 	}
-	projects, items, err := s.applyFieldPermissions(ctx, p, data.Projects, data.ServiceItems)
+	projectHidden, itemHidden, err := s.hiddenFieldsFor(ctx, p)
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
 	}
+	// 分页投影里的项目、服务项、事件与分面来自同一次数据库读取，hidden 规则
+	// 必须一次性作用到全部四类输出，否则事件 payload 和分面会成为脱敏旁路。
+	maskProjectAndItemFields(data.Projects, data.ServiceItems, projectHidden, itemHidden)
+	projects, items := data.Projects, data.ServiceItems
 	rules, err := s.Repo.ListRules(ctx, p.TenantID, "sla")
 	if err != nil {
 		return domain.ProjectMonitoringSnapshot{}, err
@@ -173,6 +194,20 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 	for _, item := range slaItems {
 		slaByProject[item.ProjectID] = append(slaByProject[item.ProjectID], item)
 	}
+	// 事件必须先脱敏再挑选 latest_event / recent_events：payload 里带着
+	// 指派和拆解快照，顺序颠倒会把未掩码的副本留在响应里。
+	data.Events = maskEventPayloads(data.Events, itemHidden)
+	// 分面来自与明细同一批行的聚合：被隐藏的字段不能再以取值列表的形式
+	// 从快照顶层漏出，因此清空为显式空切片（保持 JSON 数组形态）。
+	if _, hide := projectHidden["team"]; hide {
+		data.Teams = []string{}
+	}
+	if _, hide := itemHidden["category"]; hide {
+		data.Categories = []string{}
+	}
+	if _, hide := itemHidden["project_manager_id"]; hide {
+		data.ProjectManagerIDs = []string{}
+	}
 	latestEventByProject := map[string]domain.DeliveryEvent{}
 	for _, event := range data.Events {
 		if _, exists := latestEventByProject[event.ProjectID]; !exists {
@@ -191,7 +226,7 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 		recentEvents = []domain.DeliveryEvent{}
 	}
 	return domain.ProjectMonitoringSnapshot{
-		Items: rows, RecentEvents: recentEvents, StatusCounts: data.StatusCounts,
+		Items: rows, RecentEvents: recentEvents, StatusCounts: data.StatusCounts, ReportStageCounts: data.ReportStageCounts,
 		Categories: data.Categories, Teams: data.Teams, ProjectManagerIDs: data.ProjectManagerIDs,
 		Total: data.Total, Page: query.Page, PageSize: query.PageSize, ServerTime: time.Now().UTC(),
 		SnapshotVersion: fmt.Sprintf("%d-%d", data.LatestUpdatedAt.UnixNano(), data.Total),
@@ -293,6 +328,11 @@ func monitoringActionSection(status string) string {
 func monitoringMatches(row domain.MonitoringProject, query domain.ProjectMonitoringQuery) bool {
 	p := row.Project
 	if query.Status != "" && p.Status != query.Status {
+		return false
+	}
+	// 报告阶段与状态正交：两者 AND 组合，与数据库分页路径的谓词一致。
+	// 空 report_stage（未进入报告段/不可判定）只在没有筛选时出现。
+	if query.ReportStage != "" && !strings.EqualFold(strings.TrimSpace(p.ReportStage), strings.TrimSpace(query.ReportStage)) {
 		return false
 	}
 	if query.Customer != "" && !strings.Contains(strings.ToLower(p.Customer), strings.ToLower(strings.TrimSpace(query.Customer))) {

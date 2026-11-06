@@ -28,6 +28,50 @@ func writeCapabilityImportError(c *gin.Context, err error) {
 	writeServiceError(c, err)
 }
 
+// writeImportIdempotencyKeyError 对缺失或非法的 Idempotency-Key 返回 400：
+// 这是请求头格式问题，不是业务数据校验失败（422），应在读取文件前拒绝。
+func writeImportIdempotencyKeyError(c *gin.Context, err error) {
+	writeError(c, http.StatusBadRequest, "PM_INVALID_IDEMPOTENCY_KEY", serviceMessage(err, "缺少或非法的 Idempotency-Key 请求头"))
+}
+
+// parseImportSelection 解析 selected_rows 表单字段（CSV 物理行号 JSON 数组）。
+// 缺省表示整份文件；显式选择必须非空、不重复且落在本次解析出的行号内。
+func parseImportSelection(c *gin.Context, available []int) ([]int, error) {
+	value := strings.TrimSpace(c.PostForm("selected_rows"))
+	if value == "" {
+		return append([]int(nil), available...), nil
+	}
+	var rows []int
+	if json.Unmarshal([]byte(value), &rows) != nil || len(rows) == 0 || len(rows) > 500 {
+		return nil, application.ValidationError("请选择有效的导入行")
+	}
+	known := make(map[int]bool, len(available))
+	for _, row := range available {
+		known[row] = true
+	}
+	selected := make(map[int]bool, len(rows))
+	unique := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if !known[row] {
+			return nil, application.ValidationError("选择行号重复或超出文件范围")
+		}
+		if selected[row] {
+			return nil, application.ValidationError("选择行号重复或超出文件范围")
+		}
+		selected[row] = true
+		unique = append(unique, row)
+	}
+	return unique, nil
+}
+
+func importRowNumbers(rows []application.CapabilityImportInput) []int {
+	numbers := make([]int, 0, len(rows))
+	for _, row := range rows {
+		numbers = append(numbers, row.RowNo)
+	}
+	return numbers
+}
+
 func (h *Handler) capabilityImportTemplate(c *gin.Context) {
 	buffer := bytes.NewBufferString("\xef\xbb\xbf")
 	writer := csv.NewWriter(buffer)
@@ -39,25 +83,29 @@ func (h *Handler) capabilityImportTemplate(c *gin.Context) {
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", buffer.Bytes())
 }
 
-func (h *Handler) readPersonnelImport(c *gin.Context) ([]application.CapabilityImportInput, error) {
+func (h *Handler) readPersonnelImport(c *gin.Context) ([]application.CapabilityImportInput, string, error) {
 	file, err := c.FormFile("file")
 	if err != nil || file.Size > maximumCapabilityImportBytes || !strings.EqualFold(filepath.Ext(file.Filename), ".csv") {
-		return nil, application.ValidationError("请上传不超过 2MB 的 CSV 文件")
+		return nil, "", application.ValidationError("请上传不超过 2MB 的 CSV 文件")
 	}
 	opened, err := file.Open()
 	if err != nil {
-		return nil, application.ErrValidation
+		return nil, "", application.ErrValidation
 	}
 	defer opened.Close()
 	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
 	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes || !utf8.Valid(content) {
-		return nil, application.ValidationError("文件为空、超过 2MB 或不是 UTF-8 编码")
+		return nil, "", application.ValidationError("文件为空、超过 2MB 或不是 UTF-8 编码")
 	}
+	// 内容指纹先于网关/解析计算：确认请求的幂等指纹必须只由文件字节决定。
+	contentHash := application.ImportContentHash(content)
 	if h.service.EvidenceFiles == nil {
-		return nil, errCapabilityImportGateway
+		return nil, "", errCapabilityImportGateway
 	}
-	if _, err := h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "CAPABILITY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
-		return nil, errCapabilityImportGateway
+	// 幂等键必须由文件内容决定，不能用每个请求都不同的 X-Request-ID，
+	// 否则预览与确认（以及重复点击）会把同一份文件重复上传到统一文件网关。
+	if _, err := h.service.EvidenceFiles.UploadImport(c.Request.Context(), importUploadRequestID("CAPABILITY", file.Filename, content), "CAPABILITY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
+		return nil, "", errCapabilityImportGateway
 	}
 	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(string(content), "\ufeff")))
 	reader.FieldsPerRecord = -1
@@ -68,19 +116,23 @@ func (h *Handler) readPersonnelImport(c *gin.Context) ([]application.CapabilityI
 			break
 		}
 		if readErr != nil {
-			return nil, application.ValidationError("CSV 格式错误，请使用下载的模板")
+			return nil, "", application.ValidationError("CSV 格式错误，请使用下载的模板")
 		}
 		if len(records) > 500 {
-			return nil, application.ValidationError("最多支持 500 条人员资质")
+			return nil, "", application.ValidationError("最多支持 500 条人员资质")
 		}
 		for _, cell := range row {
 			if len(cell) > 2000 {
-				return nil, application.ValidationError("单元格内容过长")
+				return nil, "", application.ValidationError("单元格内容过长")
 			}
 		}
 		records = append(records, row)
 	}
-	return personnelImportInputs(records)
+	inputs, err := personnelImportInputs(records)
+	if err != nil {
+		return nil, "", err
+	}
+	return inputs, contentHash, nil
 }
 
 func personnelImportInputs(records [][]string) ([]application.CapabilityImportInput, error) {
@@ -142,7 +194,7 @@ func personnelImportInputs(records [][]string) ([]application.CapabilityImportIn
 }
 
 func (h *Handler) previewCapabilitiesImport(c *gin.Context) {
-	inputs, err := h.readPersonnelImport(c)
+	inputs, _, err := h.readPersonnelImport(c)
 	if err != nil {
 		writeCapabilityImportError(c, err)
 		return
@@ -155,65 +207,35 @@ func (h *Handler) previewCapabilitiesImport(c *gin.Context) {
 	writeData(c, http.StatusOK, result)
 }
 
+// confirmPersonnelImport 确认导入人员资质。
+// 必须携带 Idempotency-Key；选中的全部行在单事务内写入，任一行失败整批回滚（422，含行号与原因），
+// 成功后记录幂等结果，同键重试返回首次响应。
 func (h *Handler) confirmPersonnelImport(c *gin.Context) {
-	inputs, err := h.readPersonnelImport(c)
+	key, err := application.NormalizeImportIdempotencyKey(c.GetHeader("Idempotency-Key"))
+	if err != nil {
+		writeImportIdempotencyKeyError(c, err)
+		return
+	}
+	inputs, contentHash, err := h.readPersonnelImport(c)
 	if err != nil {
 		writeCapabilityImportError(c, err)
 		return
 	}
-	selected := map[int]bool{}
-	if value := strings.TrimSpace(c.PostForm("selected_rows")); value != "" {
-		var rows []int
-		if json.Unmarshal([]byte(value), &rows) != nil || len(rows) == 0 || len(rows) > 500 {
-			writeServiceError(c, application.ValidationError("请选择有效的导入行"))
-			return
-		}
-		for _, row := range rows {
-			if row < 2 || row > len(inputs)+1 || selected[row] {
-				writeServiceError(c, application.ValidationError("选择行号重复或超出文件范围"))
-				return
-			}
-			selected[row] = true
-		}
-	} else {
-		for _, input := range inputs {
-			selected[input.RowNo] = true
-		}
+	selectedRows, err := parseImportSelection(c, importRowNumbers(inputs))
+	if err != nil {
+		writeServiceError(c, err)
+		return
 	}
 	preview, err := h.service.PreviewCapabilityImport(c.Request.Context(), principal(c), inputs)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	type outcome struct {
-		RowNo   int    `json:"row_no"`
-		Status  string `json:"status"`
-		Message string `json:"message"`
+	requestHash := application.ImportRequestHash(application.ImportOperationCapability, contentHash, c.PostForm("resource_type"), selectedRows)
+	result, err := h.service.ConfirmCapabilityImport(c.Request.Context(), principal(c), key, requestHash, preview.Rows, selectedRows)
+	if err != nil {
+		writeCapabilityImportError(c, err)
+		return
 	}
-	outcomes := []outcome{}
-	imported, skipped := 0, 0
-	messages := []string{}
-	for _, row := range preview.Rows {
-		if !selected[row.RowNo] {
-			outcomes = append(outcomes, outcome{row.RowNo, "SKIPPED", "未选择"})
-			continue
-		}
-		message := strings.Join(row.Errors, "；")
-		if row.Status == "READY" {
-			result, saveErr := h.service.ImportCapabilities(c.Request.Context(), principal(c), []domain.Capability{row.Capability})
-			if saveErr != nil {
-				message = "保存失败，请稍后重试"
-			} else if result.Imported == 1 {
-				imported++
-				outcomes = append(outcomes, outcome{row.RowNo, "IMPORTED", "导入成功"})
-				continue
-			} else {
-				message = strings.Join(result.Errors, "；")
-			}
-		}
-		skipped++
-		messages = append(messages, fmt.Sprintf("第 %d 行：%s", row.RowNo, message))
-		outcomes = append(outcomes, outcome{row.RowNo, "FAILED", message})
-	}
-	writeData(c, http.StatusOK, gin.H{"imported": imported, "skipped": skipped, "errors": messages, "rows": outcomes})
+	writeData(c, http.StatusOK, result)
 }

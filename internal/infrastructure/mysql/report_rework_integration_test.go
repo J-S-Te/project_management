@@ -13,7 +13,19 @@ import (
 	"os"
 )
 
+// TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL 验证整改返工生成新修订并重走整改。
+// 参数：t 为测试上下文。
+// 返回值：无；修订失效、新修订初始化或重新整改不符时测试失败。
 func TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL(t *testing.T) {
+	for _, phase := range []string{"RECTIFYING", "COMPILING", "REVIEWED"} {
+		t.Run(phase, func(t *testing.T) { testReportReturnToField(t, phase) })
+	}
+}
+
+// testReportReturnToField 验证指定合法报告阶段返工后旧证据保留且新修订重新整改。
+// 参数：t 为测试上下文，phase 为返工前的报告阶段。
+// 返回值：无；返工事务或新修订状态不符时测试失败。
+func testReportReturnToField(t *testing.T, phase string) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
 		t.Skip("PM_TEST_DSN is required")
@@ -26,6 +38,9 @@ func TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL(t *testing.T) {
 	tenant := "PM-REG-REWORK-20261018"
 	projectID, itemID := "PJ-REG-REWORK-1", "SI-REG-REWORK-1"
 	cleanup := func() {
+		db.WithContext(ctx).Exec("DELETE FROM prj_audit_outbox WHERE tenant_id=?", tenant)
+		db.WithContext(ctx).Exec("DELETE FROM pm_delivery_effects_outbox WHERE tenant_id=?", tenant)
+		db.WithContext(ctx).Exec("DELETE FROM pm_notification_outbox WHERE tenant_id=?", tenant)
 		db.WithContext(ctx).Exec("DELETE FROM pm_delivery_event WHERE tenant_id=?", tenant)
 		db.WithContext(ctx).Exec("DELETE FROM pm_report_revision WHERE tenant_id=?", tenant)
 		db.WithContext(ctx).Exec("DELETE FROM pm_service_item WHERE tenant_id=?", tenant)
@@ -37,10 +52,10 @@ func TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL(t *testing.T) {
 	if err := db.Create(&projectRecord{ID: projectID, TenantID: tenant, Name: "报告返工回归", Customer: "客户", Contract: "C-1", ContractVersion: "v1", SupplementStatus: "NONE", Services: 1, Status: "实施中", CreatedAt: now, UpdatedAt: now, Version: 1}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&serviceItemRecord{ID: itemID, TenantID: tenant, ProjectID: projectID, SourceServiceID: "S-1", TestMode: "STANDARD", Status: "现场实施完成", ReportStatus: "REVIEWED", ReportRevision: 0, ConflictStatus: "PASSED", TechReviewStatus: "NONE", Version: 5, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+	if err := db.Create(&serviceItemRecord{ID: itemID, TenantID: tenant, ProjectID: projectID, SourceServiceID: "S-1", TestMode: "STANDARD", Status: "现场实施完成", ReportStatus: phase, ReportRevision: 0, ConflictStatus: "PASSED", TechReviewStatus: "NONE", Version: 5, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&reportRevisionRecord{TenantID: tenant, ServiceItemID: itemID, SubjectType: "SERVICE_ITEM", SubjectID: itemID, Revision: 0, Status: "REVIEWED", ValidityStatus: "ACTIVE", FileID: "FILE-R0", FileName: "R0.pdf", FileMIME: "application/pdf", FileSize: 10, FileSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PreparedBy: "pm", ReviewedBy: "qa", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+	if err := db.Create(&reportRevisionRecord{TenantID: tenant, ServiceItemID: itemID, SubjectType: "SERVICE_ITEM", SubjectID: itemID, Revision: 0, Status: phase, ValidityStatus: "ACTIVE", FileID: "FILE-R0", FileName: "R0.pdf", FileMIME: "application/pdf", FileSize: 10, FileSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
 		t.Fatal(err)
 	}
 	repo := NewRepository(db)
@@ -62,7 +77,7 @@ func TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL(t *testing.T) {
 	if err := db.Where("tenant_id=? AND service_item_id=?", tenant, itemID).Order("revision").Find(&revisions).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(revisions) != 2 || revisions[0].ValidityStatus != "SUPERSEDED" || revisions[1].ValidityStatus != "ACTIVE" || revisions[1].Revision != 1 {
+	if len(revisions) != 2 || revisions[1].Status != "NONE" || revisions[0].ValidityStatus != "SUPERSEDED" || revisions[1].ValidityStatus != "ACTIVE" || revisions[1].Revision != 1 {
 		t.Fatalf("revisions=%+v", revisions)
 	}
 	// 在新修订上重新完成现场执行。
@@ -74,5 +89,14 @@ func TestReportReturnToFieldReopensRevisionAndCompletesOnMySQL(t *testing.T) {
 	}
 	if item.Status != "现场实施完成" || item.ReportStatus != "NONE" {
 		t.Fatalf("after recomplete status=%s report=%s", item.Status, item.ReportStatus)
+	}
+	fixture := rectifyingFixture{db: db, repo: repo, tenant: tenant, projectID: projectID, itemID: itemID, now: now}
+	fixture.rejectAdvance(t, "pm", "COMPILING", application.ErrValidation)
+	if err := fixture.advance(t, "pm", "RECTIFYING"); err != nil {
+		t.Fatalf("返工后再次整改: %v", err)
+	}
+	after := fixture.snapshot(t)
+	if after.Item.ReportStatus != "RECTIFYING" || after.Revision.Status != "RECTIFYING" || after.Revision.PreparedBy != "" {
+		t.Fatal("返工后新修订未停在整改或提前写入编制人")
 	}
 }

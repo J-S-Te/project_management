@@ -12,6 +12,7 @@ import (
 )
 
 type Config struct {
+	ProjectNativeEnabled        bool
 	CentralSessionEnabled       bool
 	CentralSessionPublicBaseURL string
 	HTTPAddress                 string
@@ -214,6 +215,9 @@ func Load() (Config, error) {
 		DashboardMachineScope:                  strings.TrimSpace(os.Getenv("DASHBOARD_MACHINE_REQUIRED_SCOPE")),
 	}
 	var err error
+	if c.ProjectNativeEnabled, err = strconv.ParseBool(env("PROJECT_NATIVE_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("PROJECT_NATIVE_ENABLED: %w", err)
+	}
 	if c.ProjectContractImportEnabled, err = strconv.ParseBool(env("PROJECT_CONTRACT_IMPORT_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("PROJECT_CONTRACT_IMPORT_ENABLED: %w", err)
 	}
@@ -375,6 +379,13 @@ func (c Config) validate() error {
 	}
 	if strings.TrimSpace(c.MySQLDSN) == "" {
 		return fmt.Errorf("MYSQL_DSN is required")
+	}
+	// C13：生产环境禁止内嵌后台。内嵌 worker 已弃用，标准后台职责由独立
+	// project-sla-notifier 组件承担（生产 Compose 已显式
+	// PROJECT_RUN_WORKER_WITH_API=false）。生产部署缺显式 false 时失败关闭，
+	// 不再仅告警；开发裸跑单进程不受影响。
+	if c.ProductionEnvironment && c.RunWorkerWithAPI {
+		return fmt.Errorf("PROJECT_RUN_WORKER_WITH_API must be false in production; start the separate project-sla-notifier component instead")
 	}
 	if strings.TrimSpace(c.TemporalAddress) == "" || strings.TrimSpace(c.TemporalNamespace) == "" || strings.TrimSpace(c.TemporalTaskQueue) == "" || strings.TrimSpace(c.TemporalWorkerBuildID) == "" || strings.TrimSpace(c.TemporalMetricsAddress) == "" {
 		return fmt.Errorf("Temporal address, namespace, task queue, worker build ID and metrics address are required")

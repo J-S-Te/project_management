@@ -86,7 +86,7 @@ func (r *serviceProjectRepository) CreateProjectWithServiceItems(_ context.Conte
 	return nil
 }
 
-func (r *scopeRepository) ListProjects(_ context.Context, filter platform.ScopeFilter, _, _ string, _, _ int) ([]domain.Project, int, error) {
+func (r *scopeRepository) ListProjects(_ context.Context, filter platform.ScopeFilter, _ domain.ProjectListQuery) ([]domain.Project, int, error) {
 	r.lastFilter = filter
 	return nil, 0, nil
 }

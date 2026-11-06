@@ -14,13 +14,11 @@ type ReportRevisionRepository interface {
 	RegisterReportArtifact(context.Context, string, string, uint64, domain.ReportArtifactInput, string, time.Time) error
 }
 
-// UpdateReportStatus 服务项报告从编制中逐级推进：编制中→已审核→已签发→已归档。
-// 报告推进把项目推向「已完成」，是交付收口动作，使用独立的报告管理权限，
-// 不与现场执行权限（project.field.complete）混用。
+// UpdateReportStatus 推进主报告的整改、编制、审核、签发和归档阶段。
+// 参数：ctx 为上下文，p 为操作主体，itemID 为服务项，input 为目标阶段及预期版本。
+// 返回值：权限、版本、报告文件或事务校验失败时返回错误，成功返回 nil。
 func (s *Service) UpdateReportStatus(ctx context.Context, p platform.Principal, itemID string, input domain.ReportStatusInput) error {
-	// 报告推进拆成两级职责：编制/审核/签发属于报告编制（project.report.manage），
-	// 归档会把项目推向"已完成"，属于独立治理动作（project.report.archive）。
-	// 现场执行角色不再顺带拥有归档权。
+	// 整改与编制共用准备权限，审核、签发与归档保持独立职责。
 	phase := strings.ToUpper(strings.TrimSpace(input.Phase))
 	if err := s.authorizeServiceItem(ctx, p, reportPhasePermission(phase), itemID); err != nil {
 		return err
@@ -105,10 +103,11 @@ func (s *Service) RegisterReportArtifact(ctx context.Context, p platform.Princip
 }
 
 // reportPhasePermission 返回推进到目标报告阶段所需的权限码。
-// 归档（ARCHIVED）会把项目推向"已完成"，属于独立治理动作；编制/审核/签发属于报告编制。
+// 参数：phase 为目标报告阶段，忽略首尾空格与大小写。
+// 返回值：对应阶段权限；未知阶段使用准备权限，由事务阶段校验最终拒绝。
 func reportPhasePermission(phase string) string {
 	switch strings.ToUpper(strings.TrimSpace(phase)) {
-	case "COMPILING":
+	case "RECTIFYING", "COMPILING":
 		return "project.report.prepare"
 	case "REVIEWED":
 		return "project.report.review"

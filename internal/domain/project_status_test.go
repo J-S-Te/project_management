@@ -167,3 +167,24 @@ func TestServiceItemStatusRankCoversEveryKnownStatus(t *testing.T) {
 		t.Fatalf("未知状态必须被识别且去重，实际 %v", unknown)
 	}
 }
+
+// TestRectifyingDerivesReporting 验证整改进入报告节点且保留报告阶段的项目进度。
+// 参数：t 为测试上下文。
+// 返回值：无；派生状态、进度或 SQL 共用映射缺失时测试失败。
+func TestRectifyingDerivesReporting(t *testing.T) {
+	items := []ProjectStatusItem{{Status: ProjectStatusFieldCompleted, ReportStatus: " rectifying "}}
+	if got := DeriveProjectStatus(items, "NONE", ""); got != ProjectStatusReporting {
+		t.Fatalf("整改派生状态=%s，期望报告编制", got)
+	}
+	if got := DeriveProjectProgress(items); got != 87 {
+		t.Fatalf("整改项目进度=%d，期望87", got)
+	}
+	for _, stage := range ServiceItemReportStages() {
+		for _, status := range stage.Statuses {
+			if status == "RECTIFYING" && stage.Rank == 7 {
+				return
+			}
+		}
+	}
+	t.Fatal("SQL共用报告阶段映射缺少RECTIFYING rank7")
+}

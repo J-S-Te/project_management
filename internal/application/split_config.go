@@ -436,16 +436,9 @@ func splitScopeSnapshot(items []domain.ServiceItem) []string {
 	return snapshot
 }
 
-// CheckScopeChange 实现「范围变更检测」（原型：开启后确认拆解时勾对合同清单与拆解结果）。
-//
-// 语义：合同激活时把清单范围指纹写进 CONTRACT_ACTIVATED 事件；确认拆解前再次计算当前拆解
-// 结果的范围指纹（只含来源清单行/批次/场所/检测类别，不含核对阶段允许编辑的技术要求与系统名称）。
-// 基准取「最新一条确立范围的事件」（合同激活 / 拆解调整 / 补充协议关账），因此补充协议
-// 已应用或已关账之后不会再用最初合同的清单反复判为漂移。
-// 不一致说明范围变了：
-//   - 项目还没进补充协议分支 → 记录变更并进入补充协议处理中；
-//   - 项目已在补充协议分支 → 不再由这里"放行"，改由受控退出校验
-//     （verifySupplementExitForConfirm / VerifySupplementExit）决定能否退出。
+// CheckScopeChange 按真实来源校验当前拆解与其权威范围。
+// 参数：ctx/p/filter 为当前请求身份和范围，ids 为本次确认服务项。
+// 返回值：原生范围漂移拒绝；合同继续原补充审批路径。
 func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, filter platform.ScopeFilter, ids []string) error {
 	deliveryRepo, ok := s.Repo.(DeliveryRepository)
 	if !ok {
@@ -463,6 +456,17 @@ func (s *Service) CheckScopeChange(ctx context.Context, p platform.Principal, fi
 		}
 	}
 	for projectID := range projectIDs {
+		if guard, ok := s.Repo.(interface {
+			ValidateNativeScopeIfApplicable(context.Context, platform.ScopeFilter, string) (bool, error)
+		}); ok {
+			native, err := guard.ValidateNativeScopeIfApplicable(ctx, filter, projectID)
+			if err != nil {
+				return err
+			}
+			if native {
+				continue
+			}
+		}
 		events, err := deliveryRepo.ListDeliveryEvents(ctx, filter, projectID)
 		if err != nil {
 			return err

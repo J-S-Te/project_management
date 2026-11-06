@@ -23,9 +23,6 @@ import (
 	"github.com/j-s-te/project-management/migrations"
 )
 
-// main 装配项目API、可信集成与后台生命周期。
-// 参数：无。
-// 返回值：无；启动失败终止进程。
 // main 装配项目 API、会话认证及后台依赖并启动服务。
 // 参数：无。
 // 返回值：无；初始化失败终止启动。
@@ -220,7 +217,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	service := &application.Service{Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger,
+	service := &application.Service{NativeEnabled: cfg.ProjectNativeEnabled, Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger,
 		// BIZ-PROJECT-05：签到坐标与站点主数据的一致性格局由部署配置决定（阈值/站点缺失策略）。
 		FieldCheckIn: application.FieldCheckInPolicy{SiteDistanceMeters: cfg.FieldCheckIn.SiteDistanceMeters, SiteMissingPolicy: cfg.FieldCheckIn.SiteMissingPolicy},
 		// BIZ-PROJECT-06：缺项说明门禁的强度由部署配置决定（新装 enforce，存量升级先 advisory）。
@@ -240,10 +237,18 @@ func main() {
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
-		ContractImport:          &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
-		SettlementReference:     &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
-		CommercialLicense:       commercialGate,
-		PendingMigrations:       pendingMigrations,
+		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
+		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
+		CommercialLicense:   commercialGate,
+		PendingMigrations:   pendingMigrations,
+		// C14：能力维度快照；可选未启用只反映在 state=disabled，不影响整体就绪。
+		Capabilities: map[string]any{
+			"native_project":       map[string]any{"enabled": cfg.ProjectNativeEnabled, "state": readinessCapabilityState(cfg.ProjectNativeEnabled)},
+			"contract_integration": map[string]any{"enabled": cfg.ContractIntegrationEnabled, "state": readinessCapabilityState(cfg.ContractIntegrationEnabled)},
+			"approval_validation":  map[string]any{"enabled": cfg.ContractApprovalValidationEnabled, "state": readinessCapabilityState(cfg.ContractApprovalValidationEnabled)},
+			"contract_import":      map[string]any{"enabled": cfg.ProjectContractImportEnabled, "state": readinessCapabilityState(cfg.ProjectContractImportEnabled)},
+			"settlement_reference": map[string]any{"enabled": cfg.SettlementReferenceEnabled, "state": readinessCapabilityState(cfg.SettlementReferenceEnabled)},
+		},
 		IntegrationDestinations: integrationDestinations,
 		ProjectSnapshotLimits: application.ProjectSnapshotLimits{
 			BatchSize: 200, MaxProjects: cfg.Snapshot.MaxProjects,
@@ -299,4 +304,15 @@ func serveWithGracefulShutdown(server *http.Server, shutdown <-chan struct{}, lo
 		logger.Info("shutdown signal received, draining in-flight requests", "timeout", serverShutdownTimeout.String())
 		return server.Shutdown(ctx)
 	}
+}
+
+// readinessCapabilityState 按 C14 口径渲染能力状态：disabled 属可选未购买/被
+// 停用，不计入就绪降级；enabled 表示配置校验通过后的运行态。
+// 参数：enabled 为该能力开关的运行事实。
+// 返回值：ready 或 disabled。
+func readinessCapabilityState(enabled bool) string {
+	if enabled {
+		return "ready"
+	}
+	return "disabled"
 }

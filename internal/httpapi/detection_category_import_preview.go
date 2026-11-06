@@ -3,7 +3,6 @@ package httpapi
 import (
 	"bytes"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -78,25 +77,29 @@ func detectionCategoryImportInputs(records [][]string) ([]application.DetectionC
 	return inputs, nil
 }
 
-func (h *Handler) readDetectionCategoryImport(c *gin.Context) ([]application.DetectionCategoryImportInput, error) {
+func (h *Handler) readDetectionCategoryImport(c *gin.Context) ([]application.DetectionCategoryImportInput, string, error) {
 	file, err := c.FormFile("file")
 	if err != nil || file.Size > maximumCapabilityImportBytes || !strings.EqualFold(filepath.Ext(file.Filename), ".csv") {
-		return nil, application.ValidationError("请上传不超过 2MB 的 CSV 文件")
+		return nil, "", application.ValidationError("请上传不超过 2MB 的 CSV 文件")
 	}
 	opened, err := file.Open()
 	if err != nil {
-		return nil, application.ErrValidation
+		return nil, "", application.ErrValidation
 	}
 	defer opened.Close()
 	content, err := io.ReadAll(io.LimitReader(opened, maximumCapabilityImportBytes+1))
 	if err != nil || len(content) == 0 || len(content) > maximumCapabilityImportBytes || !utf8.Valid(content) {
-		return nil, application.ValidationError("文件为空、超过 2MB 或不是 UTF-8 编码")
+		return nil, "", application.ValidationError("文件为空、超过 2MB 或不是 UTF-8 编码")
 	}
+	// 内容指纹先于网关/解析计算：确认请求的幂等指纹必须只由文件字节决定。
+	contentHash := application.ImportContentHash(content)
 	if h.service.EvidenceFiles == nil {
-		return nil, errCapabilityImportGateway
+		return nil, "", errCapabilityImportGateway
 	}
-	if _, err := h.service.EvidenceFiles.UploadImport(c.Request.Context(), c.GetHeader("X-Request-ID"), "DETECTION_CATEGORY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
-		return nil, errCapabilityImportGateway
+	// 幂等键必须由文件内容决定，不能用每个请求都不同的 X-Request-ID，
+	// 否则预览与确认（以及重复点击）会把同一份文件重复上传到统一文件网关。
+	if _, err := h.service.EvidenceFiles.UploadImport(c.Request.Context(), importUploadRequestID("DETECTION_CATEGORY", file.Filename, content), "DETECTION_CATEGORY", file.Filename, "text/csv", bytes.NewReader(content)); err != nil {
+		return nil, "", errCapabilityImportGateway
 	}
 	reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(string(content), "\ufeff")))
 	reader.FieldsPerRecord = -1
@@ -108,14 +111,14 @@ func (h *Handler) readDetectionCategoryImport(c *gin.Context) ([]application.Det
 			break
 		}
 		if err != nil {
-			return nil, application.ValidationError("CSV 格式错误，请使用下载的模板")
+			return nil, "", application.ValidationError("CSV 格式错误，请使用下载的模板")
 		}
 		if len(records) > 500 {
-			return nil, application.ValidationError("最多支持 500 条检测类别")
+			return nil, "", application.ValidationError("最多支持 500 条检测类别")
 		}
 		for _, cell := range row {
 			if len(cell) > 2000 {
-				return nil, application.ValidationError("单元格内容过长")
+				return nil, "", application.ValidationError("单元格内容过长")
 			}
 		}
 		records = append(records, row)
@@ -124,16 +127,16 @@ func (h *Handler) readDetectionCategoryImport(c *gin.Context) ([]application.Det
 	}
 	inputs, err := detectionCategoryImportInputs(records)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	for i := range inputs {
 		inputs[i].RowNo = lineNumbers[i+1]
 	}
-	return inputs, nil
+	return inputs, contentHash, nil
 }
 
 func (h *Handler) previewDetectionCategoryImport(c *gin.Context) {
-	inputs, err := h.readDetectionCategoryImport(c)
+	inputs, _, err := h.readDetectionCategoryImport(c)
 	if err != nil {
 		writeCapabilityImportError(c, err)
 		return
@@ -146,66 +149,38 @@ func (h *Handler) previewDetectionCategoryImport(c *gin.Context) {
 	writeData(c, http.StatusOK, result)
 }
 
+// confirmDetectionCategoryImport 确认导入检测类别。
+// 必须携带 Idempotency-Key；选中行在单事务内保存，任一行失败整批回滚并返回带行号的 422。
 func (h *Handler) confirmDetectionCategoryImport(c *gin.Context) {
-	inputs, err := h.readDetectionCategoryImport(c)
+	key, err := application.NormalizeImportIdempotencyKey(c.GetHeader("Idempotency-Key"))
+	if err != nil {
+		writeImportIdempotencyKeyError(c, err)
+		return
+	}
+	inputs, contentHash, err := h.readDetectionCategoryImport(c)
 	if err != nil {
 		writeCapabilityImportError(c, err)
 		return
 	}
-	selected := map[int]bool{}
-	available := map[int]bool{}
+	available := make([]int, 0, len(inputs))
 	for _, input := range inputs {
-		available[input.RowNo] = true
+		available = append(available, input.RowNo)
 	}
-	if raw := strings.TrimSpace(c.PostForm("selected_rows")); raw != "" {
-		var rows []int
-		if json.Unmarshal([]byte(raw), &rows) != nil || len(rows) == 0 || len(rows) > 500 {
-			writeServiceError(c, application.ValidationError("请选择有效导入行"))
-			return
-		}
-		for _, row := range rows {
-			if !available[row] || selected[row] {
-				writeServiceError(c, application.ValidationError("选择行号重复或超出文件范围"))
-				return
-			}
-			selected[row] = true
-		}
-	} else {
-		for _, input := range inputs {
-			selected[input.RowNo] = true
-		}
+	selectedRows, err := parseImportSelection(c, available)
+	if err != nil {
+		writeServiceError(c, err)
+		return
 	}
 	preview, err := h.service.PreviewDetectionCategoryImport(c.Request.Context(), principal(c), inputs)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	type outcome struct {
-		RowNo   int    `json:"row_no"`
-		Status  string `json:"status"`
-		Message string `json:"message"`
+	requestHash := application.ImportRequestHash(application.ImportOperationDetectionCategory, contentHash, "DETECTION_CATEGORY", selectedRows)
+	result, err := h.service.ConfirmDetectionCategoryImport(c.Request.Context(), principal(c), key, requestHash, preview.Rows, selectedRows)
+	if err != nil {
+		writeCapabilityImportError(c, err)
+		return
 	}
-	rows := []outcome{}
-	messages := []string{}
-	imported, skipped := 0, 0
-	for _, row := range preview.Rows {
-		if !selected[row.RowNo] {
-			rows = append(rows, outcome{row.RowNo, "SKIPPED", "未选择"})
-			continue
-		}
-		message := strings.Join(row.Errors, "；")
-		if row.Status == "READY" {
-			if _, err := h.service.SaveDetectionCategory(c.Request.Context(), principal(c), row.Item); err == nil {
-				imported++
-				rows = append(rows, outcome{row.RowNo, "IMPORTED", "导入成功"})
-				continue
-			} else {
-				message = "保存失败，请刷新目录后重新检测"
-			}
-		}
-		skipped++
-		messages = append(messages, fmt.Sprintf("第 %d 行：%s", row.RowNo, message))
-		rows = append(rows, outcome{row.RowNo, "FAILED", message})
-	}
-	writeData(c, http.StatusOK, gin.H{"imported": imported, "skipped": skipped, "errors": messages, "rows": rows})
+	writeData(c, http.StatusOK, result)
 }

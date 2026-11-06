@@ -77,7 +77,7 @@ type projectLicenseRepo struct {
 	job                                         *domain.DeliveryEffectsItem
 }
 
-func (r *projectLicenseRepo) ListProjects(context.Context, platform.ScopeFilter, string, string, int, int) ([]domain.Project, int, error) {
+func (r *projectLicenseRepo) ListProjects(context.Context, platform.ScopeFilter, domain.ProjectListQuery) ([]domain.Project, int, error) {
 	r.reads++
 	return []domain.Project{}, 0, nil
 }

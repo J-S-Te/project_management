@@ -16,12 +16,20 @@ import (
 	"github.com/j-s-te/project-management/internal/platform"
 )
 
-type equipmentImportGateway struct{ fail bool }
+type equipmentImportGateway struct {
+	fail bool
+	// requestIDs 非空时按调用顺序记录 UploadImport 收到的 requestID，
+	// 供导入幂等键（预览与确认必须同键）的用例断言。
+	requestIDs *[]string
+}
 
 func (g equipmentImportGateway) UploadEvidence(context.Context, string, string, string, string, string, io.Reader) (domain.ReportArtifactInput, error) {
 	return domain.ReportArtifactInput{}, nil
 }
-func (g equipmentImportGateway) UploadImport(context.Context, string, string, string, string, io.Reader) (domain.ReportArtifactInput, error) {
+func (g equipmentImportGateway) UploadImport(_ context.Context, requestID, _, _, _ string, _ io.Reader) (domain.ReportArtifactInput, error) {
+	if g.requestIDs != nil {
+		*g.requestIDs = append(*g.requestIDs, requestID)
+	}
 	if g.fail {
 		return domain.ReportArtifactInput{}, errors.New("private upstream failure")
 	}
@@ -58,6 +66,8 @@ func TestEquipmentImportRejectsInvalidSelectionAndFailedGateway(t *testing.T) {
 		c, _ := gin.CreateTestContext(recorder)
 		c.Request = httptest.NewRequest("POST", "/equipment/import", body)
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		// 确认导入必须携带幂等键；本用例关注选择校验与网关故障，键本身合法即可。
+		c.Request.Header.Set("Idempotency-Key", "pm-import-test-0001")
 		h := Handler{service: &application.Service{EvidenceFiles: equipmentImportGateway{fail: test.fail}}}
 		h.confirmEquipmentImport(c)
 		if recorder.Code != test.status || bytes.Contains(recorder.Body.Bytes(), []byte("private upstream")) {
@@ -115,7 +125,7 @@ func TestEquipmentImportReaderFailsClosed(t *testing.T) {
 		c.Request = httptest.NewRequest("POST", "/equipment/import/preview", body)
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		h := Handler{service: &application.Service{}}
-		_, err = h.readEquipmentImport(c)
+		_, _, err = h.readEquipmentImport(c)
 		if filename == "devices.csv" && err != errCapabilityImportGateway {
 			t.Fatalf("missing gateway not rejected: %v", err)
 		}

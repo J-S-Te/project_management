@@ -18,7 +18,7 @@ Gin API、GORM/MySQL 与 Vue 工作区共同完成项目交付。浏览器经同
 
 现场支持浏览器离线队列、定位签到、文件网关证据上传、签字图片和客户端操作幂等。报告支持逐级编制/审核/签发/归档、身份分离及已签发报告更正版本。设备档案、占用和差旅快照属于本模块本地业务记录，不表示外部设备系统或差旅审批已办结；定位不含地理围栏或可信硬件防伪。
 
-通知有持久化 Outbox 和独立 `cmd/sla-notifier` 消费者。统一生产和本模块本地 Compose 均装配该消费者；旧独立 compose.production.yaml 需逐项对齐新配置，不能代替统一受控发布。接口成功不等于提醒已经送达。
+通知有持久化 Outbox 和独立 `cmd/sla-notifier` 消费者。统一生产、本模块本地 Compose 与独立生产 Compose 均默认装配该消费者；独立文件仍需受控运行配置与发布流程。接口成功不等于提醒已经送达。
 
 ## 开发与发布入口（本次未执行）
 
@@ -32,6 +32,12 @@ make run
 环境文件只能在可信本机按已有流程加载；不要把数据库口令、OIDC Secret 或机器客户端 Secret 写入本文或前端变量。前端在仓库 `frontend/` 按其依赖安装流程运行 `npm run dev`，本地入口路径为 `/project_management/dashboard`；Vite 默认代理后端 `127.0.0.1:8082`。
 
 本地容器入口是 [compose.yaml](compose.yaml)，独立生产入口是 [compose.production.yaml](compose.production.yaml)。统一生产入口见 [平台生产 Compose](../platform/deploy/production/compose.yaml) 和 [受控发布脚本](../platform/deploy/production/bin/deploy-service.sh)。这些是源码中的部署入口，本文不授权执行发布，不保证推送 main 就能修复线上问题。
+
+独立生产 Compose 默认启动 `project-api` 和 `sla-notifier`，使用同一 `PROJECT_IMAGE_REF`，迁移成功后分别运行 API 与 `/usr/local/bin/sla-notifier`。它复用外部平台网络，数据库与 Temporal 连接由 `PROJECT_RUNTIME_ENV_FILE` 提供，默认选择 Temporal；不可变 `PROJECT_BACKGROUND_BUILD_ID`、专用 queue/deployment 和后台监听地址从该运行文件读取，不能使用旧 `TEMPORAL_WORKER_BUILD_ID` 占位。现有配置校验保持 Build 格式和版本控制要求，依赖失败不会自动退回 legacy。
+
+独立生产两个消费者分别读取 `runtime/license-project-api.env`、`runtime/license-project-sla-notifier.env`，分别持久化许可状态，且挂载平台 JWT 公钥。路径与身份沿用平台权威生产编排；这些材料必须由已有受控许可流程生成，缺文件不会获得业务授权。`split-runtime` profile 仅保留 `worker` 兼容二进制；仅启用 profile 时其副本数仍为 0；选择它替代默认后台时须显式使用 `--scale worker=1 --scale sla-notifier=0`，不能把它作为第三消费者并行运行。新安装直接使用默认 `sla-notifier`，无需启用该 profile。
+
+后台健康探针读取容器内 `PROJECT_BACKGROUND_HEALTH_ADDRESS` 并检查 bootstrap，停止宽限期为 420 秒；健康不代表许可、版本路由与业务执行已通过，仍需按受控生命周期分别检查 routing/execution。API 的存活探针与业务就绪检查也需分别核验。
 
 API 启动会检查迁移记录；待迁移时仍可能监听端口，`/readyz` 返回 `migrations_pending`，不能只用 `/healthz` 判定业务就绪。统一 Compose 的 API 存活探针当前使用 `/healthz`，仍须核对就绪检查和迁移结果。
 

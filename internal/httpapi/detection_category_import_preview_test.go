@@ -15,8 +15,7 @@ import (
 )
 
 type detectionImportRepo struct {
-	application.Repository
-	saved []domain.DetectionCategory
+	fakeImportStore
 }
 
 func (r *detectionImportRepo) ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error) {
@@ -33,7 +32,7 @@ func (r *detectionImportRepo) SaveSplitPolicy(_ context.Context, _ string, item 
 	return item, nil
 }
 func (r *detectionImportRepo) SaveDetectionCategory(_ context.Context, _ string, item domain.DetectionCategory, _ string) (domain.DetectionCategory, error) {
-	r.saved = append(r.saved, item)
+	r.categories = append(r.categories, item)
 	return item, nil
 }
 func (r *detectionImportRepo) DeleteDetectionCategory(context.Context, string, string) error {
@@ -49,15 +48,42 @@ func (r *detectionImportRepo) DeleteSplitOverride(context.Context, string, int64
 	return domain.SplitOverride{}, nil
 }
 
-func TestDetectionCategoryConfirmSelectedValidOnly(t *testing.T) {
-	content := "检测类别,默认体系要求,必备资质（默认）,必检能力码,是否特殊方法,状态\n有效类别,,,,NO,启用\n无效类别,,,,NO,未知\n未选择类别,,,,NO,启用\n"
-	c, recorder := detectionImportContext(t, "categories.csv", content, "[2,3]")
+func detectionImportPrincipal(c *gin.Context) {
 	c.Set("principal", platform.Principal{TenantID: "TENANT", UserID: "USER", Permissions: map[string]bool{"project_rule.manage": true}, DataScopes: []platform.DataScope{{ScopeType: "APPLICATION"}}})
+}
+
+// TestDetectionCategoryConfirmSelectedValidOnly 固定确认导入的新契约：
+// 只写入选中行，未选行记为 SKIPPED；选中行全部成功时一次提交并返回相同形状的结果。
+func TestDetectionCategoryConfirmSelectedValidOnly(t *testing.T) {
+	content := "检测类别,默认体系要求,必备资质（默认）,必检能力码,是否特殊方法,状态\n有效类别,,,,NO,启用\n未选择类别,,,,NO,启用\n"
+	c, recorder := detectionImportContext(t, "categories.csv", content, "[2]")
+	detectionImportPrincipal(c)
 	r := &detectionImportRepo{}
 	h := Handler{service: &application.Service{Repo: r, EvidenceFiles: equipmentImportGateway{}}}
 	h.confirmDetectionCategoryImport(c)
-	if recorder.Code != 200 || len(r.saved) != 1 || r.saved[0].Category != "有效类别" || !strings.Contains(recorder.Body.String(), `"imported":1`) || !strings.Contains(recorder.Body.String(), `"skipped":1`) {
-		t.Fatalf("status=%d body=%s saved=%v", recorder.Code, recorder.Body.String(), r.saved)
+	if recorder.Code != 200 || len(r.categories) != 1 || r.categories[0].Category != "有效类别" || !strings.Contains(recorder.Body.String(), `"imported":1`) || !strings.Contains(recorder.Body.String(), `"skipped":0`) {
+		t.Fatalf("status=%d body=%s saved=%v", recorder.Code, recorder.Body.String(), r.categories)
+	}
+	// 同键同内容重试：返回首次响应，不重复写入。
+	retry, retryRecorder := detectionImportContext(t, "categories.csv", content, "[2]")
+	detectionImportPrincipal(retry)
+	h.confirmDetectionCategoryImport(retry)
+	if retryRecorder.Code != 200 || retryRecorder.Body.String() != recorder.Body.String() || len(r.categories) != 1 {
+		t.Fatalf("replay status=%d body=%s saved=%v", retryRecorder.Code, retryRecorder.Body.String(), r.categories)
+	}
+}
+
+// TestDetectionCategoryConfirmRejectsPartialSuccess 断言全有或全无：
+// 选中行中任一行未通过校验时整批回滚（422，含行号与原因），不产生任何类别写入。
+func TestDetectionCategoryConfirmRejectsPartialSuccess(t *testing.T) {
+	content := "检测类别,默认体系要求,必备资质（默认）,必检能力码,是否特殊方法,状态\n有效类别,,,,NO,启用\n无效类别,,,,NO,未知\n"
+	c, recorder := detectionImportContext(t, "categories.csv", content, "[2,3]")
+	detectionImportPrincipal(c)
+	r := &detectionImportRepo{}
+	h := Handler{service: &application.Service{Repo: r, EvidenceFiles: equipmentImportGateway{}}}
+	h.confirmDetectionCategoryImport(c)
+	if recorder.Code != 422 || len(r.categories) != 0 || !strings.Contains(recorder.Body.String(), "第 3 行") {
+		t.Fatalf("status=%d body=%s saved=%v", recorder.Code, recorder.Body.String(), r.categories)
 	}
 }
 
@@ -82,6 +108,7 @@ func detectionImportContext(t *testing.T, filename, content, selection string) (
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest("POST", "/detection-categories/import", body)
 	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	c.Request.Header.Set("Idempotency-Key", "pm-import-test-0001")
 	return c, recorder
 }
 
@@ -132,7 +159,7 @@ func TestDetectionCategoryImportSelectionAndGateway(t *testing.T) {
 	}
 	c, _ := detectionImportContext(t, "categories.csv", strings.Replace(content, "\n类别", "\n\n类别", 1), "")
 	h := Handler{service: &application.Service{EvidenceFiles: equipmentImportGateway{}}}
-	inputs, err := h.readDetectionCategoryImport(c)
+	inputs, _, err := h.readDetectionCategoryImport(c)
 	if err != nil || inputs[0].RowNo != 3 {
 		t.Fatalf("physical row=%+v %v", inputs, err)
 	}

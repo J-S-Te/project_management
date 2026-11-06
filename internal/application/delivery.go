@@ -86,8 +86,6 @@ func (s *Service) ListDeliveryEvents(ctx context.Context, p platform.Principal, 
 	return s.applyFieldPermissionsToEvents(ctx, p, events)
 }
 
-// CapabilityImportResult 汇总一次能力记录导出的导入结果。
-
 // resourceIDPrefix 区分人员与设备的资源编号前缀，避免两类编号混用。
 // existingUsageScope 在既有能力目录里查同编号设备的使用范围；查不到时返回默认的可借出，
 // 保证新增设备与历史数据都落在同一个默认值上。
@@ -148,25 +146,6 @@ func assignResourceID(existing []domain.Capability, item *domain.Capability) {
 		return
 	}
 	item.ResourceID = nextResourceID(existing, item.ResourceType)
-}
-
-// ImportCapabilities 批量写入人员资质记录。设备生命周期只能通过设备能力接口维护。
-// 逐行校验并独立写入，
-// 单行失败只累计跳过原因，不影响其余行，避免一条脏数据阻塞整批导入。
-func (s *Service) ImportCapabilities(ctx context.Context, p platform.Principal, rows []domain.Capability) (CapabilityImportResult, error) {
-	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
-		return CapabilityImportResult{}, err
-	}
-	result := CapabilityImportResult{}
-	for i, row := range rows {
-		if _, err := s.UpsertCapability(ctx, p, row); err != nil {
-			result.Skipped++
-			result.Errors = append(result.Errors, fmt.Sprintf("数据行 %d: %s", i+1, capabilityImportSafeError(err)))
-			continue
-		}
-		result.Imported++
-	}
-	return result, nil
 }
 
 func (s *Service) ListCapabilities(ctx context.Context, p platform.Principal, typ string) ([]domain.Capability, error) {

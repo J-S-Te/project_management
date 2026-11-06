@@ -188,21 +188,22 @@ func TestCapabilityWritesRequireEnabledCatalogButPreserveHistoricalCodes(t *test
 }
 
 func TestQualificationUpsertAndImportCannotBypassEquipmentBoundary(t *testing.T) {
-	repo := &capabilityRepository{rules: []domain.Rule{{Kind: capabilityCodeRuleKind, Scope: "EQ-A", CheckType: "EQUIPMENT", Enabled: true}}}
+	repo := &confirmingImportStore{capabilityRepository: capabilityRepository{rules: []domain.Rule{{Kind: capabilityCodeRuleKind, Scope: "EQ-A", CheckType: "EQUIPMENT", Enabled: true}}}}
 	service := &Service{Repo: repo}
 	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "quality_manager", ScopeType: "APPLICATION"})
 
 	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "equipment", ResourceID: "EQ-1", ResourceName: "扫描器", Codes: []string{" eq-a "}}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("设备不应通过人员资质写入，err=%v", err)
 	}
-	result, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{
-		{ResourceType: "EQUIPMENT", ResourceID: "EQ-2", ResourceName: "设备", Codes: []string{"EQ-A"}},
+	preview, err := service.PreviewCapabilityImport(context.Background(), manager, []CapabilityImportInput{
+		{RowNo: 2, Capability: domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-2", ResourceName: "设备", Codes: []string{"EQ-A"}}},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || preview.Valid != 0 || !strings.Contains(strings.Join(preview.Rows[0].Errors, "；"), "设备") {
+		t.Fatalf("设备行必须在人员资质预检被拒: %+v %v", preview, err)
 	}
-	if result.Imported != 0 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "设备能力") {
-		t.Fatalf("result=%+v", result)
+	hash := ImportRequestHash(ImportOperationCapability, ImportContentHash([]byte("capabilities.csv")), "PERSON", []int{2})
+	if _, err := service.ConfirmCapabilityImport(context.Background(), manager, "pm-import-0001", hash, preview.Rows, []int{2}); !errors.Is(err, ErrValidation) || len(repo.capabilities) != 0 {
+		t.Fatalf("人员资质确认不得写入设备行: %v writes=%+v", err, repo.capabilities)
 	}
 }
 
