@@ -30,7 +30,8 @@ func TestEvidenceGatewayUploadsAndBindsImmutableReceipt(t *testing.T) {
 			}
 			sessionCreated = true
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"upload_id": "UPLOAD-1", "file_id": "FILE-1"}})
+			// 真实网关的 sessionResponse 一定带 status：CREATED 表示仍需票据 + PUT 内容。
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"upload_id": "UPLOAD-1", "file_id": "FILE-1", "status": "CREATED"}})
 		case "/api/v2/upload-sessions/UPLOAD-1/tickets":
 			if r.Header.Get("Authorization") != "Bearer token-platform:file:upload" {
 				t.Fatalf("ticket token=%q", r.Header.Get("Authorization"))

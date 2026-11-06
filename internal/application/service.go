@@ -83,8 +83,9 @@ func UserMessage(err error) string {
 
 type Repository interface {
 	// ListProjects / ListServiceItems 把过滤、排序、计数与分页下推到 SQL：
-	// page/pageSize<=0 表示不分页返回全量；返回值是（本页行, 过滤后总数）。
-	ListProjects(context.Context, platform.ScopeFilter, string, string, int, int) ([]domain.Project, int, error)
+	// query.PageSize<=0 表示不分页返回全量；返回值是（本页行, 过滤后总数）。
+	// 项目列表的筛选条件收敛在 domain.ProjectListQuery（status 与 report_stage 正交组合）。
+	ListProjects(context.Context, platform.ScopeFilter, domain.ProjectListQuery) ([]domain.Project, int, error)
 	GetProject(context.Context, platform.ScopeFilter, string) (domain.Project, error)
 	CreateProject(context.Context, domain.Project) error
 	ListServiceItems(context.Context, platform.ScopeFilter, string, int, int) ([]domain.ServiceItem, int, error)
@@ -120,6 +121,7 @@ type AvailableApprovedContractFilter interface {
 }
 
 type Service struct {
+	NativeEnabled bool
 	// CheckBusinessLicense 在异步业务副作用处再次调用。
 	CheckBusinessLicense func(context.Context) error
 	// freeze 是人员交接冻结检查器；未接线时保持既有行为。
@@ -190,19 +192,28 @@ func (s *Service) RetryFailedAuditEvent(ctx context.Context, p platform.Principa
 
 // ListProjects 返回全量（不分页）项目列表，供监控聚合等内部调用复用。
 func (s *Service) ListProjects(ctx context.Context, p platform.Principal, q, status string) ([]domain.Project, error) {
-	projects, _, err := s.ListProjectsPage(ctx, p, q, status, 0, 0)
+	projects, _, err := s.ListProjectsPage(ctx, p, domain.ProjectListQuery{Keyword: q, Status: status})
 	return projects, err
 }
 
 // ListProjectsPage 把过滤、计数与分页下推到仓储层（SQL COUNT + LIMIT/OFFSET，
 // AUD-2026-028）：只有本页记录会执行字段脱敏。字段脱敏逐行生效，不依赖全量集合，
 // 仅对本页脱敏与“全量脱敏后切片”的输出逐字段一致。
-func (s *Service) ListProjectsPage(ctx context.Context, p platform.Principal, q, status string, page, pageSize int) ([]domain.Project, int, error) {
+//
+// report_stage 筛选在这里统一归一化并校验：状态参数保持宽松（未知值等价于空集），
+// 报告阶段是新增的受限词表，非法值直接 422，两种刻意不对称的语义见
+// normalizeReportStageFilter。
+func (s *Service) ListProjectsPage(ctx context.Context, p platform.Principal, query domain.ProjectListQuery) ([]domain.Project, int, error) {
+	reportStage, err := normalizeReportStageFilter(query.ReportStage)
+	if err != nil {
+		return nil, 0, err
+	}
+	query.ReportStage = reportStage
 	filter, err := authorizeProjectScope(p, "project.read")
 	if err != nil {
 		return nil, 0, err
 	}
-	projects, total, err := s.Repo.ListProjects(ctx, filter, q, status, page, pageSize)
+	projects, total, err := s.Repo.ListProjects(ctx, filter, query)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -211,6 +222,25 @@ func (s *Service) ListProjectsPage(ctx context.Context, p platform.Principal, q,
 		return nil, 0, err
 	}
 	return masked, total, nil
+}
+
+// normalizeReportStageFilter 校验并归一化项目级报告阶段筛选参数。
+// 参数：value 为 HTTP 查询参数，忽略首尾空白与大小写。
+// 返回值：空串表示不筛选；已知报告阶段码返回大写码；未知码返回 422 校验错误。
+//
+// 与 status 参数刻意不对称：status 是既有参数，历史前端与外部调用方可能传
+// 未知值，保持宽松（SQL 谓词自然返回空集），以免升级后 422/500 打断已有集成；
+// report_stage 是新参数，没有兼容包袱，非法值必须显式 422，
+// 不能静默退化成"不过滤"把全部项目返回给调用方。
+func normalizeReportStageFilter(value string) (string, error) {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+	if !domain.IsReportPhase(value) {
+		return "", ValidationError("报告阶段筛选只支持 NONE、RECTIFYING、COMPILING、REVIEWED、ISSUED、ARCHIVED")
+	}
+	return value, nil
 }
 func (s *Service) GetProject(ctx context.Context, p platform.Principal, id string) (domain.Project, error) {
 	filter, err := authorizeProjectScope(p, "project.read")
@@ -369,6 +399,11 @@ func (s *Service) Dashboard(ctx context.Context, p platform.Principal) (domain.D
 	result, err := s.Repo.Dashboard(ctx, filter)
 	if err != nil {
 		return result, err
+	}
+	// 报告阶段计数是内部看板 JSON 的新键：空 map 与「查不到」必须可区分，
+	// 不能让调用方收到 null。仓储负责初始化为空 map，这里兜底只覆盖未初始化的实现。
+	if result.ReportStageCounts == nil {
+		result.ReportStageCounts = map[string]int{}
 	}
 	// 未知服务项状态会被保守地按最滞后处理，会让项目状态看起来比实际更早期。
 	// 这里显式告警，避免"数据异常导致项目状态静默变化"无人发现。
@@ -675,6 +710,11 @@ func (s *Service) findExistingProjectByContract(ctx context.Context, tenantID, c
 // 参数：ctx 为请求，p 为用户主体，input 为项目输入，requested 为选择的服务项。
 // 返回值：创建的项目，或权限、政策、目录与持久化错误。
 func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.Principal, input domain.Project, requested []domain.ContractService) (domain.Project, error) {
+	if input.SourceKind != "" && input.SourceKind != "CONTRACT" {
+		return input, ValidationError("项目来源不合法")
+	}
+	input.SourceKind = "CONTRACT"
+	input.ScopeVersion = 0
 	// 交接冻结：被冻结的用户不得承接新项目责任（创建即指派项目经理）。
 	if err := s.ensureManagerNotFrozen(ctx, p.TenantID, input.ManagerIdentityID); err != nil {
 		return domain.Project{}, err
@@ -748,6 +788,7 @@ func (s *Service) CreateProjectWithServiceItems(ctx context.Context, p platform.
 	}
 	// 合同编号、版本与客户资料只能来自合同管理系统。浏览器提交的同名字段即使被
 	// 篡改也不会落库，避免项目台账与已审批合同产生无法审计的偏差。
+	input.SourceID = strings.TrimSpace(approved.ID)
 	input.ContractID = strings.TrimSpace(approved.ID)
 	input.Contract = strings.TrimSpace(approved.Number)
 	input.Customer = strings.TrimSpace(approved.CustomerName)

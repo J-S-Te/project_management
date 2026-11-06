@@ -2,8 +2,6 @@ package application
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -211,14 +209,4 @@ func (s *Service) resolveImportPerson(ctx context.Context, name, organization st
 		}
 	}
 	return platform.OwnerDirectoryUser{}, ValidationError("同名人员过多，无法安全匹配，请联系管理员处理")
-}
-
-func capabilityImportSafeError(err error) string {
-	if errors.Is(err, ErrValidation) {
-		return err.Error()
-	}
-	if errors.Is(err, ErrPersonnelUnavailable) {
-		return "人员目录暂不可用，请重新预检"
-	}
-	return fmt.Sprint("保存失败，请刷新后重试或联系管理员")
 }

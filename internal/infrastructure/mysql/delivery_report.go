@@ -105,23 +105,12 @@ func rfc3339Time(values map[string]any, key string) *time.Time {
 	return &parsed
 }
 
-// allowedReportPhase 报告从编制到归档的推进序列；每个阶段只允许向后推进。
+// allowedReportPhase 判断目标阶段是否属于整改至归档的主报告推进序列。
+// 参数：phase 为目标报告阶段。
+// 返回值：合法目标阶段返回 true，NONE 或未知阶段返回 false。
+// 阶段顺序来自 domain.ReportPhaseStages 的唯一定义，本层不再维护第二份清单。
 func allowedReportPhase(phase string) bool {
-	return reportPhaseRank(phase) > 0
-}
-func reportPhaseRank(phase string) int {
-	switch strings.ToUpper(strings.TrimSpace(phase)) {
-	case "COMPILING":
-		return 1
-	case "REVIEWED":
-		return 2
-	case "ISSUED":
-		return 3
-	case "ARCHIVED":
-		return 4
-	default:
-		return 0
-	}
+	return domain.ReportPhaseRank(phase) > 0
 }
 
 func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) error {
@@ -135,8 +124,9 @@ func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) e
 		return nil
 	}
 	status := strings.ToUpper(strings.TrimSpace(item.ReportStatus))
-	if reportPhaseRank(status) == 0 {
-		status = "NONE"
+	// 未知码（-1）与 NONE（0）都不能写进修订台账，统一落 NONE。
+	if domain.ReportPhaseRank(status) <= 0 {
+		status = domain.ReportPhaseNone
 	}
 	return tx.Create(&reportRevisionRecord{
 		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision,
@@ -275,6 +265,9 @@ func lockReportRevision(tx *gorm.DB, item *serviceItemRecord) (reportRevisionRec
 	return revision, err
 }
 
+// advanceReportRevision 推进当前有效修订并在对应阶段记录职责证据。
+// 参数：tx 为当前事务，revision 为已锁定修订，phase 为目标阶段，event 为推进事件。
+// 返回值：职责分离、文件门禁、修订并发或存储失败时返回错误，成功返回 nil。
 func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase string, event domain.DeliveryEvent) error {
 	actor := strings.TrimSpace(event.ActorUserID)
 	if actor == "" {
@@ -282,6 +275,8 @@ func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase st
 	}
 	updates := map[string]any{"status": phase, "updated_at": event.CreatedAt}
 	switch phase {
+	case "RECTIFYING":
+		// 整改尚未进入编制，仅更新修订状态与时间，不提前认定编制人。
 	case "COMPILING":
 		updates["prepared_by"], updates["prepared_at"] = actor, event.CreatedAt
 	case "REVIEWED":

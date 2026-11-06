@@ -31,6 +31,9 @@ func (s *Service) ResolveSettlementProjectReference(ctx context.Context, p platf
 	if err != nil {
 		return SettlementProjectReference{}, err
 	}
+	if project.SourceKind == "NATIVE" {
+		return SettlementProjectReference{}, PreconditionError("原生项目不适用合同结算引用")
+	}
 	if project.ID != id || project.TenantID != p.TenantID || project.ContractID == "" || project.CustomerID == "" || project.Version == 0 {
 		return SettlementProjectReference{}, ErrConflict
 	}

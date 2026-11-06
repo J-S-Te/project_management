@@ -14,6 +14,7 @@ type CommercialLicenseGate interface {
 // 精确审查的读取路由：未来 GET 端点不能仅因使用 GET
 // 就继承计算或推进业务的权限。
 var commercialHistoryRoutes = map[string]bool{
+	"/api/v1/projects/:id/native-scope": true,
 	"/internal/v1/contract-imports/capabilities":                            true,
 	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": true,
 	"/internal/v1/settlement/project-references/:projectID":                 true,
@@ -21,7 +22,8 @@ var commercialHistoryRoutes = map[string]bool{
 	"/internal/v1/contracts/detection-categories":                           true, "/internal/v1/dashboard": true,
 	"/internal/v1/handover/responsibilities": true, "/internal/v1/handover/transfers/:item_id": true,
 	"/api/v1/navigation": true, "/api/v1/role-catalog": true, "/api/v1/rule-configuration-catalog": true,
-	"/api/v1/dashboard": true, "/api/v1/projects": true, "/api/v1/projects-monitoring": true,
+	"/api/v1/project-creation-capabilities": true,
+	"/api/v1/dashboard":                     true, "/api/v1/projects": true, "/api/v1/projects-monitoring": true,
 	"/api/v1/approved-contracts": true, "/api/v1/approved-contracts/:contractID/service-items": true,
 	// BIZ-XAPI-09：选择器搜索是只读目录查询，与上面的合同目录同属历史读取。
 	"/api/v1/approved-contract-options":         true,

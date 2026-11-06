@@ -56,7 +56,7 @@ func TestProjectPageEquivalenceAgainstRealDatabase(t *testing.T) {
 	filter := platform.ScopeFilter{TenantID: integrationTenant, AllowAll: true}
 
 	// 基准：全量读取（不分页），仓储内已按 Go 侧派生函数刷新状态。
-	baseline, baselineTotal, err := repository.ListProjects(ctx, filter, "", "", 0, 0)
+	baseline, baselineTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 0, PageSize: 0})
 	if err != nil {
 		t.Fatalf("baseline list: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestProjectPageEquivalenceAgainstRealDatabase(t *testing.T) {
 	statuses := domain.ProjectStatusNodes()
 	statuses = append(statuses, domain.ProjectStatusTerminated, domain.ProjectStatusSupplementRequired)
 	for _, wanted := range statuses {
-		filtered, total, err := repository.ListProjects(ctx, filter, "", wanted, 0, 0)
+		filtered, total, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: wanted, Page: 0, PageSize: 0})
 		if err != nil {
 			t.Fatalf("list by status %q: %v", wanted, err)
 		}
@@ -92,7 +92,7 @@ func TestProjectPageEquivalenceAgainstRealDatabase(t *testing.T) {
 		}
 	}
 	// 不存在的状态值必须返回空集且 total 为 0。
-	none, noneTotal, err := repository.ListProjects(ctx, filter, "", "不存在状态", 0, 0)
+	none, noneTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "不存在状态", Page: 0, PageSize: 0})
 	if err != nil || noneTotal != 0 || len(none) != 0 {
 		t.Fatalf("unknown status = (%v, %d, %v), want empty", none, noneTotal, err)
 	}
@@ -102,13 +102,13 @@ func TestProjectPageEquivalenceAgainstRealDatabase(t *testing.T) {
 	pageSizes := []int{1, 2, 4}
 	for _, pageSize := range pageSizes {
 		for _, wanted := range []string{"", domain.ProjectStatusCompleted} {
-			base, baseTotal, err := repository.ListProjects(ctx, filter, "", wanted, 0, 0)
+			base, baseTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: wanted, Page: 0, PageSize: 0})
 			if err != nil {
 				t.Fatalf("paged baseline %q: %v", wanted, err)
 			}
 			var collected []domain.Project
 			for page := 1; ; page++ {
-				items, total, err := repository.ListProjects(ctx, filter, "", wanted, page, pageSize)
+				items, total, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: wanted, Page: page, PageSize: pageSize})
 				if err != nil {
 					t.Fatalf("page %d (size %d, status %q): %v", page, pageSize, wanted, err)
 				}
@@ -132,17 +132,17 @@ func TestProjectPageEquivalenceAgainstRealDatabase(t *testing.T) {
 		}
 	}
 	// 超界页：空切片 + total 保持。
-	overRange, overTotal, err := repository.ListProjects(ctx, filter, "", "", 99, 2)
+	overRange, overTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 99, PageSize: 2})
 	if err != nil || overTotal != baselineTotal || len(overRange) != 0 {
 		t.Fatalf("over-range page = (%d rows, total %d, err %v), want (0, %d, nil)", len(overRange), overTotal, err, baselineTotal)
 	}
 
 	// 3) 关键字过滤下推与全量口径一致：按名称命中单个项目并可分页取出。
-	byName, byNameTotal, err := repository.ListProjects(ctx, filter, "报告用例", "", 0, 0)
+	byName, byNameTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "报告用例", Status: "", Page: 0, PageSize: 0})
 	if err != nil || byNameTotal != 1 || len(byName) != 1 || byName[0].ID != "PJ-TEST-REPORT" {
 		t.Fatalf("keyword list = (%v, %d, %v), want PJ-TEST-REPORT", projectIDList(byName), byNameTotal, err)
 	}
-	pagedByName, pagedByNameTotal, err := repository.ListProjects(ctx, filter, "报告用例", "", 1, 10)
+	pagedByName, pagedByNameTotal, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "报告用例", Status: "", Page: 1, PageSize: 10})
 	if err != nil || pagedByNameTotal != 1 || len(pagedByName) != 1 || pagedByName[0].ID != "PJ-TEST-REPORT" {
 		t.Fatalf("keyword paged list = (%v, %d, %v)", projectIDList(pagedByName), pagedByNameTotal, err)
 	}
@@ -204,9 +204,9 @@ func sameIDs(projects []domain.Project, expected []string) bool {
 	return true
 }
 
-// TestProjectDerivedStatusSQLCoversStatusMatrix 用状态全组合验证 SQL 派生过滤与
-// Go 侧 domain.DeriveProjectStatus 逐行一致：每个用例是单服务项项目，覆盖全部
-// 线性阶段、报告阶段细分、已终止、未知状态与空状态（未知/空必须按最滞后=待拆解确认）。
+// TestProjectDerivedStatusSQLCoversStatusMatrix 验证 SQL 派生过滤与领域状态计算一致。
+// 参数：t 为测试上下文；需要明确隔离的 PM_TEST_DSN。
+// 返回值：无；线性阶段、报告阶段、终止或未知状态映射不一致时测试失败。
 func TestProjectDerivedStatusSQLCoversStatusMatrix(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
@@ -238,6 +238,7 @@ func TestProjectDerivedStatusSQLCoversStatusMatrix(t *testing.T) {
 		{"实施中", "NONE", domain.ProjectStatusInProgress},
 		{"异常处理中", "NONE", domain.ProjectStatusException},
 		{"现场实施完成", "NONE", domain.ProjectStatusFieldCompleted},
+		{"现场实施完成", "RECTIFYING", domain.ProjectStatusReporting},
 		{"现场实施完成", "COMPILING", domain.ProjectStatusReporting},
 		{"现场实施完成", "REVIEWED", domain.ProjectStatusReporting},
 		{"现场实施完成", "ISSUED", domain.ProjectStatusReporting},
@@ -283,7 +284,7 @@ func TestProjectDerivedStatusSQLCoversStatusMatrix(t *testing.T) {
 
 	repository := NewRepository(db)
 	filter := platform.ScopeFilter{TenantID: matrixTenant, AllowAll: true}
-	all, total, err := repository.ListProjects(ctx, filter, "", "", 0, 0)
+	all, total, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: "", Page: 0, PageSize: 0})
 	if err != nil || total != len(cases)+1 {
 		t.Fatalf("matrix baseline = (%d rows, total %d, err %v), want %d", len(all), total, err, len(cases)+1)
 	}
@@ -297,7 +298,7 @@ func TestProjectDerivedStatusSQLCoversStatusMatrix(t *testing.T) {
 		if derived[projectID] != test.want {
 			t.Fatalf("project %s (%q/%q) derived = %q, want %q", projectID, test.itemStatus, test.reportStatus, derived[projectID], test.want)
 		}
-		filtered, _, err := repository.ListProjects(ctx, filter, "", test.want, 0, 0)
+		filtered, _, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: test.want, Page: 0, PageSize: 0})
 		if err != nil {
 			t.Fatalf("filter %q: %v", test.want, err)
 		}
@@ -313,7 +314,7 @@ func TestProjectDerivedStatusSQLCoversStatusMatrix(t *testing.T) {
 	if derived["PJ-MATRIX-SUPP"] != domain.ProjectStatusSupplementRequired {
 		t.Fatalf("supplement short-circuit derived = %q, want %q", derived["PJ-MATRIX-SUPP"], domain.ProjectStatusSupplementRequired)
 	}
-	supplementFiltered, _, err := repository.ListProjects(ctx, filter, "", domain.ProjectStatusSupplementRequired, 0, 0)
+	supplementFiltered, _, err := repository.ListProjects(ctx, filter, domain.ProjectListQuery{Keyword: "", Status: domain.ProjectStatusSupplementRequired, Page: 0, PageSize: 0})
 	if err != nil || len(supplementFiltered) != 1 || supplementFiltered[0].ID != "PJ-MATRIX-SUPP" {
 		t.Fatalf("supplement filter = %v (err %v)", projectIDList(supplementFiltered), err)
 	}

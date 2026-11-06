@@ -314,6 +314,9 @@ func syncExistingContract(ctx context.Context, repo DeliveryRepository, p platfo
 	return existing, nil
 }
 
+// AdjustDecomposition 依据权威补充合同调整合同来源项目的服务范围。
+// 参数：ctx 为请求，p 为真实主体，projectID 为目标项目，input 为补充合同调整。
+// 返回值：权限、来源、审批、目录或事务错误；原生范围变更未启用时拒绝。
 func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal, projectID string, input domain.DecompositionAdjustmentInput) error {
 	filter, err := authorizeProjectScope(p, "project.decomposition.manage")
 	if err != nil {
@@ -322,6 +325,9 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	project, err := s.Repo.GetProject(ctx, filter, projectID)
 	if err != nil {
 		return err
+	}
+	if project.SourceKind == "NATIVE" {
+		return PreconditionError("原生项目范围变更尚未启用受控审批流程")
 	}
 	if strings.TrimSpace(input.Reason) == "" || strings.TrimSpace(input.SupplementContractID) == "" {
 		return ErrValidation
@@ -393,15 +399,13 @@ func (s *Service) AdjustDecomposition(ctx context.Context, p platform.Principal,
 	return s.applyEvent(ctx, deliveryEvent(p, projectID, "", EventDecompositionAdjusted, map[string]any{"reason": strings.TrimSpace(input.Reason), "supplement_contract_id": strings.TrimSpace(supplement.ID), "service_items": items, "split_rule": splitPlanSummary(plan)}))
 }
 
-// verifyApprovedSupplementContract 防止拆解表单将任意字符串
-// 作为补充协议证据。所选记录必须是同一客户下的另一份
-// 已完成审批的合同；合同服务仍是
-// 权威来源。同时接受 `approved` 和 `active`，因为合同服务
-// 在同一事务内执行正常审批副作用（pending -> approved -> active），
-// 并原样返回持久化状态。
-//
-// 返回值是权威合同本身：调用方（拆解调整）接着要用它的 ID/版本读取服务项目录。
+// verifyApprovedSupplementContract 复核合同来源项目的同客户已审批补充协议。
+// 参数：ctx 为请求，project 为目标项目，supplementContractID 为待回读合同。
+// 返回值：权威补充合同；原生来源、审批不足或依赖失败时返回错误。
 func (s *Service) verifyApprovedSupplementContract(ctx context.Context, project domain.Project, supplementContractID string) (platform.ApprovedContract, error) {
+	if project.SourceKind == "NATIVE" {
+		return platform.ApprovedContract{}, PreconditionError("原生项目不适用合同补充协议")
+	}
 	supplementContractID = strings.TrimSpace(supplementContractID)
 	if supplementContractID == "" {
 		return platform.ApprovedContract{}, ValidationError("请选择已审批的补充协议")

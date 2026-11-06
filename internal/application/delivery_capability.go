@@ -11,13 +11,6 @@ import (
 	"time"
 )
 
-// CapabilityImportResult 汇总一次能力记录导出的导入结果。
-type CapabilityImportResult struct {
-	Imported int      `json:"imported"`
-	Skipped  int      `json:"skipped"`
-	Errors   []string `json:"errors,omitempty"`
-}
-
 func validateCapability(item domain.Capability) error {
 	if (item.ResourceType != "PERSON" && item.ResourceType != "EQUIPMENT") || strings.TrimSpace(item.ResourceID) == "" || strings.TrimSpace(item.ResourceName) == "" || len(item.Codes) == 0 {
 		return ErrValidation

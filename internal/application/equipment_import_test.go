@@ -10,20 +10,6 @@ import (
 	"github.com/j-s-te/project-management/internal/platform"
 )
 
-type equipmentImportRepository struct {
-	capabilityRepository
-	creates      int
-	rejectCreate bool
-}
-
-func (r *equipmentImportRepository) CreateEquipmentForImport(_ context.Context, item domain.Capability, _ string) (domain.Capability, error) {
-	if r.rejectCreate {
-		return item, ValidationError("设备编号已被其他请求占用")
-	}
-	r.creates++
-	r.saved = append(r.saved, item)
-	return item, nil
-}
 func equipmentImportPrincipal() platform.Principal {
 	return principalWith("project.device.manage", platform.DataScope{ScopeType: "APPLICATION"})
 }
@@ -32,34 +18,37 @@ func equipmentInput(row int, id string) EquipmentImportInput {
 }
 
 func TestEquipmentImportPreviewAllocatesWithoutWriting(t *testing.T) {
-	repo := &equipmentImportRepository{}
+	repo := &confirmingImportStore{}
 	s := Service{Repo: repo}
 	result, err := s.PreviewEquipmentImport(context.Background(), equipmentImportPrincipal(), []EquipmentImportInput{equipmentInput(2, ""), equipmentInput(3, "EQ-001"), equipmentInput(4, "")})
-	if err != nil || result.Valid != 3 || len(repo.saved) != 0 {
-		t.Fatalf("preview=%+v err=%v writes=%v", result, err, repo.saved)
+	if err != nil || result.Valid != 3 || len(repo.equipmentCreates) != 0 {
+		t.Fatalf("preview=%+v err=%v writes=%v", result, err, repo.equipmentCreates)
 	}
 	if result.Rows[0].Capability.ResourceID == "EQ-001" || result.Rows[0].Capability.ResourceID == result.Rows[2].Capability.ResourceID {
 		t.Fatal("generated number collision")
 	}
-	if _, err := s.ConfirmEquipmentImportRow(context.Background(), equipmentImportPrincipal(), result.Rows[0]); err != nil || repo.creates != 1 {
-		t.Fatalf("confirmation=%v creates=%d", err, repo.creates)
+	hash := ImportRequestHash(ImportOperationEquipment, ImportContentHash([]byte("equipment.csv")), "EQUIPMENT", []int{2})
+	if _, err := s.ConfirmEquipmentImport(context.Background(), equipmentImportPrincipal(), "pm-import-0001", hash, result.Rows, []int{2}); err != nil || len(repo.equipmentCreates) != 1 {
+		t.Fatalf("confirmation=%v creates=%d", err, len(repo.equipmentCreates))
 	}
-	repo.rejectCreate = true
-	if _, err := s.ConfirmEquipmentImportRow(context.Background(), equipmentImportPrincipal(), result.Rows[2]); err == nil || repo.creates != 1 {
+	repo.failEquipmentCreate = func(domain.Capability) error { return ValidationError("设备编号已被其他请求占用") }
+	otherHash := ImportRequestHash(ImportOperationEquipment, ImportContentHash([]byte("equipment.csv")), "EQUIPMENT", []int{4})
+	if _, err := s.ConfirmEquipmentImport(context.Background(), equipmentImportPrincipal(), "pm-import-0002", otherHash, result.Rows, []int{4}); err == nil || len(repo.equipmentCreates) != 1 {
 		t.Fatal("conflicting create overwrote equipment")
 	}
 }
 
 func TestEquipmentImportValidationAndUpdate(t *testing.T) {
-	repo := &equipmentImportRepository{capabilityRepository: capabilityRepository{capabilities: []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", Codes: []string{"C1"}, UsageScope: domain.EquipmentUsageCompanyOnly}}}}
+	repo := &confirmingImportStore{capabilityRepository: capabilityRepository{capabilities: []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", Codes: []string{"C1"}, UsageScope: domain.EquipmentUsageCompanyOnly}}}}
 	s := Service{Repo: repo}
 	p := equipmentImportPrincipal()
 	result, err := s.PreviewEquipmentImport(context.Background(), p, []EquipmentImportInput{equipmentInput(2, "EQ-001")})
 	if err != nil || result.Valid != 1 || result.Rows[0].Action != "UPDATE" || result.Rows[0].Capability.UsageScope != domain.EquipmentUsageCompanyOnly {
 		t.Fatalf("update=%+v %v", result, err)
 	}
-	if _, err := s.ConfirmEquipmentImportRow(context.Background(), p, result.Rows[0]); err != nil || repo.creates != 0 || len(repo.saved) != 1 {
-		t.Fatalf("update save %v %+v", err, repo.saved)
+	hash := ImportRequestHash(ImportOperationEquipment, ImportContentHash([]byte("equipment.csv")), "EQUIPMENT", []int{2})
+	if _, err := s.ConfirmEquipmentImport(context.Background(), p, "pm-import-0003", hash, result.Rows, []int{2}); err != nil || len(repo.equipmentCreates) != 0 || len(repo.capabilities) != 1 {
+		t.Fatalf("update save %v %+v", err, repo.capabilities)
 	}
 	result, err = s.PreviewEquipmentImport(context.Background(), p, []EquipmentImportInput{equipmentInput(2, "EQ-001"), equipmentInput(3, "EQ-001")})
 	if err != nil || result.Invalid != 2 {
@@ -90,7 +79,7 @@ func TestEquipmentImportValidationAndUpdate(t *testing.T) {
 }
 
 func TestEquipmentImportPermissionsAndDependency(t *testing.T) {
-	s := Service{Repo: &equipmentImportRepository{}}
+	s := Service{Repo: &confirmingImportStore{}}
 	if _, err := s.PreviewEquipmentImport(context.Background(), principalWith("project.resource.manage", platform.DataScope{ScopeType: "APPLICATION"}), []EquipmentImportInput{equipmentInput(2, "")}); err == nil {
 		t.Fatal("personnel permission granted equipment import")
 	}

@@ -7,27 +7,35 @@ import (
 )
 
 type Project struct {
-	TenantID          string    `json:"-"`
-	OwnerOrgID        string    `json:"owner_org_id,omitempty"`
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Customer          string    `json:"customer"`
-	CustomerID        string    `json:"customer_id,omitempty"`
-	Contract          string    `json:"contract"`
-	ContractID        string    `json:"contract_id"`
-	ContractVersion   string    `json:"contract_version,omitempty"`
-	SupplementStatus  string    `json:"supplement_status,omitempty"`
-	Services          int       `json:"services"`
-	Category          string    `json:"category"`
-	Team              string    `json:"team"`
-	Manager           string    `json:"manager"`
-	OwnerIdentityID   string    `json:"owner_identity_id,omitempty"`
-	ManagerIdentityID string    `json:"manager_identity_id,omitempty"`
-	Status            string    `json:"status"`
-	Progress          int       `json:"progress"`
-	Due               string    `json:"due"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	SourceKind        string `json:"source_kind"`
+	SourceID          string `json:"source_id,omitempty"`
+	ScopeVersion      uint64 `json:"scope_version"`
+	TenantID          string `json:"-"`
+	OwnerOrgID        string `json:"owner_org_id,omitempty"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Customer          string `json:"customer"`
+	CustomerID        string `json:"customer_id,omitempty"`
+	Contract          string `json:"contract"`
+	ContractID        string `json:"contract_id"`
+	ContractVersion   string `json:"contract_version,omitempty"`
+	SupplementStatus  string `json:"supplement_status,omitempty"`
+	Services          int    `json:"services"`
+	Category          string `json:"category"`
+	Team              string `json:"team"`
+	Manager           string `json:"manager"`
+	OwnerIdentityID   string `json:"owner_identity_id,omitempty"`
+	ManagerIdentityID string `json:"manager_identity_id,omitempty"`
+	Status            string `json:"status"`
+	Progress          int    `json:"progress"`
+	// ReportStage 是服务端派生的项目级报告阶段（与 Status 正交的维度）：
+	// NONE/RECTIFYING/COMPILING/REVIEWED/ISSUED/ARCHIVED。
+	// "" 表示尚未进入报告段（仍有服务项未到现场实施完成）或不可判定（未知报告状态、
+	// 无服务项、全部终止）。前端只展示，不得自行拼装报告阶段集合。
+	ReportStage string    `json:"report_stage,omitempty"`
+	Due         string    `json:"due"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 
 	// Risk 是服务端派生的风险标记：派生状态为异常处理中/已终止，或存在已终止服务项。
 	// 由服务端统一计算，前端不得复刻该口径（此前前后端各写一遍，口径调整即不一致）。
@@ -161,6 +169,10 @@ type Dashboard struct {
 	UnknownStatusItems int            `json:"unknown_status_items"`
 	ServiceItems       int            `json:"service_items"`
 	StatusCounts       map[string]int `json:"status_counts"`
+	// ReportStageCounts 是按项目级派生报告阶段分组的项目数（与监控快照
+	// report_stage_counts 同一口径）。空阶段（未进入报告段/不可判定）不进桶，
+	// 各桶之和可能小于 ProjectCount。服务端初始化为空 map，始终非 nil。
+	ReportStageCounts map[string]int `json:"report_stage_counts"`
 }
 
 // SlaOverdueItem 是超期/临近超期服务项的投影。Kind 区分两类口径：
@@ -182,6 +194,18 @@ type SlaOverdueItem struct {
 	UpdatedAt time.Time `json:"-"`
 	// StatusChangedAt 是服务项进入当前状态的时刻，是 SLA 停留时长的唯一基准。
 	StatusChangedAt time.Time `json:"-"`
+	// ReportStage 是命中的报告阶段 SLA 维度（RECTIFYING..ARCHIVED），
+	// 仅报告阶段规则填充；状态规则与计划完成口径留空。
+	ReportStage string `json:"report_stage,omitempty"`
+	// ReportStatus 是服务项当前的报告阶段码，仅用于匹配报告阶段 SLA 规则，
+	// 不对外输出（对外只暴露命中的 ReportStage）。
+	ReportStatus string `json:"-"`
+	// ReportChangedAt 是服务项进入当前报告阶段的时刻（pm_service_item.report_updated_at），
+	// 报告阶段 SLA 用它计时——不能用 status_changed_at：现场完成时间远早于报告推进。
+	ReportChangedAt time.Time `json:"-"`
+	// RuleDimension 区分本次命中的规则维度（STATUS/REPORT），
+	// 通知幂等键必须带上它：同一服务项同一天可能同时命中状态规则与报告阶段规则。
+	RuleDimension string `json:"rule_dimension,omitempty"`
 }
 
 // SLA 口径常量。
@@ -189,6 +213,13 @@ const (
 	SlaKindPlanEndOverdue    = "PLAN_END_OVERDUE"
 	SlaKindStatusOverdue     = "STATUS_DEADLINE_OVERDUE"
 	SlaKindStatusApproaching = "STATUS_DEADLINE_APPROACHING"
+)
+
+// SLA 规则维度：同一服务项在同一天可能同时命中「状态停留」与「报告阶段停留」两条规则，
+// 二者的 Kind 相同，必须靠维度区分通知幂等键。
+const (
+	SlaDimensionStatus = "STATUS"
+	SlaDimensionReport = "REPORT"
 )
 
 // Site 是站点主数据：项目/服务项的 site 原本是从合同复制的自由文本，

@@ -110,6 +110,15 @@ func TestProjectSnapshotProtocolCompletesOnlyAfterCommit(t *testing.T) {
 			if len(lines) != want {
 				t.Fatalf("lines=%d", len(lines))
 			}
+			// schema_version 仍为 1；report_stage 只出现在 project 行（本例无服务项，为空串）。
+			for _, line := range []string{lines[0], lines[len(lines)-1]} {
+				if !strings.Contains(line, `"schema_version":1`) || strings.Contains(line, `"report_stage"`) {
+					t.Fatalf("header/end 行不符契约: %s", line)
+				}
+			}
+			if failure == "" && !strings.Contains(lines[1], `"report_stage":""`) {
+				t.Fatalf("project 行缺少 report_stage: %s", lines[1])
+			}
 			var end domain.ProjectSnapshotSummary
 			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &end); err != nil {
 				t.Fatal(err)

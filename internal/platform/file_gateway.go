@@ -231,11 +231,37 @@ func (g *evidenceFileGateway) uploadV2(ctx context.Context, requestID, purpose, 
 	}
 	var envelope struct {
 		Data struct {
-			UploadID string `json:"upload_id"`
-			FileID   string `json:"file_id"`
+			UploadID string  `json:"upload_id"`
+			FileID   string  `json:"file_id"`
+			Status   string  `json:"status"`
+			Size     *uint64 `json:"size_bytes"`
+			SHA256   string  `json:"sha256"`
 		} `json:"data"`
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&envelope); err != nil || strings.TrimSpace(envelope.Data.FileID) == "" || strings.TrimSpace(envelope.Data.UploadID) == "" {
+	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&envelope); err != nil || strings.TrimSpace(envelope.Data.FileID) == "" {
+		return domain.ReportArtifactInput{}, errors.New("file gateway session response is invalid")
+	}
+	expectedSHA := hex.EncodeToString(digest)
+	// 网关按 (tenant, application, idempotency_key) 幂等：同键同文件回放既有会话时，
+	// 响应里的摘要与大小是服务端落库的声明值。若与本地重算值不一致，说明幂等键落在了
+	// 另一份文件上，必须失败关闭，不能把别人的文件当成本次导入的源文件。
+	if declared := strings.ToLower(strings.TrimSpace(envelope.Data.SHA256)); declared != "" && declared != expectedSHA {
+		return domain.ReportArtifactInput{}, errors.New("file gateway session response does not match the uploaded file digest")
+	}
+	if envelope.Data.Size != nil && *envelope.Data.Size != uint64(size) {
+		return domain.ReportArtifactInput{}, errors.New("file gateway session response does not match the uploaded file size")
+	}
+	switch strings.ToUpper(strings.TrimSpace(envelope.Data.Status)) {
+	case "READY":
+		// 会话已完成：文件内容此前已落盘并通过校验。此时再申请票据或 PUT 内容都会被网关
+		// 以"会话已结束"拒绝（409），因此直接复用既有文件，不再触碰票据与内容接口。
+		return domain.ReportArtifactInput{FileID: strings.TrimSpace(envelope.Data.FileID), FileName: fileName, MIME: mimeType, Size: uint64(size), SHA256: expectedSHA}, nil
+	case "CREATED":
+		// 未完成会话，走原有票据 + PUT 内容流程。
+	default:
+		return domain.ReportArtifactInput{}, fmt.Errorf("file gateway upload session status %q cannot be resumed", strings.TrimSpace(envelope.Data.Status))
+	}
+	if strings.TrimSpace(envelope.Data.UploadID) == "" {
 		return domain.ReportArtifactInput{}, errors.New("file gateway session response is invalid")
 	}
 	ticketReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.baseURL+"/api/v2/upload-sessions/"+url.PathEscape(envelope.Data.UploadID)+"/tickets", nil)
@@ -284,5 +310,5 @@ func (g *evidenceFileGateway) uploadV2(ctx context.Context, requestID, purpose, 
 	if uploadResp.StatusCode < 200 || uploadResp.StatusCode >= 300 {
 		return domain.ReportArtifactInput{}, fmt.Errorf("file gateway content upload returned %d", uploadResp.StatusCode)
 	}
-	return domain.ReportArtifactInput{FileID: envelope.Data.FileID, FileName: fileName, MIME: mimeType, Size: uint64(size), SHA256: hex.EncodeToString(digest)}, nil
+	return domain.ReportArtifactInput{FileID: strings.TrimSpace(envelope.Data.FileID), FileName: fileName, MIME: mimeType, Size: uint64(size), SHA256: expectedSHA}, nil
 }

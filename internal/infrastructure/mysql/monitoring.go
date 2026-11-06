@@ -11,6 +11,32 @@ import (
 	"gorm.io/gorm"
 )
 
+// monitoringSLAPredicate 返回监控页「SLA 候选项目」的 SQL 谓词与绑定参数。
+//
+// 三处一致：本谓词、application.computeSlaItems（Go 侧判定）与通知文案
+// 必须使用同一份报告阶段码清单（domain.ReportPhaseSLACodes）与同一套计时基准：
+// 状态停留用 status_changed_at，报告阶段停留用 report_updated_at。
+// 报告阶段只有在服务项已到「现场实施完成」时才生效，与
+// domain.DeriveProjectReportStage 的进入条件一致。
+func monitoringSLAPredicate() (string, []any) {
+	predicate := `pm_service_item.status <> ? AND ((pm_service_item.status <> ? AND pm_service_item.planned_end IS NOT NULL AND pm_service_item.planned_end < UTC_TIMESTAMP()) OR EXISTS (
+			SELECT 1 FROM pm_sla monitoring_sla
+			WHERE monitoring_sla.tenant_id = pm_service_item.tenant_id AND monitoring_sla.enabled = TRUE
+			AND (
+				(TRIM(monitoring_sla.status) = TRIM(pm_service_item.status) AND pm_service_item.status_changed_at IS NOT NULL
+				AND (TIMESTAMPDIFF(HOUR, pm_service_item.status_changed_at, UTC_TIMESTAMP()) > monitoring_sla.deadline_hours
+				OR (monitoring_sla.remind_hours > 0 AND monitoring_sla.deadline_hours - TIMESTAMPDIFF(HOUR, pm_service_item.status_changed_at, UTC_TIMESTAMP()) <= monitoring_sla.remind_hours)))
+				OR
+				(TRIM(pm_service_item.status) = '` + domain.ProjectStatusFieldCompleted + `'
+				AND UPPER(TRIM(COALESCE(pm_service_item.report_status, ''))) IN (` + quotedSQLList(domain.ReportPhaseSLACodes()) + `)
+				AND UPPER(TRIM(monitoring_sla.status)) = UPPER(TRIM(COALESCE(pm_service_item.report_status, ''))) AND pm_service_item.report_updated_at IS NOT NULL
+				AND (TIMESTAMPDIFF(HOUR, pm_service_item.report_updated_at, UTC_TIMESTAMP()) > monitoring_sla.deadline_hours
+				OR (monitoring_sla.remind_hours > 0 AND monitoring_sla.deadline_hours - TIMESTAMPDIFF(HOUR, pm_service_item.report_updated_at, UTC_TIMESTAMP()) <= monitoring_sla.remind_hours)))
+			)
+		))`
+	return predicate, []any{domain.ProjectStatusTerminated, domain.ProjectStatusFieldCompleted}
+}
+
 // LoadProjectMonitoringPage 在 MySQL 中完成筛选、计数、分面及分页。之后
 // 仅为选中项目页加载详情，防止监控端点
 // 每次刷新都补全租户全部项目、服务项、SLA 候选及事件。
@@ -27,7 +53,11 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 	}
 
 	base := func() *gorm.DB {
+		// 派生状态/报告阶段的分组与过滤都需要服务项聚合 join：
+		// 状态计数必须对同一派生表达式分组（不能按存储列 pm_project.status），
+		// 报告阶段过滤需要同一聚合里的 lowest_report_phase。join 每个查询只加一次。
 		query := applyProjectScope(r.db.WithContext(ctx).Table("pm_project"), filter, "pm_project").
+			Joins(derivedProjectStatusJoin(), filter.TenantID).
 			Where("pm_project.status <> ?", domain.ProjectStatusCompleted)
 		if keyword := strings.TrimSpace(input.Keyword); keyword != "" {
 			like := "%" + keyword + "%"
@@ -35,6 +65,16 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 		}
 		if value := strings.TrimSpace(input.Status); value != "" {
 			query = query.Where("pm_project.status = ?", value)
+		}
+		// 项目级报告阶段筛选：与列表同一谓词（全部非终止项已到现场完成及以上
+		// 且最小报告 Phase 相等）。未知码在应用层已返回 422；这里防御性置空集，
+		// 绝不把 -1 当成"匹配未知道具行"。
+		if value := strings.ToUpper(strings.TrimSpace(input.ReportStage)); value != "" {
+			if phase := domain.ReportPhaseRank(value); phase < 0 {
+				query = query.Where("1 = 0")
+			} else {
+				query = query.Where(derivedProjectReportStagePredicate, phase)
+			}
 		}
 		if value := strings.TrimSpace(input.Customer); value != "" {
 			query = query.Where("LOWER(pm_project.customer) LIKE ?", "%"+strings.ToLower(value)+"%")
@@ -68,14 +108,11 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 			query = query.Where("pm_project.id IN (?)", dueProjects)
 		}
 
-		slaPredicate := `pm_service_item.status <> ? AND ((pm_service_item.status <> ? AND pm_service_item.planned_end IS NOT NULL AND pm_service_item.planned_end < UTC_TIMESTAMP()) OR EXISTS (
-			SELECT 1 FROM pm_sla monitoring_sla
-			WHERE monitoring_sla.tenant_id = pm_service_item.tenant_id AND monitoring_sla.enabled = TRUE
-			AND TRIM(monitoring_sla.status) = TRIM(pm_service_item.status) AND pm_service_item.status_changed_at IS NOT NULL
-			AND (TIMESTAMPDIFF(HOUR, pm_service_item.status_changed_at, UTC_TIMESTAMP()) > monitoring_sla.deadline_hours
-			OR (monitoring_sla.remind_hours > 0 AND monitoring_sla.deadline_hours - TIMESTAMPDIFF(HOUR, pm_service_item.status_changed_at, UTC_TIMESTAMP()) <= monitoring_sla.remind_hours))
-		))`
-		slaProjects := visibleItems().Select("pm_service_item.project_id").Where(slaPredicate, domain.ProjectStatusTerminated, domain.ProjectStatusFieldCompleted)
+		// 状态停留口径同时覆盖两个维度：服务项状态（status_changed_at 计时）与
+		// 报告阶段（report_updated_at 计时）。报告阶段码清单由
+		// domain.ReportPhaseSLACodes 生成，与 computeSlaItems / 规则目录同源。
+		slaPredicate, slaArgs := monitoringSLAPredicate()
+		slaProjects := visibleItems().Select("pm_service_item.project_id").Where(slaPredicate, slaArgs...)
 		if input.SLAOnly {
 			query = query.Where("pm_project.id IN (?)", slaProjects)
 		}
@@ -88,7 +125,7 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 		return query
 	}
 
-	result := domain.ProjectMonitoringPageData{StatusCounts: map[string]int{}, Categories: []string{}, Teams: []string{}, ProjectManagerIDs: []string{}}
+	result := domain.ProjectMonitoringPageData{StatusCounts: map[string]int{}, ReportStageCounts: map[string]int{}, Categories: []string{}, Teams: []string{}, ProjectManagerIDs: []string{}}
 	var total int64
 	if err := base().Count(&total).Error; err != nil {
 		return result, err
@@ -109,15 +146,38 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 		result.Projects = append(result.Projects, project)
 	}
 
+	// 状态计数必须按**派生**状态分组：按存储列 pm_project.status 分组会把
+	// 未回写的旧值算进去（项目状态是读时派生的，存储列只是历史快照），
+	// 计数就会和当前页返回的行状态不一致。GROUP BY 与 SELECT 使用同一表达式。
+	statusExpression := derivedProjectStatusExpression()
 	var statusRows []struct {
 		Status string
 		Count  int
 	}
-	if err := base().Select("pm_project.status AS status, COUNT(*) AS count").Group("pm_project.status").Scan(&statusRows).Error; err != nil {
+	if err := base().Select(statusExpression + " AS status, COUNT(*) AS count").Group(statusExpression).Find(&statusRows).Error; err != nil {
 		return result, err
 	}
 	for _, row := range statusRows {
 		result.StatusCounts[row.Status] = row.Count
+	}
+	// 报告阶段计数同样对派生表达式分组：只统计"已进入报告段"的行
+	// （全部非终止项已到现场完成及以上，且报告码已知），与 Go 侧
+	// DeriveProjectReportStage 返回 "" 的语义一致——不可判定的行不计入任何阶段。
+	reportPhaseExpression := "COALESCE(derived_status.lowest_report_phase, -1)"
+	var reportRows []struct {
+		Phase int
+		Count int
+	}
+	if err := base().
+		Select(reportPhaseExpression + " AS phase, COUNT(*) AS count").
+		Where("COALESCE(derived_status.lowest_rank, 0) BETWEEN 6 AND 8 AND " + reportPhaseExpression + " BETWEEN 0 AND 5").
+		Group(reportPhaseExpression).Find(&reportRows).Error; err != nil {
+		return result, err
+	}
+	for _, row := range reportRows {
+		if code := domain.ReportPhaseCode(row.Phase); code != "" {
+			result.ReportStageCounts[code] = row.Count
+		}
 	}
 	if err := base().Distinct("pm_project.team").Where("pm_project.team <> ''").Order("pm_project.team").Pluck("pm_project.team", &result.Teams).Error; err != nil {
 		return result, err
@@ -132,7 +192,7 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 		return result, err
 	}
 	var latest struct{ UpdatedAt *time.Time }
-	if err := base().Select("MAX(pm_project.updated_at) AS updated_at").Scan(&latest).Error; err != nil {
+	if err := base().Select("MAX(pm_project.updated_at) AS updated_at").Find(&latest).Error; err != nil {
 		return result, err
 	}
 	if latest.UpdatedAt != nil {
@@ -179,21 +239,26 @@ func (r *Repository) LoadProjectMonitoringPage(ctx context.Context, filter platf
 		Site            string
 		Category        string
 		Status          string
+		ReportStatus    string
 		PlannedEnd      *time.Time
 		StatusChangedAt *time.Time
+		ReportUpdatedAt *time.Time
 	}
 	if err := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).
-		Select("pm_service_item.id, pm_service_item.project_id, pm_service_item.site, pm_service_item.category, pm_service_item.status, pm_service_item.planned_end, pm_service_item.status_changed_at").
+		Select("pm_service_item.id, pm_service_item.project_id, pm_service_item.site, pm_service_item.category, pm_service_item.status, pm_service_item.report_status, pm_service_item.planned_end, pm_service_item.status_changed_at, pm_service_item.report_updated_at").
 		Where("pm_service_item.project_id IN ? AND pm_service_item.status <> ?", ids, domain.ProjectStatusTerminated).Scan(&slaRows).Error; err != nil {
 		return result, err
 	}
 	for _, row := range slaRows {
-		candidate := domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status}
+		candidate := domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status, ReportStatus: row.ReportStatus}
 		if row.PlannedEnd != nil {
 			candidate.PlannedEnd = row.PlannedEnd.Format(time.RFC3339)
 		}
 		if row.StatusChangedAt != nil {
 			candidate.StatusChangedAt = *row.StatusChangedAt
+		}
+		if row.ReportUpdatedAt != nil {
+			candidate.ReportChangedAt = *row.ReportUpdatedAt
 		}
 		result.SLACandidates = append(result.SLACandidates, candidate)
 	}

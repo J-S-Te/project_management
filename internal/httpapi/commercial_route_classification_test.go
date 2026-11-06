@@ -25,6 +25,7 @@ import (
 //   - core.MUTATE_BUSINESS：该 GET 实际带副作用，到期必须 403（当前没有此类 GET，
 //     若将来出现必须在这里显式登记并说明副作用）。
 var registeredGETOperations = map[string]core.Operation{
+		"/api/v1/projects/:id/native-scope": core.READ_HISTORY,
 	// 存活、就绪与会话服务：不因商业授权到期而阻断登录/续期/巡检。
 	"/healthz":       core.ESSENTIAL_SERVICE,
 	"/readyz":        core.ESSENTIAL_SERVICE,
@@ -51,6 +52,7 @@ var registeredGETOperations = map[string]core.Operation{
 	"/api/v1/navigation":                                                  core.READ_HISTORY,
 	"/api/v1/role-catalog":                                                core.READ_HISTORY,
 	"/api/v1/rule-configuration-catalog":                                  core.READ_HISTORY,
+	"/api/v1/project-creation-capabilities":                               core.READ_HISTORY,
 	"/api/v1/dashboard":                                                   core.READ_HISTORY,
 	"/api/v1/projects":                                                    core.READ_HISTORY,
 	"/api/v1/projects-monitoring":                                         core.READ_HISTORY,

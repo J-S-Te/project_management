@@ -221,9 +221,9 @@ func (r *repo) ListDetectionCategories(context.Context, string) ([]domain.Detect
 	return domain.DefaultDetectionCategories(), nil
 }
 
-// ListProjects 模拟仓储层的 SQL 分页契约：page/pageSize>0 时返回本页切片与总数。
-func (r *repo) ListProjects(_ context.Context, _ platform.ScopeFilter, _, _ string, page, pageSize int) ([]domain.Project, int, error) {
-	return paginateFake(r.projects, page, pageSize), len(r.projects), nil
+// ListProjects 模拟仓储层的 SQL 分页契约：PageSize>0 时返回本页切片与总数。
+func (r *repo) ListProjects(_ context.Context, _ platform.ScopeFilter, query domain.ProjectListQuery) ([]domain.Project, int, error) {
+	return paginateFake(r.projects, query.Page, query.PageSize), len(r.projects), nil
 }
 func (r *repo) GetProject(_ context.Context, _ platform.ScopeFilter, id string) (domain.Project, error) {
 	for _, p := range r.projects {
@@ -1226,11 +1226,12 @@ func TestContractIntegrationRejectsInvalidKeycloakMachineToken(t *testing.T) {
 
 func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 	repository := &repo{dashboard: domain.Dashboard{
-		ProjectCount:     6,
-		InFlightProjects: 4,
-		RiskProjects:     2,
-		ServiceItems:     18,
-		StatusCounts:     map[string]int{"实施中": 4, "已完成": 2},
+		ProjectCount:      6,
+		InFlightProjects:  4,
+		RiskProjects:      2,
+		ServiceItems:      18,
+		StatusCounts:      map[string]int{"实施中": 4, "已完成": 2},
+		ReportStageCounts: map[string]int{domain.ReportPhaseRectifying: 1, domain.ReportPhaseArchived: 2},
 	}}
 	handler := httpapi.NewRouter(
 		&application.Service{Repo: repository},
@@ -1264,6 +1265,10 @@ func TestDashboardIntegrationReturnsTenantScopedProjectMetrics(t *testing.T) {
 	if payload.Data.ProjectCount != 6 || payload.Data.InFlightProjects != 4 || payload.Data.RiskProjects != 2 || payload.Data.ServiceItems != 18 || payload.Data.StatusCounts["实施中"] != 4 {
 		t.Fatalf("dashboard=%+v", payload.Data)
 	}
+	// 内部看板 JSON 只加键：report_stage_counts 与监控/列表同一派生口径。
+	if payload.Data.ReportStageCounts["RECTIFYING"] != 1 || payload.Data.ReportStageCounts["ARCHIVED"] != 2 || len(payload.Data.ReportStageCounts) != 2 {
+		t.Fatalf("report_stage_counts=%v", payload.Data.ReportStageCounts)
+	}
 	if payload.Data.TenantID != "tenant-dashboard" {
 		t.Fatalf("dashboard tenant=%q, want verified tenant", payload.Data.TenantID)
 	}
@@ -1287,6 +1292,10 @@ func TestDashboardIntegrationUsesVerifiedTenantWithoutRoutingHeader(t *testing.T
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	// 仓储未初始化的实现也必须输出空对象而不是 null：DA 以缺失/null 区分"未采集"。
+	if !strings.Contains(response.Body.String(), `"report_stage_counts":{}`) {
+		t.Fatalf("report_stage_counts 必须是非 null 空对象: %s", response.Body.String())
 	}
 }
 

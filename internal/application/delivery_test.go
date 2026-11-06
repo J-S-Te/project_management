@@ -605,24 +605,27 @@ func TestDeleteEquipmentProtectsActiveReservations(t *testing.T) {
 
 // 通用资质入口只维护人员；设备新建、修改和删除必须统一走设备能力入口。
 func TestQualificationUpsertAndImportRejectEquipment(t *testing.T) {
-	repo := &capabilityRepository{capabilities: []domain.Capability{
+	repo := &confirmingImportStore{capabilityRepository: capabilityRepository{capabilities: []domain.Capability{
 		{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}, Status: "ACTIVE", UsageScope: domain.EquipmentUsageCompanyOnly},
-	}}
+	}}}
 	service := &Service{Repo: repo}
 	manager := principalWith("project.resource.manage", platform.DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"})
 
 	if _, err := service.UpsertCapability(context.Background(), manager, domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备改名", Codes: []string{"c1"}}); !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), "设备能力") {
 		t.Fatalf("通用资质入口应拒绝设备，error=%v", err)
 	}
-	result, err := service.ImportCapabilities(context.Background(), manager, []domain.Capability{{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}}})
-	if err != nil {
-		t.Fatal(err)
+	preview, err := service.PreviewCapabilityImport(context.Background(), manager, []CapabilityImportInput{
+		{RowNo: 2, Capability: domain.Capability{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "机房设备", Codes: []string{"c1"}}},
+	})
+	if err != nil || preview.Valid != 0 || !strings.Contains(strings.Join(preview.Rows[0].Errors, "；"), "设备") {
+		t.Fatalf("设备 CSV 必须在人员资质预检被拒，preview=%+v err=%v", preview, err)
 	}
-	if result.Imported != 0 || result.Skipped != 1 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "设备能力") {
-		t.Fatalf("设备 CSV 应被逐行拒绝，result=%+v", result)
+	hash := ImportRequestHash(ImportOperationCapability, ImportContentHash([]byte("capabilities.csv")), "PERSON", []int{2})
+	if _, err := service.ConfirmCapabilityImport(context.Background(), manager, "pm-import-0001", hash, preview.Rows, []int{2}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("人员资质确认必须拒绝设备行: %v", err)
 	}
-	if len(repo.saved) != 0 {
-		t.Fatalf("通用资质入口不得写入设备：%+v", repo.saved)
+	if len(repo.capabilities) != 0 {
+		t.Fatalf("通用资质入口不得写入设备：%+v", repo.capabilities)
 	}
 }
 
@@ -1997,7 +2000,8 @@ func (r *assigneeRepository) GetServiceItem(_ context.Context, _ platform.ScopeF
 }
 
 // 定时扫描必须能主动提醒 SLA 超期/临近：此前没有任何周期任务，超期只有人打开页面才可见。
-// 幂等键按「服务项 + 口径 + UTC 日期」生成，同一天重复扫描不会重复打扰。
+// 幂等键按「服务项 + 口径 + 规则维度 + 规则状态 + 业务日」生成，
+// 同一天重复扫描不会重复打扰；状态规则与报告阶段规则口径相同但维度不同，键也不撞。
 func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
 	now := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
 	repo := &assigneeRepository{
@@ -2026,8 +2030,8 @@ func TestScanSlaNotificationsPublishesToAssignees(t *testing.T) {
 	if event.Priority != "HIGH" {
 		t.Fatalf("超期提醒应为高优先级，实际 %q", event.Priority)
 	}
-	if event.IdempotencyKey != "sla-SI-1-"+domain.SlaKindStatusOverdue+"-2026-09-13" {
-		t.Fatalf("幂等键必须按服务项+口径+日期生成，实际 %q", event.IdempotencyKey)
+	if event.IdempotencyKey != "sla-SI-1-"+domain.SlaKindStatusOverdue+"-STATUS-实施中-2026-09-13" {
+		t.Fatalf("幂等键必须按服务项+口径+维度+规则状态+日期生成，实际 %q", event.IdempotencyKey)
 	}
 	if event.Scope != platform.NotificationScopeCrossSystem {
 		t.Fatalf("必须使用平台白名单 scope，实际 %q", event.Scope)
@@ -2066,7 +2070,7 @@ func TestScanSlaNotificationsEnqueuesDurably(t *testing.T) {
 	if len(direct.published) != 0 {
 		t.Fatalf("outbox-capable repository must not publish directly, got %+v", direct.published)
 	}
-	if repo.enqueued[0].IdempotencyKey != "sla-SI-OUTBOX-"+domain.SlaKindStatusOverdue+"-2026-09-13" {
+	if repo.enqueued[0].IdempotencyKey != "sla-SI-OUTBOX-"+domain.SlaKindStatusOverdue+"-STATUS-实施中-2026-09-13" {
 		t.Fatalf("unexpected outbox idempotency key %q", repo.enqueued[0].IdempotencyKey)
 	}
 }

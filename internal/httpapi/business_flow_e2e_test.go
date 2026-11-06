@@ -113,6 +113,9 @@ func e2eStep(t *testing.T, handler http.Handler, role, method, path, body string
 	return response
 }
 
+// TestBusinessFlowEndToEndWithRealRoles 验证真实岗位贯穿现场、整改、编制及报告更正链。
+// 参数：t 为测试上下文；需要明确隔离的 PM_TEST_DSN。
+// 返回值：无；角色、状态或业务门禁不符时测试失败。
 func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
@@ -212,6 +215,7 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 
 	// ---- 步骤 8：报告阶段按编制、审核、签发职责分离推进 ----
 	t.Log("步骤 8：项目经理进入编制并登记报告文件，质量管理员审核，技术总监签发")
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"RECTIFYING"}`)
 	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"COMPILING"}`)
 	e2eStep(t, handler, "project_manager", http.MethodPut, item+"/report-revisions/0/artifact",
 		`{"file_id":"FILE-E2E-001","file_name":"走查报告.pdf","mime":"application/pdf","size":1024,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
@@ -235,6 +239,7 @@ func TestBusinessFlowEndToEndWithRealRoles(t *testing.T) {
 	}
 	e2eStep(t, handler, "technical_director", http.MethodPost, item+"/report-corrections/"+correction.Data.ID+"/decision",
 		`{"decision":"APPROVED","comment":"同意更正"}`)
+	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"RECTIFYING"}`)
 	e2eStep(t, handler, "project_manager", http.MethodPost, item+"/report-status", `{"phase":"COMPILING"}`)
 	e2eStep(t, handler, "project_manager", http.MethodPut, item+"/report-revisions/1/artifact",
 		`{"file_id":"FILE-E2E-002","file_name":"走查报告-R1.pdf","mime":"application/pdf","size":2048,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)

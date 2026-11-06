@@ -36,6 +36,13 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	if query.DueFrom != "" && query.DueTo != "" && query.DueFrom > query.DueTo {
 		return domain.ProjectMonitoringSnapshot{}, ValidationError("计划完成起始日期不能晚于结束日期")
 	}
+	// 报告阶段筛选与项目列表共用同一校验/归一化：数据库分页路径与内存回退路径
+	// 的过滤条件必须完全一致，否则两条路径的 total 与行集口径分裂。
+	reportStage, err := normalizeReportStageFilter(query.ReportStage)
+	if err != nil {
+		return domain.ProjectMonitoringSnapshot{}, err
+	}
+	query.ReportStage = reportStage
 	page, pageSize := query.Page, query.PageSize
 	if page <= 0 {
 		page = 1
@@ -81,6 +88,7 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 
 	rows := make([]domain.MonitoringProject, 0, len(projects))
 	statusCounts := map[string]int{}
+	reportStageCounts := map[string]int{}
 	categoryFacets, teamFacets, managerFacets := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
 	latestVersionTime := time.Time{}
 	for _, project := range projects {
@@ -93,6 +101,9 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 		}
 		rows = append(rows, row)
 		statusCounts[project.Status]++
+		if project.ReportStage != "" {
+			reportStageCounts[project.ReportStage]++
+		}
 		// 掩码占位值不是真实取值：兜底路径的分面收集跳过它，让内存路径与
 		// 数据库分页路径（hidden 时清空分面）输出同一种形态。
 		if project.Team != "" && project.Team != maskedFieldValue {
@@ -140,7 +151,7 @@ func (s *Service) MonitorProjects(ctx context.Context, p platform.Principal, que
 	}
 	now := time.Now().UTC()
 	return domain.ProjectMonitoringSnapshot{
-		Items: paged, RecentEvents: recentEvents, StatusCounts: statusCounts,
+		Items: paged, RecentEvents: recentEvents, StatusCounts: statusCounts, ReportStageCounts: reportStageCounts,
 		Categories: sortedKeys(categoryFacets), Teams: sortedKeys(teamFacets), ProjectManagerIDs: sortedKeys(managerFacets),
 		Total: total, Page: page, PageSize: pageSize, ServerTime: now,
 		SnapshotVersion: fmt.Sprintf("%d-%d", latestVersionTime.UnixNano(), total),
@@ -219,7 +230,7 @@ func (s *Service) monitorProjectsFromDatabasePage(ctx context.Context, p platfor
 		recentEvents = []domain.DeliveryEvent{}
 	}
 	return domain.ProjectMonitoringSnapshot{
-		Items: rows, RecentEvents: recentEvents, StatusCounts: data.StatusCounts,
+		Items: rows, RecentEvents: recentEvents, StatusCounts: data.StatusCounts, ReportStageCounts: data.ReportStageCounts,
 		Categories: data.Categories, Teams: data.Teams, ProjectManagerIDs: data.ProjectManagerIDs,
 		Total: data.Total, Page: query.Page, PageSize: query.PageSize, ServerTime: time.Now().UTC(),
 		SnapshotVersion: fmt.Sprintf("%d-%d", data.LatestUpdatedAt.UnixNano(), data.Total),
@@ -321,6 +332,11 @@ func monitoringActionSection(status string) string {
 func monitoringMatches(row domain.MonitoringProject, query domain.ProjectMonitoringQuery) bool {
 	p := row.Project
 	if query.Status != "" && p.Status != query.Status {
+		return false
+	}
+	// 报告阶段与状态正交：两者 AND 组合，与数据库分页路径的谓词一致。
+	// 空 report_stage（未进入报告段/不可判定）只在没有筛选时出现。
+	if query.ReportStage != "" && !strings.EqualFold(strings.TrimSpace(p.ReportStage), strings.TrimSpace(query.ReportStage)) {
 		return false
 	}
 	if query.Customer != "" && !strings.Contains(strings.ToLower(p.Customer), strings.ToLower(strings.TrimSpace(query.Customer))) {

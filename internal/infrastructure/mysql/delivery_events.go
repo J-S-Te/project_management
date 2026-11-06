@@ -19,7 +19,13 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// applyItemEvent 在行锁事务内校验并更新服务项及关联交付证据。
+// 参数：tx 为当前事务，item 为已锁定服务项，event 为待应用的交付事件。
+// 返回值：状态、版本或关联证据校验失败时返回错误，成功返回 nil。
 func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
+	if err := guardNativeScopeMutation(tx, *item); err != nil {
+		return err
+	}
 	// 先前置读取、再事务行锁之间可能已有其他命令完成。撤销命令把客户端看到的版本
 	// 带入事件，在锁内二次比较，避免后到的撤销覆盖最新责任链。
 	if expected := expectedVersionValue(event.Payload); expected != 0 && item.Version != expected {
@@ -130,8 +136,8 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if !allowedReportPhase(phase) {
 			return application.ErrValidation
 		}
-		current := reportPhaseRank(item.ReportStatus)
-		next := reportPhaseRank(phase)
+		current := domain.ReportPhaseRank(item.ReportStatus)
+		next := domain.ReportPhaseRank(phase)
 		if next != current+1 {
 			return application.ErrValidation
 		}
@@ -142,7 +148,7 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if err != nil {
 			return err
 		}
-		if revision.ValidityStatus != "ACTIVE" || reportPhaseRank(revision.Status) != current {
+		if revision.ValidityStatus != "ACTIVE" || domain.ReportPhaseRank(revision.Status) != current {
 			return application.ErrConflict
 		}
 		if err := advanceReportRevision(tx, &revision, phase, event); err != nil {
@@ -204,11 +210,12 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			}
 			updates["status"] = "实施准备中"
 		case "REPORT_TO_FIELD":
-			if item.Status != "现场实施完成" || (item.ReportStatus != "COMPILING" && item.ReportStatus != "REVIEWED") {
+			if item.Status != "现场实施完成" ||
+				(item.ReportStatus != "RECTIFYING" && item.ReportStatus != "COMPILING" && item.ReportStatus != "REVIEWED") {
 				return application.ErrValidation
 			}
 			// 报告返工：把当前修订标记为 SUPERSEDED（保留其文件与审批证据），并开一个新修订，
-			// 否则重新编制时 lockReportRevision 会发现旧修订仍停在 COMPILING/REVIEWED 而返回冲突。
+			// 否则重新编制时 lockReportRevision 会发现旧修订仍停在整改、编制或审核而返回冲突。
 			if err := reworkReportRevision(tx, item, event); err != nil {
 				return err
 			}
@@ -422,7 +429,18 @@ func isAuditOnlyEvent(eventType string) bool {
 	return false
 }
 
+// applyProjectEvent 保留合同项目事件并隔离原生范围审批聚合。
+// 参数：tx 为业务事务，project 为锁定项目，event 为交付事件。
+// 返回值：原生待审批或合同范围事件混用拒绝，旧合同语义不变。
 func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.DeliveryEvent) error {
+	if project.SourceKind == "NATIVE" {
+		if event.Type == application.EventScopeChangeDetected || event.Type == application.EventDecompositionAdjusted || event.Type == application.EventSupplementClosed {
+			return application.PreconditionError("原生范围只能通过本地异人审批变更")
+		}
+		if err := ensureNoPendingNativeScope(tx, *project); err != nil {
+			return err
+		}
+	}
 	updates := map[string]any{"updated_at": event.CreatedAt}
 	switch event.Type {
 	case application.EventScopeChangeDetected:

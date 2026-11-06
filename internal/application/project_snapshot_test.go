@@ -2,7 +2,11 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,5 +198,70 @@ func TestProjectSnapshotStreamRejectsMalformedRecords(t *testing.T) {
 				t.Fatal("failed stream yielded successful summary")
 			}
 		})
+	}
+}
+
+// TestProjectSnapshotStreamEmitsReportStageWithSchemaOne 守护 PM→DA 的增量契约：
+// project 行始终带 report_stage 键（空串表示未进入报告段，不是缺失/nulls），
+// header/end 仍为 schema_version=1，end 的 checksum 仍按实际发出的行字节计算。
+func TestProjectSnapshotStreamEmitsReportStageWithSchemaOne(t *testing.T) {
+	sink := &snapshotCollector{}
+	stream := NewProjectSnapshotStream(context.Background(), "tenant", DefaultProjectSnapshotLimits(), sink)
+	header := snapshotHeader()
+	if err := stream.Begin(header); err != nil {
+		t.Fatal(err)
+	}
+	now := header.SourceSnapshotAt
+	for _, tc := range []struct{ id, reportStatus, want, status string }{
+		{"P-1", domain.ReportPhaseRectifying, domain.ReportPhaseRectifying, domain.ProjectStatusReporting},
+		{"P-2", domain.ReportPhaseArchived, domain.ReportPhaseArchived, domain.ProjectStatusCompleted},
+		{"P-3", "", "", domain.ProjectStatusPendingDecomposition},
+	} {
+		items := []domain.ProjectSnapshotItem{}
+		if tc.reportStatus != "" {
+			items = []domain.ProjectSnapshotItem{{Status: domain.ProjectStatusFieldCompleted, ReportStatus: tc.reportStatus}}
+		}
+		p := domain.NewProjectProjection(domain.Project{TenantID: "tenant", ID: tc.id, Name: "project", CreatedAt: now, UpdatedAt: now}, header.SnapshotID, items, now)
+		if p.Status != tc.status || p.ReportStage != tc.want {
+			t.Fatalf("%s projection status=%q report_stage=%q", tc.id, p.Status, p.ReportStage)
+		}
+		if err := stream.Project(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary, err := stream.Summary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sink.header.SchemaVersion != 1 || summary.SchemaVersion != 1 || summary.Type != "end" || summary.Total != len(sink.rows) {
+		t.Fatalf("header=%+v end=%+v", sink.header, summary)
+	}
+	digest := sha256.New()
+	for _, row := range sink.rows {
+		line, err := domain.ProjectSnapshotLine(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(line), `"report_stage":"`+row.ReportStage+`"`) {
+			t.Fatalf("行缺少 report_stage: %s", line)
+		}
+		_, _ = digest.Write(line)
+	}
+	if summary.ChecksumSHA256 != hex.EncodeToString(digest.Sum(nil)) {
+		t.Fatalf("checksum=%s，期望按含 report_stage 的行字节计算", summary.ChecksumSHA256)
+	}
+	// header/end 行不携带 report_stage：新字段只属于 type=project 行。
+	for name, value := range map[string]any{"header": sink.header, "end": summary} {
+		line, err := domain.ProjectSnapshotLine(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(line, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := fields["report_stage"]; exists {
+			t.Fatalf("%s 行不应出现 report_stage: %s", name, line)
+		}
 	}
 }

@@ -39,15 +39,30 @@ var automationTriggerCatalog = []RuleOption{
 	{EventEquipmentReturned, "设备已归还", "实施设备解除占用"},
 }
 
-var slaStatusCatalog = []RuleOption{
-	{"待确认", "待确认", "等待业务管理员确认拆解结果"},
-	{"待复核", "待复核", "等待特殊方法或拆解复核"},
-	{domain.ProjectStatusPendingAllocation, domain.ProjectStatusPendingAllocation, "等待团队负责人分配"},
-	{domain.ProjectStatusPendingExecution, domain.ProjectStatusPendingExecution, "等待实施计划发布"},
-	{domain.ProjectStatusPreparing, domain.ProjectStatusPreparing, "实施资源和材料准备中"},
-	{domain.ProjectStatusInProgress, domain.ProjectStatusInProgress, "现场实施进行中"},
-	{domain.ProjectStatusException, domain.ProjectStatusException, "现场异常等待处置"},
-	{domain.ProjectStatusFieldCompleted, domain.ProjectStatusFieldCompleted, "现场完成后等待报告流程闭环"},
+// slaStatusCatalog 是 SLA 规则可配置的停留阶段词表：服务项状态 + 主报告阶段。
+// 报告阶段的 5 个码由 domain.ReportPhaseSLACodes 派生（不写第二份清单）：
+// 运营可以为「整改中/编制中/审核中/已签发/已归档」分别配置时限，
+// NONE 表示报告尚未开始，其停留由「现场实施完成」状态规则覆盖。
+var slaStatusCatalog = newSLAStatusCatalog()
+
+// newSLAStatusCatalog 组装 SLA 阶段目录。参数：无。
+// 返回值：服务项状态选项在前，报告阶段选项在后（展示顺序与报告链一致）。
+func newSLAStatusCatalog() []RuleOption {
+	options := []RuleOption{
+		{"待确认", "待确认", "等待业务管理员确认拆解结果"},
+		{"待复核", "待复核", "等待特殊方法或拆解复核"},
+		{domain.ProjectStatusPendingAllocation, domain.ProjectStatusPendingAllocation, "等待团队负责人分配"},
+		{domain.ProjectStatusPendingExecution, domain.ProjectStatusPendingExecution, "等待实施计划发布"},
+		{domain.ProjectStatusPreparing, domain.ProjectStatusPreparing, "实施资源和材料准备中"},
+		{domain.ProjectStatusInProgress, domain.ProjectStatusInProgress, "现场实施进行中"},
+		{domain.ProjectStatusException, domain.ProjectStatusException, "现场异常等待处置"},
+		{domain.ProjectStatusFieldCompleted, domain.ProjectStatusFieldCompleted, "现场完成后等待报告流程闭环"},
+	}
+	for _, code := range domain.ReportPhaseSLACodes() {
+		label := "报告·" + domain.ReportPhaseLabel(code)
+		options = append(options, RuleOption{Value: code, Label: label, Description: "报告停留在「" + domain.ReportPhaseLabel(code) + "」的时限"})
+	}
+	return options
 }
 
 func copyRuleOptions(source []RuleOption) []RuleOption {

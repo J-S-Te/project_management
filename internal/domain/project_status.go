@@ -37,6 +37,133 @@ var projectStatusNodes = []string{
 	ProjectStatusCompleted,
 }
 
+// 主报告阶段码：报告链 NONE → RECTIFYING → COMPILING → REVIEWED → ISSUED → ARCHIVED。
+// 只有 NONE 表示"尚未进入报告流程"，其余五个阶段都可以作为 SLA 停留规则的配置值。
+const (
+	ReportPhaseNone       = "NONE"
+	ReportPhaseRectifying = "RECTIFYING"
+	ReportPhaseCompiling  = "COMPILING"
+	ReportPhaseReviewed   = "REVIEWED"
+	ReportPhaseIssued     = "ISSUED"
+	ReportPhaseArchived   = "ARCHIVED"
+)
+
+// ReportPhaseStage 是主报告阶段的唯一事实来源，同时承载两张维度：
+//   - Phase：报告链内部顺序（0..5）。项目级 report_stage 取所有服务项中**最小**
+//     Phase（与项目状态"取最滞后服务项"同一原则），所以 NONE 会赢过 RECTIFYING。
+//   - LifecycleRank：该阶段对应的项目生命周期推进等级，取值与 projectStatusNodes
+//     下标一致（现场实施完成=6、报告编制=7、已完成=8）。
+//
+// 表外的未知码不得静默归入任何阶段：ReportPhaseRank 返回 -1、IsReportPhase
+// 返回 false，由调用方显式按"不可判定"处理。
+type ReportPhaseStage struct {
+	Code          string
+	Phase         int
+	LifecycleRank int
+}
+
+// reportPhaseStages 是报告阶段的唯一定义：ServiceItemReportStages、
+// serviceItemLifecycleRank、SLA 报告阶段清单都由它派生，
+// 禁止在基础设施层、应用层或前端另写一份状态清单。
+var reportPhaseStages = []ReportPhaseStage{
+	// NONE 表示待整改：仍属「现场实施完成」等级，因此生命周期等级为 6。
+	{Code: ReportPhaseNone, Phase: 0, LifecycleRank: 6},
+	{Code: ReportPhaseRectifying, Phase: 1, LifecycleRank: 7},
+	{Code: ReportPhaseCompiling, Phase: 2, LifecycleRank: 7},
+	{Code: ReportPhaseReviewed, Phase: 3, LifecycleRank: 7},
+	{Code: ReportPhaseIssued, Phase: 4, LifecycleRank: 7},
+	{Code: ReportPhaseArchived, Phase: 5, LifecycleRank: 8},
+}
+
+// reportPhaseByCode / reportPhaseCodeByPhase / reportLifecycleRank 均由上表派生。
+var (
+	reportPhaseByCode      = make(map[string]ReportPhaseStage, len(reportPhaseStages))
+	reportPhaseCodeByPhase = make(map[int]string, len(reportPhaseStages))
+	reportLifecycleRank    = make(map[string]int, len(reportPhaseStages))
+)
+
+func init() {
+	for _, stage := range reportPhaseStages {
+		reportPhaseByCode[stage.Code] = stage
+		reportPhaseCodeByPhase[stage.Phase] = stage.Code
+		reportLifecycleRank[stage.Code] = stage.LifecycleRank
+	}
+}
+
+// reportPhaseLabels 是报告阶段的展示文案。它只用于通知/目录等展示，
+// 不参与任何判定；与阶段表的键一致性由单元测试守护。
+var reportPhaseLabels = map[string]string{
+	ReportPhaseNone:       "待整改",
+	ReportPhaseRectifying: "整改中",
+	ReportPhaseCompiling:  "编制中",
+	ReportPhaseReviewed:   "审核中",
+	ReportPhaseIssued:     "已签发",
+	ReportPhaseArchived:   "已归档",
+}
+
+// normalizeReportPhase 统一报告阶段码的归一化方式：去首尾空白并转大写。
+// 报告状态列存的就是大写码，但历史数据或手工 SQL 可能带空格/小写，
+// 所有判定入口（领域、SQL、SLA）必须走同一归一化。
+func normalizeReportPhase(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
+}
+
+// ReportPhaseRank 返回报告阶段在报告链中的顺序。
+// 参数：code 为报告阶段码，忽略大小写与首尾空白。
+// 返回值：NONE 为 0，RECTIFYING..ARCHIVED 为 1..5；表外未知码返回 -1。
+func ReportPhaseRank(code string) int {
+	if stage, ok := reportPhaseByCode[normalizeReportPhase(code)]; ok {
+		return stage.Phase
+	}
+	return -1
+}
+
+// IsReportPhase 判断 code 是否是已知的主报告阶段码（含 NONE）。
+// 参数：code 为报告阶段码，忽略大小写与首尾空白。
+// 返回值：表内返回 true，空串与未知码返回 false。
+func IsReportPhase(code string) bool {
+	_, ok := reportPhaseByCode[normalizeReportPhase(code)]
+	return ok
+}
+
+// ReportPhaseCode 返回阶段序号对应的报告阶段码，供 SQL 侧按派生 Phase 分组后
+// 反查展示码。参数：phase 为 0..5 的阶段序号；返回值：命中返回码，表外返回 ""。
+func ReportPhaseCode(phase int) string {
+	return reportPhaseCodeByPhase[phase]
+}
+
+// ReportPhaseStages 返回报告阶段表的只读副本（含 NONE），供展示与校验使用。
+func ReportPhaseStages() []ReportPhaseStage {
+	stages := make([]ReportPhaseStage, len(reportPhaseStages))
+	copy(stages, reportPhaseStages)
+	return stages
+}
+
+// ReportPhaseSLACodes 返回可作为 SLA 停留规则的 5 个报告阶段码（不含 NONE，
+// 按报告链顺序）：NONE 表示报告尚未开始，其停留由「现场实施完成」状态规则覆盖。
+// SLA 规则目录、监控 SQL 谓词与 Go 侧判定都从这里取清单，避免三处各写一份。
+func ReportPhaseSLACodes() []string {
+	codes := make([]string, 0, len(reportPhaseStages))
+	for _, stage := range reportPhaseStages {
+		if stage.Phase == 0 {
+			continue
+		}
+		codes = append(codes, stage.Code)
+	}
+	return codes
+}
+
+// ReportPhaseLabel 返回报告阶段的中文展示名（如「整改中」）。
+// 参数：code 为报告阶段码，忽略大小写与首尾空白。
+// 返回值：命中返回中文名，未知码返回去空白后的大写码本身。
+func ReportPhaseLabel(code string) string {
+	normalized := normalizeReportPhase(code)
+	if label, ok := reportPhaseLabels[normalized]; ok {
+		return label
+	}
+	return normalized
+}
+
 // serviceItemStatusStages 是服务项状态到推进等级的**唯一来源**：同阶段的状态取相同等级。
 // rank 表由它派生，避免"新增状态却忘了登记等级"——那种漂移会让该状态被静默当成最滞后（等级 0），
 // 把整个项目的状态拖回「待拆解确认」。
@@ -165,19 +292,18 @@ func DeriveProjectStatus(items []ProjectStatusItem, supplementStatus, storedStat
 	return projectStatusNodes[lowest]
 }
 
-// serviceItemLifecycleRank 把服务项映射到 0..8 的推进等级；
-// 未知或空状态按最滞后处理，避免把项目误报为已推进。
+// serviceItemLifecycleRank 把服务项状态及报告状态映射到线性推进等级。
+// 参数：item 为派生项目状态所需的服务项最小投影。
+// 返回值：0..8 的等级；未知或空现场状态按最滞后等级 0 处理。
 func serviceItemLifecycleRank(item ProjectStatusItem) int {
 	status := strings.TrimSpace(item.Status)
 	if status == ProjectStatusFieldCompleted {
-		switch strings.ToUpper(strings.TrimSpace(item.ReportStatus)) {
-		case "COMPILING", "REVIEWED", "ISSUED":
-			return 7
-		case "ARCHIVED":
-			return 8
-		default:
-			return 6
+		// 报告等级由 reportPhaseStages 派生：NONE 不在报告表内（等级 6），
+		// 未知/空报告状态同样按 6 处理，与历史行为一致。
+		if rank, ok := reportLifecycleRank[normalizeReportPhase(item.ReportStatus)]; ok && rank > 6 {
+			return rank
 		}
+		return 6
 	}
 	if rank, ok := serviceItemStatusRank[status]; ok {
 		return rank
@@ -203,14 +329,93 @@ func ServiceItemStatusStages() []ProjectStatusStage {
 	return stages
 }
 
-// ServiceItemReportStages 返回「现场实施完成」后按报告状态细分的等级表：
-// 报告编制/审核/签发中 → 7（报告编制），全部归档 → 8（已完成）；表外值由调用方
-// 兜底为 6（现场实施完成），同样与 serviceItemLifecycleRank 保持一致。
+// ServiceItemReportStages 返回现场完成后的报告等级表，供 SQL 与领域派生共用。
+// 参数：无。
+// 返回值：整改至签发对应等级 7，归档对应等级 8；NONE 与表外值由调用方按等级 6 处理。
+// 本函数由 reportPhaseStages 派生，不再手写第二份清单。
 func ServiceItemReportStages() []ProjectStatusStage {
-	return []ProjectStatusStage{
-		{Rank: 7, Statuses: []string{"COMPILING", "REVIEWED", "ISSUED"}},
-		{Rank: 8, Statuses: []string{"ARCHIVED"}},
+	stages := make([]ProjectStatusStage, 0, 2)
+	for _, rank := range []int{7, 8} {
+		statuses := make([]string, 0, len(reportPhaseStages))
+		for _, stage := range reportPhaseStages {
+			if stage.LifecycleRank == rank {
+				statuses = append(statuses, stage.Code)
+			}
+		}
+		if len(statuses) > 0 {
+			stages = append(stages, ProjectStatusStage{Rank: rank, Statuses: statuses})
+		}
 	}
+	return stages
+}
+
+// DeriveProjectReportStage 计算项目级报告阶段（与项目状态正交的维度）。
+//
+// 不变量（由单元测试守护）：
+//  1. 报告阶段只由「未终止服务项的报告状态」决定，服务项未走到现场实施完成
+//     （serviceItemLifecycleRank < 6）时项目尚未进入报告段，返回 ""。
+//  2. 全部服务项已终止或没有服务项时返回 ""：项目没有报告段。
+//  3. 空报告状态视为 NONE。
+//  4. 取**最小** Phase（最滞后），与 DeriveProjectStatus 的"取最滞后服务项"同一原则：
+//     一个服务项还在待整改（NONE）、另一个已整改中时，项目明确停在 NONE；
+//     取最靠前阶段会让项目报告进度虚高，这正是本项目要避免的口径。
+//  5. 任一服务项报告状态是未知码时返回 ""（不可判定），未知码由
+//     UnknownReportPhases 显式暴露，不得静默归入 NONE。
+//  6. 补充协议处理中不短路本维度：报告阶段反映的是报告链本身，
+//     分支节点由项目状态承载。
+//
+// 参数：items 为项目全部服务项的最小投影（含已终止项）。
+// 返回值：报告阶段码（NONE/RECTIFYING/COMPILING/REVIEWED/ISSUED/ARCHIVED）
+// 或 ""（未进入报告段/不可判定）。
+func DeriveProjectReportStage(items []ProjectStatusItem) string {
+	lowestPhase := -1
+	active := 0
+	for _, item := range items {
+		if strings.TrimSpace(item.Status) == ProjectStatusTerminated {
+			continue
+		}
+		active++
+		if serviceItemLifecycleRank(item) < 6 {
+			return ""
+		}
+		code := normalizeReportPhase(item.ReportStatus)
+		if code == "" {
+			code = ReportPhaseNone
+		}
+		if !IsReportPhase(code) {
+			return ""
+		}
+		if phase := ReportPhaseRank(code); lowestPhase < 0 || phase < lowestPhase {
+			lowestPhase = phase
+		}
+	}
+	if active == 0 {
+		return ""
+	}
+	return reportPhaseCodeByPhase[lowestPhase]
+}
+
+// UnknownReportPhases 返回投影中无法识别的报告状态码（去重，保持首次出现顺序）。
+// 未知报告状态会让 DeriveProjectReportStage 返回不可判定，与未知服务项状态一样
+// 属于数据异常，必须由调用方显式告警而不是静默变化。
+func UnknownReportPhases(items []ProjectStatusItem) []string {
+	seen := map[string]struct{}{}
+	unknown := make([]string, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.Status) == ProjectStatusTerminated {
+			continue
+		}
+		code := normalizeReportPhase(item.ReportStatus)
+		if code == "" || IsReportPhase(code) {
+			continue
+		}
+		if _, done := seen[code]; done {
+			continue
+		}
+		seen[code] = struct{}{}
+		unknown = append(unknown, code)
+	}
+	return unknown
 }
 
 // DeriveProjectProgress 按服务项推进等级派生项目进度百分比：

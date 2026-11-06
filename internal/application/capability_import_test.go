@@ -3,9 +3,11 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
+	"testing"
+
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
-	"testing"
 )
 
 type importPersonnelDirectory struct {
@@ -53,7 +55,7 @@ func (d importPersonnelDirectory) List(_ context.Context, q platform.OwnerDirect
 	return platform.OwnerDirectoryPage{Items: items, Total: int64(len(items))}, nil
 }
 func TestCapabilityImportPreviewResolvesIdentityWithoutWriting(t *testing.T) {
-	repo := &capabilityRepository{}
+	repo := &confirmingImportStore{}
 	s := Service{Repo: repo, Personnel: importPersonnelDirectory{people: []platform.OwnerDirectoryUser{{UserID: "u1", DisplayName: "张三", Organizations: []platform.OwnerDirectoryOrganization{{OrganizationID: "o1", OrganizationName: "检测部", IsPrimary: true}}}}}}
 	p := principalWith("project.resource.manage", platform.DataScope{ScopeType: "APPLICATION"})
 	inputs := []CapabilityImportInput{{RowNo: 2, OrganizationName: "检测部", Capability: domain.Capability{ResourceType: "PERSON", ResourceName: "张三", Codes: []string{"QUAL-1"}}}}
@@ -61,13 +63,18 @@ func TestCapabilityImportPreviewResolvesIdentityWithoutWriting(t *testing.T) {
 	if err != nil || preview.Valid != 1 {
 		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
-	if len(repo.saved) != 0 || preview.Rows[0].Capability.UserID != "u1" || preview.Rows[0].Capability.ResourceID == "" {
-		t.Fatalf("unexpected preview=%+v writes=%v", preview, repo.saved)
+	if len(repo.capabilities) != 0 || preview.Rows[0].Capability.UserID != "u1" || preview.Rows[0].Capability.ResourceID == "" {
+		t.Fatalf("unexpected preview=%+v writes=%v", preview, repo.capabilities)
 	}
+	// 人员目录在确认前失效时，确认不得绕过目录写入台账（预览标红 + 整批拒绝）。
 	s.Personnel = importPersonnelDirectory{fail: true}
-	result, err := s.ImportCapabilities(context.Background(), p, []domain.Capability{preview.Rows[0].Capability})
-	if err != nil || result.Imported != 0 || result.Skipped != 1 || len(repo.saved) != 0 {
-		t.Fatalf("confirmation bypassed directory: %+v %v", result, err)
+	rejected, err := s.PreviewCapabilityImport(context.Background(), p, inputs)
+	if err != nil || rejected.Valid != 0 || !strings.Contains(strings.Join(rejected.Rows[0].Errors, "；"), "人员目录") {
+		t.Fatalf("preview must re-check the personnel directory: %+v %v", rejected, err)
+	}
+	hash := ImportRequestHash(ImportOperationCapability, ImportContentHash([]byte("people.csv")), "PERSON", []int{2})
+	if _, err := s.ConfirmCapabilityImport(context.Background(), p, "pm-import-0001", hash, rejected.Rows, []int{2}); !errors.Is(err, ErrValidation) || len(repo.capabilities) != 0 {
+		t.Fatalf("confirmation bypassed directory: %v writes=%+v", err, repo.capabilities)
 	}
 }
 func TestCapabilityImportPreviewFailsAmbiguousDuplicateAndDisabledCodes(t *testing.T) {

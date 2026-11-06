@@ -7,12 +7,16 @@ import (
 	"strings"
 )
 
+// rollbackKindAllowed 判断当前服务项是否允许申请或批准指定回退。
+// 参数：kind 为回退类型，item 为当前服务项状态快照。
+// 返回值：满足现场或报告回退白名单时返回 true，否则返回 false。
 func rollbackKindAllowed(kind string, item domain.ServiceItem) bool {
 	switch kind {
 	case "FIELD_TO_PREPARATION":
 		return item.Status == "实施中"
 	case "REPORT_TO_FIELD":
-		return item.Status == "现场实施完成" && (item.ReportStatus == "COMPILING" || item.ReportStatus == "REVIEWED")
+		return item.Status == "现场实施完成" &&
+			(item.ReportStatus == "RECTIFYING" || item.ReportStatus == "COMPILING" || item.ReportStatus == "REVIEWED")
 	default:
 		return false
 	}

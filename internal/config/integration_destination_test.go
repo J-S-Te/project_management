@@ -105,6 +105,8 @@ func TestLoadResolvesAuditRequiredAndProduction(t *testing.T) {
 	t.Setenv("PROJECT_AUDIT_REQUIRED", "")
 	t.Setenv("PLATFORM_AUDIT_REQUIRED", "")
 	t.Setenv("APP_ENV", "production")
+	// C13：生产环境要求显式关闭内嵌后台，独立 project-sla-notifier 承担标准后台。
+	t.Setenv("PROJECT_RUN_WORKER_WITH_API", "false")
 
 	cfg, err := Load()
 	if err != nil {
@@ -119,6 +121,7 @@ func TestLoadResolvesAuditRequiredAndProduction(t *testing.T) {
 	t.Setenv("PLATFORM_ENVIRONMENT_CODE", "prod")
 	t.Setenv("PROJECT_AUDIT_REQUIRED", "false")
 	t.Setenv("PLATFORM_AUDIT_REQUIRED", "")
+	t.Setenv("PROJECT_RUN_WORKER_WITH_API", "false")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -159,6 +162,7 @@ func TestLoadNotificationDestinationGrading(t *testing.T) {
 
 	setValidEnvironment(t)
 	t.Setenv("APP_ENV", "production")
+	t.Setenv("PROJECT_RUN_WORKER_WITH_API", "false")
 	t.Setenv("NOTIFICATION_ENABLED", "true")
 	t.Setenv("PLATFORM_NOTIFICATION_URL", "")
 	t.Setenv("PLATFORM_NOTIFICATION_CLIENT_ID", "")

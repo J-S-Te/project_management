@@ -14,6 +14,7 @@ x-project-environment: &project-environment
     OIDC_BACKCHANNEL_BASE_URL: ${PROJECT_OIDC_BACKCHANNEL_BASE_URL:-http://keycloak:8080}
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
+    PROJECT_BACKGROUND_ENGINE: ${PROJECT_BACKGROUND_ENGINE:-temporal}
     # 不可变 Build 从 runtime env_file 读取，避免空宿主插值覆盖有效配置。
     PROJECT_RUN_WORKER_WITH_API: "false"
     GIN_MODE: release
