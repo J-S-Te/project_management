@@ -270,3 +270,23 @@ func TestControlRejectsForeignOrUnsafeSocket(t *testing.T) {
 		t.Fatal("unsafe operation ID accepted")
 	}
 }
+
+// B2：control server 的 Serve goroutine 必须在 Stop 返回前 join，
+// 否则退出时仍有 socket handler 在跑（在途请求与派生事件都可能被截断）。
+func TestStopJoinsControlServerGoroutine(t *testing.T) {
+	r, _, _ := testRuntime(t)
+	if e := r.Start(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if r.serveDone == nil {
+		t.Fatal("control server goroutine is not tracked")
+	}
+	if e := r.Stop(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-r.serveDone:
+	default:
+		t.Fatal("Stop returned before the control server goroutine exited")
+	}
+}

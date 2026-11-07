@@ -19,6 +19,7 @@ import (
 	store "github.com/j-s-te/project-management/internal/infrastructure/mysql"
 	"github.com/j-s-te/project-management/internal/migration"
 	"github.com/j-s-te/project-management/internal/platform"
+	"github.com/j-s-te/project-management/internal/shutdown"
 	"github.com/j-s-te/project-management/internal/temporalworker"
 	"github.com/j-s-te/project-management/migrations"
 )
@@ -34,6 +35,10 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
+	// B2：后台 goroutine 用独立生命周期上下文，收到停机信号后取消并按预算 join。
+	lifeCtx, lifeCancel := context.WithCancel(ctx)
+	defer lifeCancel()
+	group := shutdown.NewGroup()
 	licenseCtx, licenseStop := context.WithCancel(ctx)
 	defer licenseStop()
 	commercialGate, err := bootstrap.OpenCommercialLicense(licenseCtx, logger)
@@ -42,10 +47,12 @@ func main() {
 		os.Exit(1)
 	}
 	metrics := temporalworker.NewMetricsRegistry()
-	if err := temporalworker.StartMetricsServer(ctx, cfg.TemporalMetricsAddress, metrics, logger); err != nil {
+	metricsServer, err := temporalworker.StartMetricsServer(lifeCtx, cfg.TemporalMetricsAddress, metrics, logger)
+	if err != nil {
 		logger.Error("start Temporal metrics server", "error", err)
 		os.Exit(1)
 	}
+	group.Go("temporal-metrics-server", func() { <-metricsServer.Done() })
 	db, err := bootstrap.OpenDatabase(ctx, cfg.MySQLDSN)
 	if err != nil {
 		logger.Error("database failed", "error", err)
@@ -65,7 +72,13 @@ func main() {
 			Reporter: audit, WorkerID: "project-api-audit", Poll: 2 * time.Second, BatchSize: 50,
 			MaxAttempts: 20, MaxBackoff: 5 * time.Minute, Logger: logger,
 		}
-		go auditDispatcher.Run(ctx)
+		// B2：dispatcher 挂在生命周期上下文上，退出时被有界 join，而不是随进程消失。
+		group.Go("audit-outbox-dispatcher", func() { auditDispatcher.Run(lifeCtx) })
+		// C2：同进程私有指标端口（:9092）暴露审计 outbox 积压，读的仍是现有 prj_audit_outbox。
+		backlogCollector := &temporalworker.OutboxBacklogCollector{
+			Source: auditOutboxBacklog{store: auditStore}, Registry: metrics, Logger: logger,
+		}
+		group.Go("audit-outbox-backlog-collector", func() { backlogCollector.Run(lifeCtx) })
 	}
 	identity, err := platform.NewOIDCAuthenticator(startupCtx, platform.OIDCOptions{CentralSessionEnabled: cfg.CentralSessionEnabled, CentralSessionPublicBaseURL: cfg.CentralSessionPublicBaseURL, Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL, PlatformBaseURL: cfg.PlatformBaseURL, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, IdentityProviderHint: cfg.OIDCIDPHint, RedirectURI: cfg.OIDCRedirectURI, PostLogoutRedirectURI: cfg.OIDCPostLogoutRedirectURI, TenantID: cfg.OIDCTenantID, ApplicationCode: cfg.PlatformApplicationCode, EnvironmentCode: cfg.PlatformEnvironmentCode, SessionCookieName: cfg.OIDCSessionCookieName, SessionIdleTTL: cfg.OIDCSessionIdleTTL, SessionAbsoluteTTL: cfg.OIDCSessionAbsoluteTTL, AuthorizationRefreshInterval: cfg.OIDCAuthorizationRefresh, AuthorizationMaxStale: cfg.OIDCAuthorizationMaxStale, AuthorizationTimeout: cfg.OIDCAuthorizationTimeout, SessionSecure: cfg.OIDCSessionSecure, PathPrefix: cfg.AppPathPrefix, Audit: audit}, platform.NewGORMOIDCStore(db), cfg.OIDCSessionEncryptionKey)
 	if err != nil {
@@ -280,10 +293,16 @@ func main() {
 	// 若 SIGTERM 直接断连，缓冲中的响应与在途审计上报都会丢失。
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stopSignals()
-	if err := serveWithGracefulShutdown(server, shutdownCtx.Done(), logger); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server stopped", "error", err)
+	serveErr := serveWithGracefulShutdown(server, shutdownCtx.Done(), logger)
+	// B2：HTTP 排空之后取消后台上下文并按预算 join；超预算点名并非零退出。
+	if drainErr := drainRuntime(ctx, lifeCancel, group, shutdown.Budget(), logger); drainErr != nil {
 		os.Exit(1)
 	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		logger.Error("server stopped", "error", serveErr)
+		os.Exit(1)
+	}
+	logger.Info("project management API stopped", "background_goroutines", group.Names())
 }
 
 // serverShutdownTimeout 是收到信号后排空在途请求的上限：超过即强制退出，
@@ -315,4 +334,30 @@ func readinessCapabilityState(enabled bool) string {
 		return "ready"
 	}
 	return "disabled"
+}
+
+// drainRuntime 取消后台生命周期上下文，并在预算内 join 全部后台 goroutine。
+// 参数：ctx 为父上下文；cancel 取消后台循环；group 为 goroutine 登记表；
+// budget 为 join 预算；logger 用于记录点名日志。
+// 返回值：全部 join 成功为 nil；预算耗尽时返回点名错误（调用方据此非零退出）。
+func drainRuntime(ctx context.Context, cancel context.CancelFunc, group *shutdown.Group, budget time.Duration, logger *slog.Logger) error {
+	if cancel != nil {
+		cancel()
+	}
+	drainCtx, stop := context.WithTimeout(ctx, budget)
+	defer stop()
+	if err := group.Drain(drainCtx); err != nil {
+		logger.Error("shutdown drain exceeded budget", "error_code", "SHUTDOWN_DRAIN_DEADLINE", "error", err.Error(), "budget", budget.String())
+		return err
+	}
+	return nil
+}
+
+// auditOutboxBacklog 把 auditoutbox.GORMStore 的积压快照适配成指标采集器需要的形状。
+type auditOutboxBacklog struct{ store *auditoutbox.GORMStore }
+
+// CountBacklog 读取审计 outbox 积压；查询失败原样返回，由采集器标记为“未知”。
+func (source auditOutboxBacklog) CountBacklog(ctx context.Context) (temporalworker.OutboxBacklog, error) {
+	counts, err := source.store.CountBacklog(ctx)
+	return temporalworker.OutboxBacklog{Pending: counts.Pending, Dead: counts.Dead}, err
 }
