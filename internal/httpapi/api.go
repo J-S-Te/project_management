@@ -132,6 +132,15 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		state := "ready"
 		degraded := make([]string, 0, 2)
 		body := map[string]any{"status": state, "audit": auditStatus, "pending_migrations": pendingMigrations}
+		// B4：审计 Outbox 投递器的启动状态必须可观测。投递循环只在审计发布器
+		// 配置完整时启动（见 cmd/api/main.go），配置缺失时事务审计仍写入
+		// prj_audit_outbox 却永不投递。这里只表达启动事实，不在探针里做重查询。
+		auditOutboxDispatcher := "disabled"
+		if integrationDestinations.AuditConfigured {
+			auditOutboxDispatcher = "running"
+		}
+		body["audit_outbox_dispatcher"] = auditOutboxDispatcher
+		body["audit_outbox_required"] = integrationDestinations.AuditRequired
 		if explicitIntegrationStatus {
 			body["integrations"] = map[string]any{
 				"audit":        map[string]any{"required": integrationDestinations.AuditRequired, "configured": integrationDestinations.AuditConfigured},
@@ -159,6 +168,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 			}
 			degraded = append(degraded, "PLATFORM_NOTIFICATION")
 		}
+		// 审计可选但发布器未配置时（!required && disabled）不改变整体就绪结论：
+		// 该降级由上面新增的 audit_outbox_dispatcher=disabled + audit_outbox_required=false
+		// 两个字段表达，不新造状态值、也不新增 503。
 		if len(degraded) > 0 && explicitIntegrationStatus {
 			body["degraded_destinations"] = degraded
 		}
@@ -925,7 +937,7 @@ func (h *Handler) dashboard(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listProjects(c *gin.Context) {
-	page, pageSize, err := pageParams(c)
+	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
@@ -935,23 +947,29 @@ func (h *Handler) listProjects(c *gin.Context) {
 	// application.normalizeReportStageFilter）。两个筛选 AND 组合，共用同一个聚合 join。
 	items, total, err := h.service.ListProjectsPage(c.Request.Context(), principal(c), domain.ProjectListQuery{
 		Keyword: c.Query("q"), Status: c.Query("status"), ReportStage: c.Query("report_stage"),
-		Page: page, PageSize: pageSize,
+		Page: query.Page, PageSize: query.PageSize,
 	})
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writePage(c, items, total, page, pageSize)
+	writePage(c, items, total, query)
 }
 func (h *Handler) monitorProjects(c *gin.Context) {
-	page, pageSize, err := pageParams(c)
+	page, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
 	}
+	// 监控快照不是列表快照入口：all 模式只给项目/服务项/设备列表使用，
+	// 这里显式拒绝而不是把 500 行悄悄降级成监控自己的单页上限。
+	if page.All {
+		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "监控快照不支持 all 参数")
+		return
+	}
 	truthy := func(value string) bool { return value == "1" || strings.EqualFold(value, "true") }
 	result, err := h.service.MonitorProjects(c.Request.Context(), principal(c), domain.ProjectMonitoringQuery{
-		Page: page, PageSize: pageSize, Keyword: c.Query("q"), Status: c.Query("status"), ReportStage: c.Query("report_stage"),
+		Page: page.Page, PageSize: page.PageSize, Keyword: c.Query("q"), Status: c.Query("status"), ReportStage: c.Query("report_stage"),
 		Customer: c.Query("customer"), Category: c.Query("category"), Team: c.Query("team"),
 		ProjectManagerID: c.Query("project_manager_id"), RiskOnly: truthy(c.Query("risk")),
 		SLAOnly: truthy(c.Query("sla")), ConflictOnly: truthy(c.Query("conflict")),
@@ -1187,17 +1205,17 @@ func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string)
 	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
-	page, pageSize, err := pageParams(c)
+	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
 	}
-	items, total, err := h.service.ListServiceItemsPage(c.Request.Context(), principal(c), c.Query("project_id"), page, pageSize)
+	items, total, err := h.service.ListServiceItemsPage(c.Request.Context(), principal(c), c.Query("project_id"), query.Page, query.PageSize)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
-	writePage(c, items, total, page, pageSize)
+	writePage(c, items, total, query)
 }
 
 func (h *Handler) listReportRevisions(c *gin.Context) {
@@ -1419,56 +1437,128 @@ func (h *Handler) resolvePersonnelNames(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]any{"names": names})
 }
 
-// maximumPageSize 是列表接口单页上限，避免客户端用超大 page_size 拉爆响应。
-const maximumPageSize = 200
+// 列表接口的分页边界（安全审查 F1：不允许"省略 page_size 即返回全部行"）：
+// 省略 page_size 时按默认行数返回；page_size 上限保持 200；page 过界直接 422，
+// 不静默回退到第一页。显式 all 快照模式只给工作区快照使用，另有独立上限。
+const (
+	// defaultPageSize 是省略 page_size 时的默认单页行数。
+	defaultPageSize = 20
+	// maximumPageSize 是列表接口单页上限，避免客户端用超大 page_size 拉爆响应。
+	maximumPageSize = 200
+	// maximumPageNumber 是 page 上限，防止超大页码把偏移量算成天文数字。
+	maximumPageNumber = 100000
+	// maximumSnapshotRows 是 all 快照模式单次返回的行数上限；超出部分靠 truncated 提示。
+	maximumSnapshotRows = 500
+)
 
-// PageEnvelope 是列表接口的统一分页响应。page_size<=0 表示不分页（返回全部行），
-// 这与"下拉数据源需要完整集合"的既有语义一致；显式分页时返回 total 供前端渲染分页控件。
+// PageEnvelope 是列表接口的统一分页响应。items 为本页行、total 为过滤后的总数，
+// 显式分页时返回 page/page_size 供前端渲染分页控件。
+//
+// truncated 只在 all 快照模式下可能为 true：它表示 total（过滤后总数）大于本次
+// 实际返回的 items 行数，调用方拿到的是被 maximumSnapshotRows 截断的不完整集合。
+// 普通分页永远为 false：分页语义下"本页少于 total"是正常现象，不是截断。
 type PageEnvelope struct {
-	Items    any `json:"items"`
-	Total    int `json:"total"`
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
+	Items     any  `json:"items"`
+	Total     int  `json:"total"`
+	Page      int  `json:"page"`
+	PageSize  int  `json:"page_size"`
+	Truncated bool `json:"truncated"`
 }
 
-// pageParams 解析可选的分页参数；未提供时返回 0，表示不分页。
-func pageParams(c *gin.Context) (int, int, error) {
-	page, err := optionalPositiveInt(c.Query("page"))
+// pageQuery 是一次列表请求解析后的分页/快照参数。All 为 true 时表示显式快照模式：
+// Page/PageSize 由服务端固定为第一页与 maximumSnapshotRows，调用方传入的
+// page/page_size 已被拒绝（语义歧义直接 422，不静默忽略）。
+type pageQuery struct {
+	Page     int
+	PageSize int
+	All      bool
+}
+
+// pageParams 解析列表接口的分页参数。
+//
+// 契约：
+//   - 省略 page → 1；省略 page_size → defaultPageSize（20），不再等于全量返回；
+//   - page/page_size 必须是正整数，page_size 收敛到 maximumPageSize，page 超过
+//     maximumPageNumber 直接校验错误（422），不静默回退；
+//   - all 只接受 "1"/"true"（大小写不敏感），其他非空值一律校验错误；
+//   - all 模式与 page/page_size 互斥：同时出现即校验错误，避免"到底按哪个生效"的歧义。
+func pageParams(c *gin.Context) (pageQuery, error) {
+	all, err := parseSnapshotFlag(c.Query("all"))
 	if err != nil {
-		return 0, 0, err
+		return pageQuery{}, err
 	}
-	pageSize, err := optionalPositiveInt(c.Query("page_size"))
+	rawPage, rawPageSize := c.Query("page"), c.Query("page_size")
+	if all {
+		if rawPage != "" || rawPageSize != "" {
+			return pageQuery{}, application.ErrValidation
+		}
+		return pageQuery{Page: 1, PageSize: maximumSnapshotRows, All: true}, nil
+	}
+	page, err := optionalPositiveInt(rawPage)
 	if err != nil {
-		return 0, 0, err
+		return pageQuery{}, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if page > maximumPageNumber {
+		return pageQuery{}, application.ErrValidation
+	}
+	pageSize, err := optionalPositiveInt(rawPageSize)
+	if err != nil {
+		return pageQuery{}, err
+	}
+	if pageSize <= 0 {
+		pageSize = defaultPageSize
 	}
 	if pageSize > maximumPageSize {
 		pageSize = maximumPageSize
 	}
-	return page, pageSize, nil
+	return pageQuery{Page: page, PageSize: pageSize}, nil
+}
+
+// parseSnapshotFlag 解析 all 快照开关：空串表示关闭，只接受 "1"/"true"（忽略大小写
+// 与首尾空白）。"all=0"/"all=yes" 这类含糊输入必须报错，不能被默默当成某一种语义。
+func parseSnapshotFlag(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	default:
+		return false, application.ErrValidation
+	}
 }
 
 // writePage 输出统一分页响应。项目与服务项列表的分页与计数已下推仓储层
 // （SQL COUNT + LIMIT/OFFSET，AUD-2026-028），items 即本页数据、total 为过滤后的
 // 总数；派生状态筛选由 SQL 与 Go 侧同一口径完成，这里不再二次切片。
-// 未分页（page_size<=0）时返回全部行，与"下拉数据源需要完整集合"的既有语义一致。
-func writePage[T any](c *gin.Context, items []T, total, page, pageSize int) {
-	if pageSize <= 0 {
-		// 不分页时返回的就是全部行，总数以实际切片长度为准。
-		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: len(items), Page: 1, PageSize: len(items)})
-		return
-	}
+//
+// page_size<=0 不会被 pageParams 产出，仅作防御：按默认单页行数回显，绝不把
+// "参数缺失"翻译成"返回全部行"。all 快照模式下 page/page_size 回显服务端实际生效值
+// （1 / maximumSnapshotRows），truncated 说明返回集合是否被上限截断。
+func writePage[T any](c *gin.Context, items []T, total int, query pageQuery) {
+	page := query.Page
 	if page <= 0 {
 		page = 1
 	}
-	writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: total, Page: page, PageSize: pageSize})
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = defaultPageSize
+	}
+	writeData(c, http.StatusOK, PageEnvelope{
+		Items: items, Total: total, Page: page, PageSize: pageSize,
+		Truncated: query.All && total > len(items),
+	})
 }
 
 // pageSlice 在内存中对全量切片分页（仅限尚未下推分页的列表，如设备台账），
-// 语义与历史 writePage 切片完全一致：page 归位到 1，越界页返回空切片。
+// 语义与 writePage 一致：page 归位到 1，越界页返回空切片。
+// pageSize<=0 只作防御，按默认单页行数处理，与 writePage 一样不再表示"返回全部行"。
 func pageSlice[T any](items []T, page, pageSize int) ([]T, int) {
 	total := len(items)
 	if pageSize <= 0 {
-		return items, total
+		pageSize = defaultPageSize
 	}
 	if page <= 0 {
 		page = 1
@@ -1841,7 +1931,7 @@ func (h *Handler) listEquipmentReservations(c *gin.Context) {
 }
 
 func (h *Handler) listEquipment(c *gin.Context) {
-	page, pageSize, err := pageParams(c)
+	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
 		return
@@ -1851,9 +1941,10 @@ func (h *Handler) listEquipment(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	// 设备列表尚未下推分页，仍在内存中按既有切片语义分页。
-	items, total := pageSlice(items, page, pageSize)
-	writePage(c, items, total, page, pageSize)
+	// 设备列表尚未下推分页，仍在内存中按既有切片语义分页；all 快照模式与
+	// 项目/服务项一致地只取前 maximumSnapshotRows 行，由 truncated 标出截断。
+	items, total := pageSlice(items, query.Page, query.PageSize)
+	writePage(c, items, total, query)
 }
 func (h *Handler) upsertEquipment(c *gin.Context) {
 	var input domain.Capability

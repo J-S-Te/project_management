@@ -1526,8 +1526,9 @@ func TestReadinessFailsWhenRequiredAuditIsDisabled(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d, want %d; body=%s", response.Code, http.StatusServiceUnavailable, response.Body.String())
 	}
+	// data 中除字符串字段外还有布尔型 audit_outbox_required，按 any 解析。
 	var payload struct {
-		Data map[string]string `json:"data"`
+		Data map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -1950,13 +1951,14 @@ func TestProjectListPaginationEnvelope(t *testing.T) {
 		t.Fatalf("second page must carry the second row, got %s", page.Data.Items[0].ID)
 	}
 
-	// 未指定 page_size 时不截断，保持"完整集合"语义。
+	// 未指定 page_size 时按默认单页行数（20）返回，不再退化成"返回全部行"
+	// （安全审查 F1）。行数少于默认值时仍然返回全部行，total 反映过滤后总数。
 	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if page.Data.Total != 3 || len(page.Data.Items) != 3 {
-		t.Fatalf("unpaginated list must return everything: %+v", page.Data)
+	if page.Data.Total != 3 || len(page.Data.Items) != 3 || page.Data.PageSize != 20 || page.Data.Page != 1 {
+		t.Fatalf("omitted page_size must use the default page size: %+v", page.Data)
 	}
 
 	// 分页参数非法时明确报错，而不是静默返回第一页。
