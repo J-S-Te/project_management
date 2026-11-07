@@ -937,6 +937,7 @@ func (h *Handler) dashboard(c *gin.Context) {
 	writeData(c, http.StatusOK, item)
 }
 func (h *Handler) listProjects(c *gin.Context) {
+	// 分页必须由调用方显式传正数 page_size；省略即返回全部行（既有契约，P0 回退）。
 	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
@@ -1205,6 +1206,7 @@ func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string)
 	writeData(c, code, map[string]string{"status": project.Status})
 }
 func (h *Handler) listServiceItems(c *gin.Context) {
+	// 与 /projects 同一契约：省略 page_size 返回全部服务项，显式正数才分页。
 	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
@@ -1437,15 +1439,18 @@ func (h *Handler) resolvePersonnelNames(c *gin.Context) {
 	writeData(c, http.StatusOK, map[string]any{"names": names})
 }
 
-// 列表接口的分页边界（安全审查 F1：不允许"省略 page_size 即返回全部行"）：
-// 省略 page_size 时按默认行数返回；page_size 上限保持 200；page 过界直接 422，
-// 不静默回退到第一页。显式 all 快照模式只给工作区快照使用，另有独立上限。
+// 列表接口的分页边界。
+//
+// 默认不分页（P0 契约回退）：省略 page_size、或显式传 <=0 的 page_size 时返回全部行，
+// 这是项目/服务项/设备列表的既有契约——前端（含 assignment.js 的二次读回）仍按
+// "不传 page_size 即完整集合"调用，默认收敛成 20 行会让三个列表静默截断、二次读回
+// 误报 409。分页只在调用方显式传正数 page_size 时才生效。
+// 显式 all 快照模式独立保留，另有上限；它与 page/page_size 互斥。
 const (
-	// defaultPageSize 是省略 page_size 时的默认单页行数。
-	defaultPageSize = 20
-	// maximumPageSize 是列表接口单页上限，避免客户端用超大 page_size 拉爆响应。
+	// maximumPageSize 是显式分页时的单页上限，避免客户端用超大 page_size 拉爆响应。
 	maximumPageSize = 200
-	// maximumPageNumber 是 page 上限，防止超大页码把偏移量算成天文数字。
+	// maximumPageNumber 是显式分页时的 page 上限，防止超大页码把偏移量算成天文数字。
+	// 不分页时 page 无意义，不做该校验（与回退前的历史行为一致）。
 	maximumPageNumber = 100000
 	// maximumSnapshotRows 是 all 快照模式单次返回的行数上限；超出部分靠 truncated 提示。
 	maximumSnapshotRows = 500
@@ -1454,9 +1459,12 @@ const (
 // PageEnvelope 是列表接口的统一分页响应。items 为本页行、total 为过滤后的总数，
 // 显式分页时返回 page/page_size 供前端渲染分页控件。
 //
+// 未分页（未传或传 <=0 的 page_size）时 items 就是完整集合，envelope 沿用改动前的
+// 兼容语义：page=1、page_size=len(items)、total=len(items)。
+//
 // truncated 只在 all 快照模式下可能为 true：它表示 total（过滤后总数）大于本次
 // 实际返回的 items 行数，调用方拿到的是被 maximumSnapshotRows 截断的不完整集合。
-// 普通分页永远为 false：分页语义下"本页少于 total"是正常现象，不是截断。
+// 普通分页与全量返回永远为 false：分页语义下"本页少于 total"是正常现象，不是截断。
 type PageEnvelope struct {
 	Items     any  `json:"items"`
 	Total     int  `json:"total"`
@@ -1465,9 +1473,12 @@ type PageEnvelope struct {
 	Truncated bool `json:"truncated"`
 }
 
-// pageQuery 是一次列表请求解析后的分页/快照参数。All 为 true 时表示显式快照模式：
-// Page/PageSize 由服务端固定为第一页与 maximumSnapshotRows，调用方传入的
-// page/page_size 已被拒绝（语义歧义直接 422，不静默忽略）。
+// pageQuery 是一次列表请求解析后的分页/快照参数。
+//
+// PageSize<=0 表示不分页（返回全部行），此时 Page 归一化为 1 且不参与切片。
+// All 为 true 时表示显式快照模式：Page/PageSize 由服务端固定为第一页与
+// maximumSnapshotRows，调用方传入的 page/page_size 已被拒绝（语义歧义直接 422，
+// 不静默忽略）。
 type pageQuery struct {
 	Page     int
 	PageSize int
@@ -1477,9 +1488,12 @@ type pageQuery struct {
 // pageParams 解析列表接口的分页参数。
 //
 // 契约：
-//   - 省略 page → 1；省略 page_size → defaultPageSize（20），不再等于全量返回；
-//   - page/page_size 必须是正整数，page_size 收敛到 maximumPageSize，page 超过
-//     maximumPageNumber 直接校验错误（422），不静默回退；
+//   - 省略 page_size（或显式传 0/负数）→ 不分页，PageSize=0，调用方返回全部行；
+//     这是前端与下拉数据源依赖的既有语义，分页必须显式传正数才生效；
+//   - 省略 page → 1；page 必须是正整数，page 超过 maximumPageNumber 只在
+//     显式分页时校验（422），不分页时 page 无意义；
+//   - 显式正数 page_size 收敛到 maximumPageSize；
+//   - page_size 非数字一律 422，不把明显写错的请求悄悄当成"返回全部"；
 //   - all 只接受 "1"/"true"（大小写不敏感），其他非空值一律校验错误；
 //   - all 模式与 page/page_size 互斥：同时出现即校验错误，避免"到底按哪个生效"的歧义。
 func pageParams(c *gin.Context) (pageQuery, error) {
@@ -1498,23 +1512,42 @@ func pageParams(c *gin.Context) (pageQuery, error) {
 	if err != nil {
 		return pageQuery{}, err
 	}
+	pageSize, err := optionalPageSize(rawPageSize)
+	if err != nil {
+		return pageQuery{}, err
+	}
+	if pageSize <= 0 {
+		// 不分页：page 不参与切片，归一化为 1，也不做 page 上界校验。
+		return pageQuery{Page: 1}, nil
+	}
 	if page <= 0 {
 		page = 1
 	}
 	if page > maximumPageNumber {
 		return pageQuery{}, application.ErrValidation
 	}
-	pageSize, err := optionalPositiveInt(rawPageSize)
-	if err != nil {
-		return pageQuery{}, err
-	}
-	if pageSize <= 0 {
-		pageSize = defaultPageSize
-	}
 	if pageSize > maximumPageSize {
 		pageSize = maximumPageSize
 	}
 	return pageQuery{Page: page, PageSize: pageSize}, nil
+}
+
+// optionalPageSize 解析 page_size：缺省、空白或 <=0 都表示"不分页/返回全部行"，
+// 返回 0；非数字仍然返回校验错误（422）。与 optionalPositiveInt 的差别只在
+// "0 与负数不是错误"——页面大小的 0 在本接口是既有的"不分页"信号。
+func optionalPageSize(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, application.ErrValidation
+	}
+	if parsed <= 0 {
+		return 0, nil
+	}
+	return parsed, nil
 }
 
 // parseSnapshotFlag 解析 all 快照开关：空串表示关闭，只接受 "1"/"true"（忽略大小写
@@ -1534,31 +1567,33 @@ func parseSnapshotFlag(value string) (bool, error) {
 // （SQL COUNT + LIMIT/OFFSET，AUD-2026-028），items 即本页数据、total 为过滤后的
 // 总数；派生状态筛选由 SQL 与 Go 侧同一口径完成，这里不再二次切片。
 //
-// page_size<=0 不会被 pageParams 产出，仅作防御：按默认单页行数回显，绝不把
-// "参数缺失"翻译成"返回全部行"。all 快照模式下 page/page_size 回显服务端实际生效值
-// （1 / maximumSnapshotRows），truncated 说明返回集合是否被上限截断。
+// page_size<=0 表示不分页：items 即完整集合，envelope 沿用回退前的兼容语义
+// （page=1、page_size=len(items)、total=len(items)），truncated 恒为 false。
+// all 快照模式下 page/page_size 回显服务端实际生效值（1 / maximumSnapshotRows），
+// truncated 说明返回集合是否被上限截断。
 func writePage[T any](c *gin.Context, items []T, total int, query pageQuery) {
+	if query.PageSize <= 0 {
+		// 不分页时返回的就是全部行，总数以实际切片长度为准，与回退前一致。
+		writeData(c, http.StatusOK, PageEnvelope{Items: items, Total: len(items), Page: 1, PageSize: len(items)})
+		return
+	}
 	page := query.Page
 	if page <= 0 {
 		page = 1
 	}
-	pageSize := query.PageSize
-	if pageSize <= 0 {
-		pageSize = defaultPageSize
-	}
 	writeData(c, http.StatusOK, PageEnvelope{
-		Items: items, Total: total, Page: page, PageSize: pageSize,
+		Items: items, Total: total, Page: page, PageSize: query.PageSize,
 		Truncated: query.All && total > len(items),
 	})
 }
 
 // pageSlice 在内存中对全量切片分页（仅限尚未下推分页的列表，如设备台账），
-// 语义与 writePage 一致：page 归位到 1，越界页返回空切片。
-// pageSize<=0 只作防御，按默认单页行数处理，与 writePage 一样不再表示"返回全部行"。
+// 语义与 writePage 一致：pageSize<=0 表示不分页、原样返回全部行；page 归位到 1，
+// 越界页返回空切片。
 func pageSlice[T any](items []T, page, pageSize int) ([]T, int) {
 	total := len(items)
 	if pageSize <= 0 {
-		pageSize = defaultPageSize
+		return items, total
 	}
 	if page <= 0 {
 		page = 1
@@ -1941,8 +1976,9 @@ func (h *Handler) listEquipment(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	// 设备列表尚未下推分页，仍在内存中按既有切片语义分页；all 快照模式与
-	// 项目/服务项一致地只取前 maximumSnapshotRows 行，由 truncated 标出截断。
+	// 设备列表尚未下推分页，仍在内存中按既有切片语义分页：未显式传正数 page_size 时
+	// pageSlice 原样返回全部行（与回退前一致）；all 快照模式与项目/服务项一致地只取
+	// 前 maximumSnapshotRows 行，由 truncated 标出截断。
 	items, total := pageSlice(items, query.Page, query.PageSize)
 	writePage(c, items, total, query)
 }

@@ -1951,14 +1951,14 @@ func TestProjectListPaginationEnvelope(t *testing.T) {
 		t.Fatalf("second page must carry the second row, got %s", page.Data.Items[0].ID)
 	}
 
-	// 未指定 page_size 时按默认单页行数（20）返回，不再退化成"返回全部行"
-	// （安全审查 F1）。行数少于默认值时仍然返回全部行，total 反映过滤后总数。
+	// 未指定 page_size 时返回全部行（P0 回退：前端仍按旧契约调用，默认 20 行会让
+	// 列表静默截断）；envelope 回显 page=1、page_size=实际行数。
 	response = perform(handler, http.MethodGet, "/api/v1/projects", "")
 	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if page.Data.Total != 3 || len(page.Data.Items) != 3 || page.Data.PageSize != 20 || page.Data.Page != 1 {
-		t.Fatalf("omitted page_size must use the default page size: %+v", page.Data)
+	if page.Data.Total != 3 || len(page.Data.Items) != 3 || page.Data.PageSize != 3 || page.Data.Page != 1 {
+		t.Fatalf("omitted page_size must return everything: %+v", page.Data)
 	}
 
 	// 分页参数非法时明确报错，而不是静默返回第一页。

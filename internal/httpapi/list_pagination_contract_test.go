@@ -14,10 +14,13 @@ import (
 	"github.com/j-s-te/project-management/internal/platform"
 )
 
-// 安全审查 F1：项目/服务项/设备三个列表端点曾经在省略 page_size 时返回全部行。
-// 本文件用 httptest + 假仓储固定修复后的 HTTP 契约（不连数据库）：
-//   - 省略 page_size → 默认 20 行；page 缺省 1；page_size 上限 200；page 上限 100000；
-//   - 非法分页参数 422，不静默回退；
+// 列表分页契约（P0 回退后）：项目/服务项/设备三个列表端点在省略 page_size 时
+// 必须返回全部行（前端与下拉数据源依赖的既有语义），分页只在显式传正数 page_size
+// 时生效。本文件用 httptest + 假仓储固定该 HTTP 契约（不连数据库）：
+//   - 省略（或 0/负数）page_size → 返回全部行，envelope 回显 page=1、
+//     page_size=len(items)、total=len(items)、truncated=false；
+//   - 显式正数 page_size → 分页生效，page_size 上限 200，page 上限 100000（仅分页时校验）；
+//   - page 非数字/非正数、page_size 非数字 → 422，不静默回退；
 //   - all=1/true → 最多 500 行，忽略分页参数与之互斥（同时传即 422）；
 //   - PageEnvelope.truncated 只在 all 模式且 total > len(items) 时为 true。
 
@@ -94,25 +97,35 @@ func decodeListPage(t *testing.T, response *httptest.ResponseRecorder) listPageB
 	return body.Data
 }
 
-// 省略 page_size 一律按默认 20 行返回，不再等于全量返回。
-func TestListEndpointsDefaultToBoundedPageSize(t *testing.T) {
+// 省略 page_size 必须返回全部行（P0 回退）：25 行的集合不能被静默截断成 20 行。
+func TestListEndpointsOmittedPageSizeReturnsEverything(t *testing.T) {
 	handler := boundedListHandler(t, &repo{
 		projects: seedProjects(25), items: seedServiceItems(25), capabilities: seedCapabilities(25),
 	})
 	for _, path := range boundedListPaths {
 		t.Run(path, func(t *testing.T) {
 			page := decodeListPage(t, perform(handler, http.MethodGet, path, ""))
-			if len(page.Items) != 20 {
-				t.Fatalf("omitted page_size must return the default page (20 rows), got %d", len(page.Items))
+			if len(page.Items) != 25 {
+				t.Fatalf("omitted page_size must return every row (25 rows), got %d", len(page.Items))
 			}
-			if page.Page != 1 || page.PageSize != 20 || page.Total != 25 || page.Truncated {
-				t.Fatalf("unexpected default envelope: %+v", page)
+			if page.Page != 1 || page.PageSize != 25 || page.Total != 25 || page.Truncated {
+				t.Fatalf("unexpected full-list envelope: %+v", page)
 			}
 
-			// page 缺省 1，显式 page 仍然生效且不改变单页行数上限。
+			// 只传 page 不传 page_size 仍然是"返回全部"：page 在未分页时无意义，
+			// 不能被当成"默认 20 行的第二页"（后者只会返回 5 行，等价于静默截断）。
 			page = decodeListPage(t, perform(handler, http.MethodGet, path+"?page=2", ""))
-			if len(page.Items) != 5 || page.Page != 2 || page.PageSize != 20 || page.Total != 25 {
-				t.Fatalf("second default page envelope: %+v", page)
+			if len(page.Items) != 25 || page.Page != 1 || page.PageSize != 25 || page.Total != 25 {
+				t.Fatalf("page without page_size must stay unpaged: %+v", page)
+			}
+
+			// page_size<=0 是既有的"不分页"信号，同样返回全部行；超大 page 在不分页时
+			// 也没有意义（不回退成默认单页，也不 422）。
+			for _, query := range []string{"page_size=0", "page_size=-5", "page=100001"} {
+				page = decodeListPage(t, perform(handler, http.MethodGet, path+"?"+query, ""))
+				if len(page.Items) != 25 || page.PageSize != 25 || page.Total != 25 {
+					t.Fatalf("%s must be unpaged: %+v", query, page)
+				}
 			}
 		})
 	}
@@ -124,11 +137,12 @@ func TestListEndpointsRejectOutOfContractPageParams(t *testing.T) {
 		projects: seedProjects(25), items: seedServiceItems(25), capabilities: seedCapabilities(25),
 	})
 	invalidQueries := []string{
-		"page_size=0",
-		"page_size=-5",
 		"page_size=abc",
 		"page=0",
-		"page=100001",
+		"page=-1",
+		"page=1.5",
+		// page 上界只在显式分页时校验：不分页时 page 无意义（见下一条用例）。
+		"page=100001&page_size=20",
 		"all=1&page=2",
 		"all=1&page_size=20",
 		"all=0",
