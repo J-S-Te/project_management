@@ -72,6 +72,18 @@ func main() {
 			Reporter: audit, WorkerID: "project-api-audit", Poll: 2 * time.Second, BatchSize: 50,
 			MaxAttempts: 20, MaxBackoff: 5 * time.Minute, Logger: logger,
 		}
+		// 已投递行清理默认关闭：被删除的是"只存在于本地"的已投递审计证据，
+		// 必须由运维显式配置 AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS 正数天才启用。
+		// 关闭时明确落一条日志，避免运维误以为历史行已在按 30 天滚动清理。
+		if retention := auditoutbox.DeliveredRetentionFromEnv(); retention > 0 {
+			logger.Info("audit outbox delivered-row cleanup enabled",
+				"table", "prj_audit_outbox", "cleanup", "enabled",
+				"retention_days", int(retention/(24*time.Hour)), "env", "AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS")
+		} else {
+			logger.Info("audit outbox delivered-row cleanup disabled (retention unset or <=0): delivered rows are kept indefinitely as local audit evidence",
+				"table", "prj_audit_outbox", "cleanup", "disabled",
+				"enable_with", "AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS=<positive days>")
+		}
 		// B2：dispatcher 挂在生命周期上下文上，退出时被有界 join，而不是随进程消失。
 		group.Go("audit-outbox-dispatcher", func() { auditDispatcher.Run(lifeCtx) })
 		// C2：同进程私有指标端口（:9092）暴露审计 outbox 积压，读的仍是现有 prj_audit_outbox。
@@ -79,6 +91,16 @@ func main() {
 			Source: auditOutboxBacklog{store: auditStore}, Registry: metrics, Logger: logger,
 		}
 		group.Go("audit-outbox-backlog-collector", func() { backlogCollector.Run(lifeCtx) })
+	} else {
+		// 审计发布器配置不完整时不会启动投递循环：事务内审计仍写入
+		// prj_audit_outbox，但没有任何循环把它送到平台，表会只增不减、
+		// 平台的项目审计也会静默缺失。保持既有"启动不 fail-fast"语义
+		// （是否必开由 PROJECT_AUDIT_REQUIRED/PLATFORM_AUDIT_REQUIRED 与
+		// /readyz 决定），但必须留下可检索的 WARN。
+		logger.Warn("audit outbox dispatcher not started: PLATFORM_AUDIT_CLIENT_ID/PLATFORM_AUDIT_CLIENT_SECRET/PLATFORM_APPLICATION_CODE/PLATFORM_ENVIRONMENT_CODE incomplete; rows written to prj_audit_outbox will never be delivered to the platform until the audit publisher is configured",
+			"table", "prj_audit_outbox", "dispatcher", "disabled",
+			"impact", "transactional audit events accumulate locally and are not visible on the platform",
+			"readyz_field", "audit_outbox_dispatcher")
 	}
 	identity, err := platform.NewOIDCAuthenticator(startupCtx, platform.OIDCOptions{CentralSessionEnabled: cfg.CentralSessionEnabled, CentralSessionPublicBaseURL: cfg.CentralSessionPublicBaseURL, Issuer: cfg.OIDCIssuer, BackchannelBaseURL: cfg.OIDCBackchannelBaseURL, PlatformBaseURL: cfg.PlatformBaseURL, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, IdentityProviderHint: cfg.OIDCIDPHint, RedirectURI: cfg.OIDCRedirectURI, PostLogoutRedirectURI: cfg.OIDCPostLogoutRedirectURI, TenantID: cfg.OIDCTenantID, ApplicationCode: cfg.PlatformApplicationCode, EnvironmentCode: cfg.PlatformEnvironmentCode, SessionCookieName: cfg.OIDCSessionCookieName, SessionIdleTTL: cfg.OIDCSessionIdleTTL, SessionAbsoluteTTL: cfg.OIDCSessionAbsoluteTTL, AuthorizationRefreshInterval: cfg.OIDCAuthorizationRefresh, AuthorizationMaxStale: cfg.OIDCAuthorizationMaxStale, AuthorizationTimeout: cfg.OIDCAuthorizationTimeout, SessionSecure: cfg.OIDCSessionSecure, PathPrefix: cfg.AppPathPrefix, Audit: audit}, platform.NewGORMOIDCStore(db), cfg.OIDCSessionEncryptionKey)
 	if err != nil {
