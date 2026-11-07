@@ -455,8 +455,8 @@ func TestEmbeddedMigrationVersionsRemainUniqueAndContiguous(t *testing.T) {
 		}
 		expected++
 	}
-	if expected != 44 {
-		t.Fatalf("migration count=%d want=43", expected-1)
+	if expected != 45 {
+		t.Fatalf("migration count=%d want=44", expected-1)
 	}
 }
 
@@ -495,5 +495,35 @@ func TestImportOperationMigrationKeepsIdempotencyAndReplayBoundaries(t *testing.
 	responseColumn := strings.Index(sql, "response_json LONGTEXT NOT NULL")
 	if uniqueKey < 0 || responseColumn < 0 || uniqueKey < responseColumn {
 		t.Fatal("unique key must be declared after the replay columns in the same table definition")
+	}
+}
+
+// TestAuditOutboxDeliveredIndexMigrationIsAdditiveAndIdempotent 固定已投递行清理索引的边界：
+// 索引列必须与 PurgeDelivered 的清理谓词同序（等值列在前、范围/排序列在后），
+// 迁移必须按 information_schema 判重入且只加索引，不改写任何历史行。
+// 参数：t 为测试上下文。
+// 返回值：无；缺少判重入结构或出现数据改写语句时失败。
+func TestAuditOutboxDeliveredIndexMigrationIsAdditiveAndIdempotent(t *testing.T) {
+	body, err := Files.ReadFile("000044_prj_audit_outbox_delivered_index.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"information_schema.STATISTICS",
+		"TABLE_NAME = 'prj_audit_outbox'",
+		"INDEX_NAME = 'idx_prj_audit_outbox_delivered'",
+		"ADD INDEX idx_prj_audit_outbox_delivered (delivery_status, delivered_at)",
+		"SIGNAL SQLSTATE '45000'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("delivered index migration missing %q", required)
+		}
+	}
+	upper := strings.ToUpper(sql)
+	for _, forbidden := range []string{"DELETE FROM", "UPDATE PRJ_AUDIT_OUTBOX", "DROP TABLE", "TRUNCATE", "DROP COLUMN"} {
+		if strings.Contains(upper, forbidden) {
+			t.Fatalf("delivered index migration must stay additive, found %q", forbidden)
+		}
 	}
 }

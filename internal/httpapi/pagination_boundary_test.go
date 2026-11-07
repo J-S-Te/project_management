@@ -9,8 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 安全审查 F1：列表接口省略 page_size 时曾经返回全部行。本文件固定修复后的边界语义：
-// 默认单页行数、参数上界、all 快照模式与 truncated 标记。
+// 列表接口的分页边界（P0 回退后）：省略 page_size（或传 <=0）时返回全部行，
+// 只有显式传正数 page_size 才分页；显式分页保留单页上限与 page 上限；
+// all 快照模式与 truncated 标记独立保留。
 // AUD-2026-028：分页下推后 writePage 只负责输出本页数据与总数。
 
 func newQueryContext(t *testing.T, rawQuery string) *gin.Context {
@@ -21,8 +22,9 @@ func newQueryContext(t *testing.T, rawQuery string) *gin.Context {
 	return context
 }
 
-// TestPageParamsBoundedDefaults 固定分页参数的解析契约：省略即默认 20 行，
-// page/page_size 有上界，all 快照模式固定 500 行且与分页参数互斥。
+// TestPageParamsBoundedDefaults 固定分页参数的解析契约：省略 page_size（或传 <=0）
+// 表示不分页（PageSize=0，返回全部行），显式正数才分页并受上界约束，
+// all 快照模式固定 500 行且与分页参数互斥。
 func TestPageParamsBoundedDefaults(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -30,17 +32,18 @@ func TestPageParamsBoundedDefaults(t *testing.T) {
 		want    pageQuery
 		wantErr bool
 	}{
-		{"omitted parameters fall back to bounded defaults", "", pageQuery{Page: 1, PageSize: defaultPageSize}, false},
-		{"explicit page keeps default page size", "page=3", pageQuery{Page: 3, PageSize: defaultPageSize}, false},
+		{"omitted parameters stay unpaged", "", pageQuery{Page: 1, PageSize: 0}, false},
+		{"explicit page without page size stays unpaged", "page=3", pageQuery{Page: 1, PageSize: 0}, false},
 		{"explicit page size", "page_size=50", pageQuery{Page: 1, PageSize: 50}, false},
 		{"page and page size together", "page=2&page_size=25", pageQuery{Page: 2, PageSize: 25}, false},
 		{"page size capped at maximum", "page_size=100000", pageQuery{Page: 1, PageSize: maximumPageSize}, false},
-		{"page at upper bound accepted", "page=100000", pageQuery{Page: 100000, PageSize: defaultPageSize}, false},
-		{"page above upper bound rejected", "page=100001", pageQuery{}, true},
+		{"page at upper bound accepted", "page=100000&page_size=20", pageQuery{Page: 100000, PageSize: 20}, false},
+		{"page above upper bound rejected when paged", "page=100001&page_size=20", pageQuery{}, true},
+		{"page above upper bound ignored when unpaged", "page=100001", pageQuery{Page: 1, PageSize: 0}, false},
 		{"page zero rejected", "page=0", pageQuery{}, true},
 		{"page negative rejected", "page=-1", pageQuery{}, true},
-		{"page size zero rejected", "page_size=0", pageQuery{}, true},
-		{"page size negative rejected", "page_size=-10", pageQuery{}, true},
+		{"page size zero means unpaged", "page_size=0", pageQuery{Page: 1, PageSize: 0}, false},
+		{"page size negative means unpaged", "page_size=-10", pageQuery{Page: 1, PageSize: 0}, false},
 		{"page size non numeric rejected", "page_size=abc", pageQuery{}, true},
 		{"page non numeric rejected", "page=1.5", pageQuery{}, true},
 		{"snapshot flag 1", "all=1", pageQuery{Page: 1, PageSize: maximumSnapshotRows, All: true}, false},
@@ -50,7 +53,7 @@ func TestPageParamsBoundedDefaults(t *testing.T) {
 		{"snapshot flag with page size is ambiguous", "all=1&page_size=20", pageQuery{}, true},
 		{"snapshot flag 0 is rejected", "all=0", pageQuery{}, true},
 		{"snapshot flag yes is rejected", "all=yes", pageQuery{}, true},
-		{"empty snapshot flag is ignored", "all=", pageQuery{Page: 1, PageSize: defaultPageSize}, false},
+		{"empty snapshot flag is ignored", "all=", pageQuery{Page: 1, PageSize: 0}, false},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -133,10 +136,11 @@ func TestWritePageOutputsRepositoryPageAsIs(t *testing.T) {
 		t.Fatalf("empty result envelope: %+v", envelope)
 	}
 
-	// 防御：pageSize 缺失不是"返回全部行"的信号，而是回落到默认单页行数。
+	// pageSize 缺失表示不分页：items 就是完整集合，envelope 回显 page=1 与
+	// page_size=len(items)，total 以实际切片长度为准（与改动前的兼容语义一致）。
 	envelope = capturePageEnvelope(t, []string{"a", "b", "c"}, 3, pageQuery{})
-	if envelope.Page != 1 || envelope.PageSize != defaultPageSize || envelope.Total != 3 {
-		t.Fatalf("missing page size must fall back to the default page size: %+v", envelope)
+	if envelope.Page != 1 || envelope.PageSize != 3 || envelope.Total != 3 || envelope.Truncated {
+		t.Fatalf("missing page size must return the full list: %+v", envelope)
 	}
 }
 
@@ -168,7 +172,7 @@ func TestWritePageFlagsTruncatedSnapshot(t *testing.T) {
 }
 
 // pageSlice 仅供尚未下推分页的内存列表（设备台账）使用，语义必须与 writePage
-// 一致：首页/中间页/末页/越界页，page_size 缺失回落默认值而不是返回全部行。
+// 一致：首页/中间页/末页/越界页；page_size 缺失（<=0）表示不分页、原样返回全部行。
 func TestPageSliceMatchesWritePageClipping(t *testing.T) {
 	all := []string{"a", "b", "c", "d", "e"}
 	cases := []struct {
@@ -184,8 +188,8 @@ func TestPageSliceMatchesWritePageClipping(t *testing.T) {
 		{"last partial page", all, 3, 2, []string{"e"}, 5},
 		{"over-range page", all, 9, 2, []string{}, 5},
 		{"empty source", []string{}, 1, 2, []string{}, 0},
-		{"missing page size falls back to default", all, 1, 0, []string{"a", "b", "c", "d", "e"}, 5},
-		{"missing page size is not unpaged", all, 2, 0, []string{}, 5},
+		{"missing page size returns everything", all, 1, 0, []string{"a", "b", "c", "d", "e"}, 5},
+		{"missing page size ignores page", all, 2, 0, []string{"a", "b", "c", "d", "e"}, 5},
 		{"page zero", all, 0, 2, []string{"a", "b"}, 5},
 	}
 	for _, test := range cases {

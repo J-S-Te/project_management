@@ -10,3 +10,5 @@
 # macOS Finder metadata is never part of the project.
 .DS_Store
 .ai
+# Agent 工具（.mimosa/）的本地工作区，不属于产品代码。
+.mimosa/
