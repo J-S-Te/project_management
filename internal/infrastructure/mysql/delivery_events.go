@@ -199,8 +199,16 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 		updates["status"] = "待实施"
+	case application.EventRollbackRequested:
+		return validateRollbackRequest(tx, item, event)
+	case application.EventRollbackRejected:
+		_, err := validateRollbackDecision(tx, item, event)
+		return err
 	case application.EventRollbackApproved:
 		if err := validateRollbackApproval(tx, item, event); err != nil {
+			return err
+		}
+		if err := closeOtherRollbacks(tx, item, event); err != nil {
 			return err
 		}
 		switch stringValue(event.Payload, "kind") {
@@ -231,6 +239,10 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if err := validateRollbackWithdrawal(tx, item, event); err != nil {
 			return err
 		}
+	case application.EventReportCorrectionRequested:
+		return validateReportCorrectionRequest(tx, item, event)
+	case application.EventReportCorrectionRejected:
+		return validateReportCorrectionApproval(tx, item, event)
 	case application.EventReportCorrectionApproved:
 		if err := validateReportCorrectionApproval(tx, item, event); err != nil {
 			return err
@@ -239,6 +251,9 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 		if err := invalidateAndCreateReportRevision(tx, item, event); err != nil {
+			return err
+		}
+		if err := closeSupersededReportCorrections(tx, item, event); err != nil {
 			return err
 		}
 		updates["report_status"] = "NONE"
@@ -599,6 +614,10 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 	meta := auditctx.FromContext(tx.Statement.Context)
 	actorType := auditActorType(event.Type)
 	if event.Payload["origin_kind"] == "IMPORTED" {
+		actorType = "SYSTEM"
+	}
+	if (event.Type == application.EventReportCorrectionRejected || event.Type == application.EventRollbackRejected) && event.ActorUserID == "SYSTEM" &&
+		event.Payload["automatic"] == true && stringValue(event.Payload, "cause_event_id") != "" {
 		actorType = "SYSTEM"
 	}
 	return tx.Create(&auditOutboxRecord{
