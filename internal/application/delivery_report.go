@@ -121,6 +121,8 @@ func reportPhasePermission(phase string) string {
 }
 
 // RequestReportCorrection 只允许针对已签发或已归档的当前版本提出更正；申请不改变旧报告有效性。
+// 参数：ctx为请求，p为申请主体，itemID为服务项，input包含原因及预期服务项版本。
+// 返回值：申请事件ID；权限、版本、报告状态或待决冲突时返回错误。
 func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Principal, itemID string, input domain.ReportCorrectionRequestInput) (string, error) {
 	if err := validateProjectTextLength(input.Reason, 1000, "报告更正原因"); err != nil {
 		return "", err
@@ -145,7 +147,7 @@ func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Princi
 	if item.Status != "现场实施完成" || (item.ReportStatus != "ISSUED" && item.ReportStatus != "ARCHIVED") {
 		return "", PreconditionError("仅可对已签发或已归档报告申请更正")
 	}
-	event := deliveryEvent(p, "", itemID, EventReportCorrectionRequested, map[string]any{"reason": strings.TrimSpace(input.Reason), "old_revision": item.ReportRevision, "requester_user_id": p.UserID})
+	event := deliveryEvent(p, "", itemID, EventReportCorrectionRequested, map[string]any{"reason": strings.TrimSpace(input.Reason), "old_revision": item.ReportRevision, "requester_user_id": p.UserID, "expected_version": input.ExpectedVersion})
 	if err := s.applyEvent(ctx, event); err != nil {
 		return "", err
 	}
