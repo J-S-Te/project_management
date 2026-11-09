@@ -103,6 +103,9 @@ func penetrationReportGate(row *penetrationWorkPackageRecord, parentPhase string
 	return nil
 }
 
+// EnsurePenetrationWorkPackage 在父服务项锁内建立未交付的等保专项。
+// 参数：ctx为请求，tenantID/item为父项，actor/idempotencyKey为操作身份，now为时间。
+// 返回值：专项；父项已交付、版本或数据库异常时返回错误。
 func (r *Repository) EnsurePenetrationWorkPackage(ctx context.Context, tenantID string, item domain.ServiceItem, actor, idempotencyKey string, now time.Time) (domain.PenetrationWorkPackage, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row serviceItemRecord
@@ -111,6 +114,9 @@ func (r *Repository) EnsurePenetrationWorkPackage(ctx context.Context, tenantID 
 		}
 		if item.Version != 0 && row.Version != item.Version {
 			return application.ErrConflict
+		}
+		if err := validatePenetrationParentMutation(&row, "DECISION_RECORDED"); err != nil {
+			return err
 		}
 		return ensureEmbeddedPenetrationPackage(tx, &row, actor, idempotencyKey, now)
 	})
@@ -297,8 +303,17 @@ func (r *Repository) RegisterPenetrationReportArtifact(ctx context.Context, tena
 
 type penetrationMutation func(*gorm.DB, *penetrationWorkPackageRecord) (map[string]any, error)
 
+// mutatePenetrationPackage 以父项到专项的统一锁序执行可重放的专项命令。
+// 参数：ctx/tenantID/itemID定位父项，版本/幂等键/事件/actor/payload标识命令，now/mutate执行变更。
+// 返回值：终态、版本或存储错误时回滚；已受理的同命令可在父终态后重放。
 func (r *Repository) mutatePenetrationPackage(ctx context.Context, tenantID, itemID string, expectedVersion uint64, idempotencyKey, eventType, actor string, payload any, now time.Time, mutate penetrationMutation) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 主报告推进也按父项再专项加锁，避免归档和结论变更互相穿透。
+		var parent serviceItemRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+			"tenant_id=? AND id=?", tenantID, itemID).Take(&parent).Error; err != nil {
+			return mapNotFound(err)
+		}
 		// 检查幂等台账前，将同一工作包命令串行化。
 		// 首次事务提交期间到达的重试必须
 		// 看到已提交事件，不能因版本已过期而失败。
@@ -322,6 +337,9 @@ func (r *Repository) mutatePenetrationPackage(ctx context.Context, tenantID, ite
 		}
 		if expectedVersion == 0 || row.Version != expectedVersion {
 			return application.ErrConflict
+		}
+		if err := validatePenetrationParentMutation(&parent, eventType); err != nil {
+			return err
 		}
 		updates, err := mutate(tx, &row)
 		if err != nil {

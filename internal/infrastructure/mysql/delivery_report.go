@@ -13,53 +13,25 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// validateRollbackApproval 核验批准命令绑定原申请及原业务轮次。
+// 参数：tx/item为服务项锁内事务，event为独立审批人的批准命令。
+// 返回值：已处理、身份或轮次不符时拒绝，成功返回nil。
 func validateRollbackApproval(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
-	requestID := stringValue(event.Payload, "request_id")
-	if requestID == "" {
-		return application.ErrValidation
-	}
-	var request deliveryEventRecord
-	if err := tx.Where("tenant_id=? AND id=? AND service_item_id=? AND event_type=?", item.TenantID, requestID, item.ID, application.EventRollbackRequested).First(&request).Error; err != nil {
-		return mapNotFound(err)
-	}
-	if request.ActorUserID == event.ActorUserID {
-		return application.ErrForbidden
-	}
-	if stringValue(event.Payload, "kind") == "" {
-		return application.ErrValidation
-	}
-	var count int64
-	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventRollbackApproved, application.EventRollbackRejected, application.EventRollbackWithdrawn}, requestID).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return application.ErrConflict
-	}
-	return nil
+	_, err := validateRollbackDecision(tx, item, event)
+	return err
 }
 
+// validateRollbackWithdrawal 核验撤回只关闭原申请人仍待决的申请。
+// 参数：tx/item为服务项锁内事务，event为原申请人撤回命令。
+// 返回值：申请已终决或主体不符时拒绝，成功返回nil。
 func validateRollbackWithdrawal(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
-	requestID := stringValue(event.Payload, "request_id")
-	if requestID == "" {
-		return application.ErrValidation
-	}
-	var request deliveryEventRecord
-	if err := tx.Where("tenant_id=? AND id=? AND service_item_id=? AND event_type=?", item.TenantID, requestID, item.ID, application.EventRollbackRequested).First(&request).Error; err != nil {
-		return mapNotFound(err)
-	}
-	if request.ActorUserID != event.ActorUserID {
-		return application.ErrForbidden
-	}
-	var count int64
-	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventRollbackApproved, application.EventRollbackRejected, application.EventRollbackWithdrawn}, requestID).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return application.ErrConflict
-	}
-	return nil
+	_, err := validateRollbackDecision(tx, item, event)
+	return err
 }
 
+// validateReportCorrectionApproval 校验原申请未处理，批准绑定当前版，旧申请可驳回收口。
+// 参数：tx/item为锁定服务项事务，event为独立审批人提交的决定。
+// 返回值：申请身份、修订或终态不符时拒绝，数据库错误原样返回。
 func validateReportCorrectionApproval(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
 	requestID := stringValue(event.Payload, "request_id")
 	if requestID == "" {
@@ -71,6 +43,11 @@ func validateReportCorrectionApproval(tx *gorm.DB, item *serviceItemRecord, even
 	}
 	if request.ActorUserID == event.ActorUserID {
 		return application.ErrForbidden
+	}
+	revision, err := correctionRevision(request.Payload)
+	if err != nil || revision > item.ReportRevision ||
+		(event.Type != application.EventReportCorrectionRejected && revision != item.ReportRevision) {
+		return application.ErrConflict
 	}
 	var count int64
 	if err := tx.Model(&deliveryEventRecord{}).Where("tenant_id=? AND event_type IN ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.request_id'))=?", item.TenantID, []string{application.EventReportCorrectionApproved, application.EventReportCorrectionRejected}, requestID).Count(&count).Error; err != nil {
