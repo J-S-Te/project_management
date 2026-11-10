@@ -9,6 +9,8 @@ import (
 
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
+	"github.com/j-s-te/project-management/internal/migration"
+	"github.com/j-s-te/project-management/migrations"
 	"github.com/oklog/ulid/v2"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -23,6 +25,10 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
 		t.Skip("set PM_TEST_DSN to run the embedded penetration lifecycle integration check")
+	}
+	// 独立执行时也准备真实测试结构，不能依赖其他用例先运行。
+	if err := migration.Run(t.Context(), dsn, migrations.Files); err != nil {
+		t.Fatal(err)
 	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
