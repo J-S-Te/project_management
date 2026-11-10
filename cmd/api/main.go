@@ -107,6 +107,27 @@ func main() {
 		logger.Error("initialize platform OIDC", "error", err)
 		os.Exit(1)
 	}
+	reimbursementConfig, reimbursementErr := config.LoadReimbursementIntegration()
+	if reimbursementErr != nil {
+		logger.Error("initialize reimbursement configuration", "error", reimbursementErr)
+		os.Exit(1)
+	}
+	var reimbursementReferenceBearer, reimbursementSpendBearer platform.ClientCredentialsTokenVerifier
+	if reimbursementConfig.Enabled {
+		bindings := platform.ClientCredentialsVerifierOptions{Issuer: reimbursementConfig.Issuer, Audience: reimbursementConfig.Audience, PublicKeyPath: reimbursementConfig.PublicKeyPath, TenantID: cfg.OIDCTenantID, CallerApplicationCode: "reimbursement", CallerEnvironmentCode: reimbursementConfig.CallerEnvironmentCode, ClientID: reimbursementConfig.ReferenceClientID, RequiredScope: "reimbursement.project_reference.read"}
+		reimbursementReferenceBearer, err = platform.NewReimbursementTokenVerifier(startupCtx, bindings)
+		if err != nil {
+			logger.Error("initialize reimbursement reference verifier", "error", err)
+			os.Exit(1)
+		}
+		bindings.ClientID = reimbursementConfig.SpendClientID
+		bindings.RequiredScope = "project.reimbursement_cost.write"
+		reimbursementSpendBearer, err = platform.NewReimbursementTokenVerifier(startupCtx, bindings)
+		if err != nil {
+			logger.Error("initialize reimbursement spend verifier", "error", err)
+			os.Exit(1)
+		}
+	}
 	var settlementReferenceBearer platform.ClientCredentialsTokenVerifier
 	if cfg.SettlementReferenceEnabled {
 		settlementReferenceBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
@@ -272,6 +293,7 @@ func main() {
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
+		Reimbursement:       &httpapi.ReimbursementOptions{Enabled: reimbursementConfig.Enabled, ReferenceVerifier: reimbursementReferenceBearer, SpendVerifier: reimbursementSpendBearer},
 		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
 		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
 		CommercialLicense:   commercialGate,

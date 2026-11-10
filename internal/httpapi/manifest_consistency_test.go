@@ -86,8 +86,8 @@ func TestFieldExecutionPermissionBelongsToProjectManagerNotEngineers(t *testing.
 	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
 		t.Fatalf("decode permission manifest: %v", err)
 	}
-	if manifest.CatalogVersion != "9" {
-		t.Fatalf("catalog_version=%q, want 9 for native scope approval permission", manifest.CatalogVersion)
+	if manifest.CatalogVersion != "11" {
+		t.Fatalf("catalog_version=%q, want 11 for project sales director directory role", manifest.CatalogVersion)
 	}
 
 	roles := make(map[string]map[string]bool, len(manifest.Roles))

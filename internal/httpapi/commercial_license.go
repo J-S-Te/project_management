@@ -14,7 +14,10 @@ type CommercialLicenseGate interface {
 // 精确审查的读取路由：未来 GET 端点不能仅因使用 GET
 // 就继承计算或推进业务的权限。
 var commercialHistoryRoutes = map[string]bool{
-	"/api/v1/projects/:id/native-scope": true,
+	"/api/v1/projects/:id/reimbursement-spend":                              true,
+	"/api/v1/projects/:id/expense-participants":                             true,
+	"/internal/v1/reimbursement/spend-snapshots/reconciliation":             true,
+	"/api/v1/projects/:id/native-scope":                                     true,
 	"/internal/v1/contract-imports/capabilities":                            true,
 	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": true,
 	"/internal/v1/settlement/project-references/:projectID":                 true,
@@ -70,6 +73,9 @@ func commercialOperation(method, path string) core.Operation {
 	}
 	if method == http.MethodGet && path == "/api/v1/capabilities/export" {
 		return core.EXPORT_HISTORY
+	}
+	if method == http.MethodPost && (path == "/internal/v1/reimbursement/project-references/search" || path == "/internal/v1/reimbursement/project-references/batch-validate") {
+		return core.READ_HISTORY
 	}
 	if method == http.MethodGet && commercialHistoryRoutes[path] {
 		return core.READ_HISTORY

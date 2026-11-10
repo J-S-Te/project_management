@@ -25,7 +25,10 @@ import (
 //   - core.MUTATE_BUSINESS：该 GET 实际带副作用，到期必须 403（当前没有此类 GET，
 //     若将来出现必须在这里显式登记并说明副作用）。
 var registeredGETOperations = map[string]core.Operation{
-		"/api/v1/projects/:id/native-scope": core.READ_HISTORY,
+	"/api/v1/projects/:id/expense-participants":                 core.READ_HISTORY,
+	"/api/v1/projects/:id/reimbursement-spend":                  core.READ_HISTORY,
+	"/internal/v1/reimbursement/spend-snapshots/reconciliation": core.READ_HISTORY,
+	"/api/v1/projects/:id/native-scope":                         core.READ_HISTORY,
 	// 存活、就绪与会话服务：不因商业授权到期而阻断登录/续期/巡检。
 	"/healthz":       core.ESSENTIAL_SERVICE,
 	"/readyz":        core.ESSENTIAL_SERVICE,
@@ -95,14 +98,16 @@ func (classificationOIDCFlow) Logout(http.ResponseWriter, *http.Request)        
 func (classificationOIDCFlow) LogoutLocal(http.ResponseWriter, *http.Request)       {}
 func (classificationOIDCFlow) BackchannelLogout(http.ResponseWriter, *http.Request) {}
 
-// fullCommercialRouteTable 打开全部可选路由分组，使分类清单面对的是完整路由表，
-// 而不是默认装配下的子集。
+// fullCommercialRouteTable 打开全部可选分组以核对完整真实路由分类。
+// 参数：t 为测试上下文。
+// 返回值：包含所有受控接口的路由。
 func fullCommercialRouteTable(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	actor := platform.Principal{TenantID: "tenant-1", UserID: "viewer"}
 	verifier := handoverVerifierStub{identity: platform.ServiceTokenIdentity{TenantID: "tenant-1"}}
 	return NewRouter(&application.Service{}, classificationOIDCFlow{projectLicenseIdentity{&actor}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), RouterOptions{
+		Reimbursement:        &ReimbursementOptions{Enabled: true, ReferenceVerifier: verifier, SpendVerifier: verifier},
 		SettlementReference:  &SettlementReferenceOptions{Enabled: true, BearerVerifier: verifier},
 		ContractImport:       &ContractImportOptions{Enabled: true, BearerVerifier: verifier},
 		ContractIntegration:  &ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},

@@ -65,6 +65,7 @@ type IntegrationDestinationStatus struct {
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
 type RouterOptions struct {
+	Reimbursement       *ReimbursementOptions
 	SettlementReference *SettlementReferenceOptions
 	CommercialLicense   CommercialLicenseGate
 	ContractImport      *ContractImportOptions
@@ -176,6 +177,15 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		}
 		writeData(c, status, body)
 	})
+	if integration := routerOptions.Reimbursement; integration != nil && integration.Enabled {
+		read := router.Group("/internal/v1/reimbursement", h.authenticateReimbursement(integration.ReferenceVerifier))
+		read.POST("/project-references/search", h.expenseSearch)
+		read.POST("/project-references/batch-validate", h.expenseBatchValidate)
+		write := router.Group("/internal/v1/reimbursement", h.authenticateReimbursement(integration.SpendVerifier))
+		write.POST("/spend-snapshots", h.expenseSpendSnapshot)
+		write.GET("/spend-snapshots/reconciliation", h.expenseReconcile)
+		write.POST("/spend-snapshots/rebuild", h.expenseRebuild)
+	}
 	if integration := routerOptions.SettlementReference; integration != nil && integration.Enabled {
 		internal := router.Group("/internal/v1/settlement")
 		internal.Use(h.authenticateSettlementReference(*integration))
@@ -251,6 +261,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/approved-contracts/:contractID/service-items", require("project.create"), h.listApprovedContractServiceItems)
 	api.GET("/project-creation-capabilities", requireAny("project.read", "project.create"), h.projectCreationCapabilities)
 	api.POST("/native-projects", require("project.create"), h.createNativeProject)
+	api.GET("/projects/:id/expense-participants", require("project.expense_participant.manage"), h.expenseParticipants)
+	api.PUT("/projects/:id/expense-participants", require("project.expense_participant.manage"), h.expenseManageParticipant)
+	api.GET("/projects/:id/reimbursement-spend", require("project.reimbursement_spend.read"), h.expenseSpendSummary)
 	api.GET("/projects/:id/native-scope", require("project.read"), h.nativeScope)
 	api.POST("/projects/:id/native-scope-changes", require("project.decomposition.manage"), h.requestNativeScope)
 	api.POST("/projects/:id/native-scope-changes/:changeID/decision", require("project.native_scope.approve"), h.decideNativeScope)
