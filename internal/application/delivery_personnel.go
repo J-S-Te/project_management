@@ -57,6 +57,8 @@ type PersonnelIdentitySyncResult struct {
 	Unlinked   int    `json:"unlinked"`
 	Unverified int    `json:"unverified"`
 	CheckedAt  string `json:"checked_at"`
+	// Changed 是本次真正改写身份状态的档案数：目录结论与库内一致时不写。
+	Changed int `json:"changed"`
 }
 
 // SyncPersonnelIdentities 把人员资质档案回基础平台负责人目录复核一次。
@@ -68,6 +70,7 @@ type PersonnelIdentitySyncResult struct {
 // 资质与能力在项目管理系统内维护，但"这个人是否真实存在（在职）"只能由基础平台回答：
 // 目录中查得到的标记 ACTIVE，查无此人的标记 MISSING，未关联 user_id 的历史档案保持
 // UNLINKED。目录报错的 ID 记为 Unverified 且不改写，避免把平台故障误判成离职。
+// 幂等：目录结论与库内一致的档案不写库（Changed=0），后台每轮重复复核不会产生写入。
 func (s *Service) SyncPersonnelIdentities(ctx context.Context, p platform.Principal) (PersonnelIdentitySyncResult, error) {
 	result := PersonnelIdentitySyncResult{CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 	if err := requireApplicationAuthorization(p, "project.resource.manage"); err != nil {
@@ -123,24 +126,34 @@ func (s *Service) SyncPersonnelIdentities(ctx context.Context, p platform.Princi
 		}
 	}
 	// 按"档案"计数，保证 Total = Active + Missing + Unlinked + Unverified。
+	// 同时只把与库内不一致的结论交给仓储：重复复核同一目录结果不应产生任何
+	// 写入（后台每轮都会调用本方法，逐人重写会制造无意义的写放大与审计噪声）。
+	// 状态变化数按 user_id 去重，避免同一账号的多条历史档案重复计数。
+	changes := make(map[string]string, len(linked))
 	for _, item := range items {
-		switch {
-		case strings.TrimSpace(item.UserID) == "":
+		if strings.TrimSpace(item.UserID) == "" {
 			result.Unlinked++
+			continue
+		}
+		userID := strings.TrimSpace(item.UserID)
+		status, resolved := statuses[userID]
+		switch {
+		case !resolved:
+			result.Unverified++
+		case status == domain.IdentityStatusActive:
+			result.Active++
 		default:
-			status, resolved := statuses[strings.TrimSpace(item.UserID)]
-			switch {
-			case !resolved:
-				result.Unverified++
-			case status == domain.IdentityStatusActive:
-				result.Active++
-			default:
-				result.Missing++
-			}
+			result.Missing++
+		}
+		if resolved && status != item.IdentityStatus {
+			changes[userID] = status
 		}
 	}
-	if err := repo.UpdateCapabilityIdentities(ctx, p.TenantID, statuses, time.Now().UTC()); err != nil {
-		return result, err
+	result.Changed = len(changes)
+	if len(changes) > 0 {
+		if err := repo.UpdateCapabilityIdentities(ctx, p.TenantID, changes, time.Now().UTC()); err != nil {
+			return result, err
+		}
 	}
 	return result, nil
 }

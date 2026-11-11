@@ -44,6 +44,10 @@ type Runtime struct {
 	serveDone                   chan struct{}
 	newWorker                   func() workerRunner
 	checkRouting                func(context.Context) error
+	// 人员身份复核循环：独立于 SLA/派发 ticker，失败只记录，不阻塞主流程。
+	identitySync         identitySyncer
+	identitySyncInterval time.Duration
+	identitySyncDone     chan struct{}
 }
 
 func NewRuntime(o Options, service *application.Service, c client.Client, logger *slog.Logger) (*Runtime, error) {
@@ -59,7 +63,7 @@ func NewRuntime(o Options, service *application.Service, c client.Client, logger
 	if o.Engine == EngineTemporal && c == nil {
 		return nil, errors.New("Temporal client required")
 	}
-	r := &Runtime{options: o, service: service, temporal: c, logger: logger, taskQueue: runtimeName("queue", o.TaskQueue, o.Environment, o.TenantID), deployment: runtimeName("deployment", o.DeploymentName, o.Environment, o.TenantID)}
+	r := &Runtime{options: o, service: service, temporal: c, logger: logger, taskQueue: runtimeName("queue", o.TaskQueue, o.Environment, o.TenantID), deployment: runtimeName("deployment", o.DeploymentName, o.Environment, o.TenantID), identitySync: service}
 	if c != nil {
 		r.schedules = c.ScheduleClient()
 	}
@@ -138,6 +142,8 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.mu.Lock()
 	r.bootstrap = true
 	r.mu.Unlock()
+	// 身份复核与 SLA/派发相互独立：接入失败或单轮失败只记录，不影响启动与主流程。
+	r.startIdentitySync()
 	if r.options.Engine == EngineLegacy {
 		r.legacyDone = make(chan struct{})
 		go r.runLegacy()
@@ -151,6 +157,7 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	cancel := r.cancel
 	w := r.worker
 	serveDone := r.serveDone
+	identitySyncDone := r.identitySyncDone
 	r.mu.Unlock()
 	if r.controlServer != nil {
 		_ = r.controlServer.Close()
@@ -166,6 +173,11 @@ func (r *Runtime) Stop(ctx context.Context) error {
 		}
 		if cancel != nil {
 			cancel()
+		}
+		if identitySyncDone != nil {
+			// 身份复核循环由 activityCtx 取消，Stop 必须在返回前 join，
+			// 否则退出时可能还有目录查询/审计写入在跑。
+			<-identitySyncDone
 		}
 		if r.legacyDone != nil {
 			<-r.legacyDone
