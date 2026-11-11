@@ -45,6 +45,7 @@ var registeredGETOperations = map[string]core.Operation{
 	"/internal/v1/handover/responsibilities":                                core.READ_HISTORY,
 	"/internal/v1/handover/transfers/:item_id":                              core.READ_HISTORY,
 	"/internal/v1/dashboard":                                                core.READ_HISTORY,
+	"/internal/v1/dashboard/reports":                                        core.READ_HISTORY,
 	"/internal/v1/dashboard/projects/snapshot":                              core.READ_HISTORY,
 
 	// 用户会话与审计只读入口。

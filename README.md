@@ -109,3 +109,13 @@ docker compose --env-file .env --env-file .release.env -f docker-compose.yml exe
 精确机器接口 `GET /internal/v1/dashboard/projects/snapshot` 使用 dashboard.project.read Bearer、可信租户及商业 READ_HISTORY。单个只读 RR 事务输出 header/project/end NDJSON，状态、进度、风险、在途和服务项数来自现有领域算法；commit 成功后才发送 end。默认200/批、50,000项目、250,000服务项、64MiB、单行64KiB、30s。取消、超限或失败没有完整成功结束。
 
 本轮源码与本地/隔离测试见[任务验收记录](../.ai/qa/project-temporal-bi-20261023/verification.md)。上述较早“仅文档”记录保留历史含义；真实签名许可、自然ACK、正式服务器及浏览器仍未验收。
+
+## 报告看板机器来源（2026-11-11）
+
+`GET /internal/v1/dashboard/reports` 复用项目看板 `DASHBOARD_MACHINE_*` 机器验证配置：调用应用必须为 `data_analysis`，唯一 scope 为 `dashboard.project.read`，租户只来自受信平台 application JWT。该精确 GET 路径归类 `READ_HISTORY`；浏览器会话、人工权限、请求参数或租户请求头不能替代机器身份。
+
+成功响应直接返回 BusinessSnapshot JSON（不包 `data`）：`available`、`tenant_id`、`snapshot_at`、`metrics`、`missing_metrics`、`basis`，并附 `source_code=project_management`、可选真实 `source_updated_at`（RFC3339）。`metrics` 包含 `active_reports`、`void_reports`、`status_counts`、`cycle_p50_days`、`cycle_samples`、`reviewed_reports`。所有报告主体类型沿用版本台账范围：ACTIVE 计有效状态，VOID 单列，SUPERSEDED 不计作废；P50 只使用 ACTIVE 且 prepared_at/issued_at 完整、非负的真实周期，无样本返回 null。首次通过率和投诉保持 `missing_metrics`。
+
+查询在单个只读可重复读事务内完成，30 秒超时；状态分组最多128组，周期仅加载中间1至2个样本，不向应用加载全版本台账，事务提交成功后才返回可用快照。来源未配置或失败不返回假零。
+
+开发回归使用内存 SQLite/httptest。真实 SQL 回归需显式设置私有普通文件 `PM_REPORT_DASHBOARD_TEST_DSN_FILE`，只接受 tcp 回环 `127.0.0.1` 和 `pm_test_` 前缀隔离库；运行 `go test ./internal/infrastructure/mysql -run '^TestReportDashboardMySQL$' -count=1 -v`。未配置则安全跳过，不寻找业务库。
