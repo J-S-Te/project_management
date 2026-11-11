@@ -69,7 +69,10 @@ func expenseRoleFixture() (domain.Project, *expenseRoleDirectory) {
 	}
 	d.roles["sales_director"] = []platform.OwnerDirectoryUser{{UserID: "wrong-sales", Organizations: []platform.OwnerDirectoryOrganization{{OrganizationID: "org"}}}, {UserID: "sales", Organizations: []platform.OwnerDirectoryOrganization{{OrganizationID: "sales-org"}}}}
 	d.roles["business_admin"] = []platform.OwnerDirectoryUser{{UserID: "not-sales", Organizations: []platform.OwnerDirectoryOrganization{{OrganizationID: "org"}}}}
-	return domain.Project{ID: "p", TenantID: "t", OwnerOrgID: "org", ManagerIdentityID: "pm", OwnerIdentityID: "actor", Version: 7}, d
+	return domain.Project{
+		ID: "p", TenantID: "t", OwnerOrgID: "org", ManagerIdentityID: "pm",
+		OwnerIdentityID: "actor", Status: domain.ProjectStatusReporting, Version: 7,
+	}, d
 }
 
 // TestExpenseApproversUseProjectRolesAllPagesAndOrganization 验证全部角色分页、项目组织范围及真实版本/摘要。
