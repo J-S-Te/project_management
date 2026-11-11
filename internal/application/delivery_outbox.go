@@ -180,9 +180,9 @@ func slaNotificationPriority(kind string) string {
 func (s *Service) assignmentRoleUserIDs(ctx context.Context, roleCode string) (map[string]struct{}, error) {
 	roleCode = strings.ToLower(strings.TrimSpace(roleCode))
 	switch roleCode {
-	case assignmentRoleTeamLead, assignmentRoleProjectManager, assignmentRoleEngineer:
+	case assignmentRoleTeamLead, assignmentRoleProjectManager, assignmentRoleEngineer, assignmentRolePenetrationEngineer:
 	default:
-		return nil, ValidationError("人员职责必须是团队负责人、项目经理或工程师")
+		return nil, ValidationError("人员职责必须是团队负责人、项目经理、工程师或渗透测试工程师")
 	}
 	if s.Personnel == nil {
 		return nil, ErrPersonnelUnavailable

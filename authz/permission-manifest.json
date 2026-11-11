@@ -1,6 +1,6 @@
 {
-  "catalog_version": "11",
-  "claims_role_config_hash": "project-management-v10-expense-participant",
+  "catalog_version": "12",
+  "claims_role_config_hash": "project-management-v12-field-execution-engineers",
   "policy": {"max_effective_roles": 16},
   "permissions": [
     {"code":"project.read","name":"查看项目与执行数据","action":"read","resource_code":"project","resource_name":"项目","risk_level":"LOW"},
@@ -48,8 +48,8 @@
     {"code":"technical_director","name":"技术总监","permissions":["project.reimbursement_spend.read","project.native_scope.approve","project.read","project_rule.manage","project.capability_code.manage","project.field_permission.manage","project.resource.read","project.rollback.approve","project.report.correction.approve","project.deviation.review","project.special_method.review","project.report.issue","project.report.archive"]},
     {"code":"sales_director","name":"销售总监","description":"用于项目权威销售审批目录，仅提供最小费用引用资格，不授予项目详情或交付操作。","permissions":["project.expense_reference.eligible"]},
     {"code":"project_manager","name":"项目经理","permissions":["project.reimbursement_spend.read","project.read","project.resource.read","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.report.correction.request","project.field.execute","project.field.complete","project.report.prepare"]},
-    {"code":"engineer","name":"实施工程师","permissions":["project.read","project.deviation.report"]},
-    {"code":"penetration_engineer","name":"渗透测试工程师","permissions":["project.read","project.deviation.report"]},
+    {"code":"engineer","name":"实施工程师","description":"现场执行角色：按指派受理服务项并开始实施、提交现场记录与确认现场完成；不含审批、报告签发与规则配置。","permissions":["project.read","project.field.execute","project.deviation.report","project.field.complete"]},
+    {"code":"penetration_engineer","name":"渗透测试工程师","description":"现场执行角色：按指派受理渗透服务项并开始实施、提交现场记录与确认现场完成；不含审批、报告签发与规则配置。","permissions":["project.read","project.field.execute","project.deviation.report","project.field.complete"]},
     {"code":"quality_manager","name":"质量管理员","permissions":["project.read","project_rule.manage","project.resource.read","project.resource.manage","project.report.review"]},
     {"code":"device_admin","name":"设备管理员","permissions":["project.read","project.device.read","project.device.manage","project.resource.read","project.capability_code.manage"]},
     {"code":"expense_participant","name":"费用参与者","description":"仅有最小费用引用入口；资格仍按责任或显式名单验证，不授予项目详情及交付权限。","permissions":["project.expense_reference.eligible"]}

@@ -161,9 +161,18 @@ func (s *Service) AssignExecutionTeam(ctx context.Context, p platform.Principal,
 	if err != nil {
 		return domain.ConflictCheckResult{}, err
 	}
+	// 渗透测试工程师在渗透类服务项上承担实施职责，与实施工程师共用 engineer_ids，
+	// 因此这里按「实施工程师或渗透测试工程师」合并口径校验，普通服务项不受影响。
+	penetrationEngineerIDs, err := s.assignmentRoleUserIDs(ctx, assignmentRolePenetrationEngineer)
+	if err != nil {
+		return domain.ConflictCheckResult{}, err
+	}
+	for penetrationEngineerID := range penetrationEngineerIDs {
+		engineerIDs[penetrationEngineerID] = struct{}{}
+	}
 	for _, engineerID := range input.EngineerIDs {
 		if _, ok := engineerIDs[engineerID]; !ok {
-			return domain.ConflictCheckResult{}, PreconditionError("所选人员未被授予工程师角色，请先维护角色权限")
+			return domain.ConflictCheckResult{}, PreconditionError("所选人员未被授予工程师或渗透测试工程师角色，请先维护角色权限")
 		}
 	}
 	result := checkCapabilities(required, ids, caps)

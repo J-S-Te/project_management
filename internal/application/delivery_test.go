@@ -1470,6 +1470,93 @@ func TestAssignmentsRejectQualifiedPeopleWithoutRequiredRole(t *testing.T) {
 	}
 }
 
+// 渗透测试工程师必须能作为执行团队成员被指派：指派角色白名单此前只有团队负责人/
+// 项目经理/工程师三个码，渗透类服务项的专属人员因此在候选列表和提交校验里都被拒绝。
+func TestPenetrationEngineerIsQualifiedCandidateAndAssignable(t *testing.T) {
+	capabilities := []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-MANAGER", UserID: "user-manager", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+		{ResourceType: "PERSON", ResourceID: "P-PEN", UserID: "user-pen", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE", Codes: []string{"PENETRATION_TEST"}},
+	}
+	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
+		capabilityRepository: capabilityRepository{capabilities: capabilities},
+		item:                 domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", TestMode: "PENETRATION"},
+	}, foundCapabilities: capabilities}
+	principal := platform.Principal{TenantID: "t1", UserID: "admin-user", Permissions: map[string]bool{"project.read": true, "project.execution.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	service := Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleProjectManager:      {"user-manager"},
+		assignmentRoleEngineer:            {"user-engineer"},
+		assignmentRolePenetrationEngineer: {"user-pen"},
+	}}}
+
+	page, err := service.ListQualifiedPersonnel(context.Background(), principal, assignmentRolePenetrationEngineer, "PEN", 1, 50)
+	if err != nil {
+		t.Fatalf("qualified personnel for penetration engineer: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].UserID != "user-pen" {
+		t.Fatalf("penetration engineer candidates=%+v, want the role-authorized penetration engineer", page)
+	}
+
+	result, err := service.AssignExecutionTeam(context.Background(), principal, "SI-1", domain.ExecutionAssignmentInput{
+		ProjectManagerID: "P-MANAGER", EngineerIDs: []string{"P-PEN"},
+	})
+	if err != nil {
+		t.Fatalf("assign penetration engineer as execution engineer: %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("penetration engineer must satisfy PENETRATION_TEST requirement: %+v", result)
+	}
+	if len(repository.events) != 1 {
+		t.Fatalf("events=%d, want 1", len(repository.events))
+	}
+	engineers := payloadTextList(repository.events[0].Payload, "engineer_ids")
+	if len(engineers) != 1 || engineers[0] != "user-pen" {
+		t.Fatalf("engineer_ids=%v, want canonical platform user id of the penetration engineer", engineers)
+	}
+}
+
+// 角色白名单放宽到渗透测试工程师后，非法角色码与「有资质但没有任何指派角色」的人员
+// 仍必须被拒绝，避免白名单退化成任意角色枚举入口。
+func TestAssignmentRolesStillRejectUnknownRoleAndUncoveredPersonnel(t *testing.T) {
+	service := Service{Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRolePenetrationEngineer: {"user-pen"},
+	}}}
+	allowed, err := service.assignmentRoleUserIDs(context.Background(), " Penetration_Engineer ")
+	if err != nil {
+		t.Fatalf("penetration engineer role lookup: %v", err)
+	}
+	if _, ok := allowed["user-pen"]; !ok || len(allowed) != 1 {
+		t.Fatalf("allowed=%v, want only the role-authorized penetration engineer", allowed)
+	}
+	if _, err := service.assignmentRoleUserIDs(context.Background(), "sales_director"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("unknown role error=%v, want validation error", err)
+	}
+
+	repository := &assignmentValidationRepository{assignmentRevokeRepository: assignmentRevokeRepository{
+		item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配"},
+	}, foundCapabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-MANAGER", UserID: "user-manager", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+		{ResourceType: "PERSON", ResourceID: "P-OUTSIDER", UserID: "user-outsider", IdentityStatus: domain.IdentityStatusActive, Status: "ACTIVE"},
+	}}
+	principal := platform.Principal{TenantID: "t1", UserID: "admin-user", Permissions: map[string]bool{"project.read": true, "project.execution.assign": true}, DataScopes: []platform.DataScope{{RoleCode: "business_admin", ScopeType: "APPLICATION"}}}
+	assignment := Service{Repo: repository, Personnel: roleDirectoryStub{byRole: map[string][]string{
+		assignmentRoleProjectManager:      {"user-manager"},
+		assignmentRoleEngineer:            {"user-engineer"},
+		assignmentRolePenetrationEngineer: {"user-pen"},
+	}}}
+	if _, err := assignment.ListQualifiedPersonnel(context.Background(), principal, "sales_director", "", 1, 50); !errors.Is(err, ErrValidation) {
+		t.Fatalf("qualified candidate list with unknown role error=%v, want validation error", err)
+	}
+	_, err = assignment.AssignExecutionTeam(context.Background(), principal, "SI-1", domain.ExecutionAssignmentInput{
+		ProjectManagerID: "P-MANAGER", EngineerIDs: []string{"P-OUTSIDER"},
+	})
+	if !errors.Is(err, ErrPrecondition) || !strings.Contains(err.Error(), "渗透测试工程师角色") {
+		t.Fatalf("engineer without assignment role error=%v, want role precondition", err)
+	}
+	if len(repository.events) != 0 {
+		t.Fatalf("events=%d, role mismatch must not be persisted", len(repository.events))
+	}
+}
+
 func TestAssignmentRevocationCarriesReasonAndExpectedVersion(t *testing.T) {
 	repository := &assignmentRevokeRepository{item: domain.ServiceItem{ID: "SI-1", ProjectID: "PJ-1", Status: "待分配", Version: 7, TeamLeadID: "lead-1", ProjectManagerID: "manager-1", EngineerIDs: []string{"engineer-1"}}}
 	principal := platform.Principal{TenantID: "t1", UserID: "operator-1", Permissions: map[string]bool{"project.team.revoke": true, "project.execution.revoke": true}, DataScopes: []platform.DataScope{{RoleCode: "admin", ScopeType: "APPLICATION"}}}

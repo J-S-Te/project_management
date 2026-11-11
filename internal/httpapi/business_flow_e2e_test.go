@@ -29,7 +29,7 @@ import (
 
 const e2eTenant = "PM-E2E-TENANT"
 
-// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 8）。
+// 角色 → 权限：严格取自 authz/permission-manifest.json（catalog_version 12）。
 // 不得自行发明权限，否则走查结果不代表真实角色能力。
 var e2eRolePermissions = map[string][]string{
 	"business_admin": {"project.read", "project.create", "service_item.confirm", "project.decomposition.manage", "project.resource.read", "project.team.assign", "project.team.revoke"},
@@ -37,7 +37,7 @@ var e2eRolePermissions = map[string][]string{
 	"project_manager": {"project.read", "project.resource.read", "project.implementation.plan",
 		"project.implementation.revoke", "project.rollback.request", "project.report.correction.request",
 		"project.field.execute", "project.field.complete", "project.report.prepare"},
-	"engineer":           {"project.read", "project.deviation.report"},
+	"engineer":           {"project.read", "project.field.execute", "project.deviation.report", "project.field.complete"},
 	"technical_director": {"project.read", "project_rule.manage", "project.capability_code.manage", "project.field_permission.manage", "project.resource.read", "project.rollback.approve", "project.report.correction.approve", "project.deviation.review", "project.special_method.review", "project.report.issue", "project.report.archive"},
 	"quality_manager":    {"project.read", "project_rule.manage", "project.resource.read", "project.resource.manage", "project.report.review"},
 	// admin 持有全部权限：规则配置里「字段级权限」走 project.field_permission.manage，

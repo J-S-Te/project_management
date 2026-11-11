@@ -64,7 +64,10 @@ const (
 	assignmentRoleTeamLead       = "team_lead"
 	assignmentRoleProjectManager = "project_manager"
 	assignmentRoleEngineer       = "engineer"
-	assignmentRoleDirectorySize  = 50
+	// assignmentRolePenetrationEngineer 与权限清单里的渗透测试工程师角色码一致：
+	// 渗透类服务项的专属人员按该角色指派，实施工程师角色不再是唯一入口。
+	assignmentRolePenetrationEngineer = "penetration_engineer"
+	assignmentRoleDirectorySize       = 50
 )
 
 // ActivateContract 执行合同生效事件驱动的投递（机器入口）。
