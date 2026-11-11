@@ -63,7 +63,7 @@ func TestNativeScopeApprovalCatalogMapping(t *testing.T) {
 	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.CatalogVersion != "12" {
+	if manifest.CatalogVersion != "13" {
 		t.Fatalf("catalog=%s", manifest.CatalogVersion)
 	}
 	for _, role := range manifest.Roles {

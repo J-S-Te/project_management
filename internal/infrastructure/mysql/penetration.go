@@ -222,6 +222,9 @@ func (r *Repository) AdvancePenetrationExecution(ctx context.Context, tenantID, 
 	return r.GetPenetrationWorkPackage(ctx, tenantID, itemID)
 }
 
+// AdvancePenetrationReport 推进专项阶段并对新版本执行真实轮次与签发门禁。
+// 参数：ctx 为请求，tenantID/itemID 为主体，input 为版本命令，actor/now 为操作者及时刻。
+// 返回值：新工作包；状态、审核或职责分离不符时返回错误。
 func (r *Repository) AdvancePenetrationReport(ctx context.Context, tenantID, itemID string, input domain.PenetrationReportStatusInput, actor string, now time.Time) (domain.PenetrationWorkPackage, error) {
 	err := r.mutatePenetrationPackage(ctx, tenantID, itemID, input.ExpectedVersion, input.IdempotencyKey, "REPORT_STATUS_UPDATED", actor, input, now, func(tx *gorm.DB, row *penetrationWorkPackageRecord) (map[string]any, error) {
 		if row.ExecutionStatus != "COMPLETED" {
@@ -240,15 +243,24 @@ func (r *Repository) AdvancePenetrationReport(ctx context.Context, tenantID, ite
 		case "DRAFTING":
 			updates["prepared_by"], updates["prepared_at"] = actor, now
 		case "SUBMITTED":
+			if revision.ReviewRequired {
+				return nil, application.PreconditionError("请通过真实专项审核轮次提交")
+			}
 			if revision.PreparedBy == "" || strings.TrimSpace(revision.FileID) == "" {
 				return nil, application.PreconditionError("请先编制并上传专项报告文件")
 			}
 		case "APPROVED":
+			if revision.ReviewRequired {
+				return nil, application.PreconditionError("请通过真实专项审核轮次决定")
+			}
 			if revision.PreparedBy == "" || actor == revision.PreparedBy {
 				return nil, application.PreconditionError("专项报告审核人与编制人必须不同")
 			}
 			updates["reviewed_by"], updates["reviewed_at"] = actor, now
 		case "ISSUED":
+			if err := metricReportIssueGate(tx, &revision); err != nil {
+				return nil, err
+			}
 			if revision.ReviewedBy == "" || actor == revision.PreparedBy || actor == revision.ReviewedBy {
 				return nil, application.PreconditionError("专项报告签发人必须与编制人、审核人不同")
 			}
@@ -274,6 +286,9 @@ func (r *Repository) AdvancePenetrationReport(ctx context.Context, tenantID, ite
 	return r.GetPenetrationWorkPackage(ctx, tenantID, itemID)
 }
 
+// RegisterPenetrationReportArtifact 在专项编制阶段登记并冻结送审文件。
+// 参数：ctx 为请求，tenantID/itemID 为主体，input 为文件版本命令，actor/now 为操作者及时刻。
+// 返回值：新工作包；已送审、版本冲突或写入失败时返回错误。
 func (r *Repository) RegisterPenetrationReportArtifact(ctx context.Context, tenantID, itemID string, input domain.PenetrationReportArtifactInput, actor string, now time.Time) (domain.PenetrationWorkPackage, error) {
 	err := r.mutatePenetrationPackage(ctx, tenantID, itemID, input.ExpectedVersion, input.IdempotencyKey, "REPORT_ARTIFACT_REGISTERED", actor, input, now, func(tx *gorm.DB, row *penetrationWorkPackageRecord) (map[string]any, error) {
 		if row.ReportStatus != "DRAFTING" {
@@ -281,6 +296,9 @@ func (r *Repository) RegisterPenetrationReportArtifact(ctx context.Context, tena
 		}
 		revision, err := lockPenetrationReportRevision(tx, row, now)
 		if err != nil {
+			return nil, err
+		}
+		if err = metricArtifactGate(tx, &revision); err != nil {
 			return nil, err
 		}
 		result := tx.Model(&reportRevisionRecord{}).Where("id=? AND status='DRAFTING'", revision.ID).Updates(map[string]any{
@@ -372,6 +390,9 @@ func createPenetrationEvent(tx *gorm.DB, row *penetrationWorkPackageRecord, even
 	return err
 }
 
+// lockPenetrationReportRevision 锁定专项当前版本，新版本要求真实审核轮次。
+// 参数：tx 为父项及专项锁内事务，row 为工作包，now 为UTC创建时刻。
+// 返回值：当前版本或数据库错误；已有历史版本保持原审核属性。
 func lockPenetrationReportRevision(tx *gorm.DB, row *penetrationWorkPackageRecord, now time.Time) (reportRevisionRecord, error) {
 	var revision reportRevisionRecord
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
@@ -380,7 +401,7 @@ func lockPenetrationReportRevision(tx *gorm.DB, row *penetrationWorkPackageRecor
 	).Take(&revision).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		revision = reportRevisionRecord{
-			TenantID: row.TenantID, ServiceItemID: row.ParentServiceItemID, SubjectType: "PENETRATION_WORK_PACKAGE",
+			ReviewRequired: true, TenantID: row.TenantID, ServiceItemID: row.ParentServiceItemID, SubjectType: "PENETRATION_WORK_PACKAGE",
 			SubjectID: row.ID, Revision: row.ReportRevision, Status: "NONE", ValidityStatus: "ACTIVE", CreatedAt: now, UpdatedAt: now,
 		}
 		err = tx.Create(&revision).Error
@@ -400,7 +421,7 @@ func (r *Repository) ListPenetrationReportRevisions(ctx context.Context, tenantI
 	result := make([]domain.ReportRevision, 0, len(rows))
 	for _, row := range rows {
 		result = append(result, domain.ReportRevision{
-			ID: row.ID, ServiceItemID: row.ServiceItemID, SubjectType: row.SubjectType, SubjectID: row.SubjectID,
+			ReviewRequired: row.ReviewRequired, ID: row.ID, ServiceItemID: row.ServiceItemID, SubjectType: row.SubjectType, SubjectID: row.SubjectID,
 			Revision: row.Revision, Status: row.Status, ValidityStatus: row.ValidityStatus,
 			FileID: row.FileID, FileName: row.FileName, FileMIME: row.FileMIME, FileSize: row.FileSize, FileSHA256: row.FileSHA256,
 			PreparedBy: row.PreparedBy, PreparedAt: formatOptionalTime(row.PreparedAt), ReviewedBy: row.ReviewedBy,

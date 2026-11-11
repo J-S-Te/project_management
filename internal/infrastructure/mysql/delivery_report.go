@@ -90,6 +90,9 @@ func allowedReportPhase(phase string) bool {
 	return domain.ReportPhaseRank(phase) > 0
 }
 
+// ensureReportRevision 为升级后首次创建的报告版本启用真实轮次审核。
+// 参数：tx 为父项锁内事务，item 为当前服务项，now 为UTC创建时刻。
+// 返回值：版本已存在时保持历史属性，新增或查询失败时返回错误。
 func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) error {
 	var count int64
 	if err := tx.Model(&reportRevisionRecord{}).
@@ -106,7 +109,7 @@ func ensureReportRevision(tx *gorm.DB, item *serviceItemRecord, now time.Time) e
 		status = domain.ReportPhaseNone
 	}
 	return tx.Create(&reportRevisionRecord{
-		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision,
+		ReviewRequired: true, TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision,
 		Status: status, ValidityStatus: "ACTIVE", CreatedAt: now, UpdatedAt: now,
 	}).Error
 }
@@ -120,7 +123,7 @@ func (r *Repository) ListReportRevisions(ctx context.Context, tenantID, itemID s
 	items := make([]domain.ReportRevision, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, domain.ReportRevision{
-			ID: row.ID, ServiceItemID: row.ServiceItemID, SubjectType: row.SubjectType, SubjectID: row.SubjectID, Revision: row.Revision,
+			ReviewRequired: row.ReviewRequired, ID: row.ID, ServiceItemID: row.ServiceItemID, SubjectType: row.SubjectType, SubjectID: row.SubjectID, Revision: row.Revision,
 			Status: row.Status, ValidityStatus: row.ValidityStatus,
 			CorrectionRequestID: row.CorrectionRequestID, CorrectionReason: row.CorrectionReason,
 			FileID: row.FileID, FileName: row.FileName, FileMIME: row.FileMIME,
@@ -136,6 +139,9 @@ func (r *Repository) ListReportRevisions(ctx context.Context, tenantID, itemID s
 	return items, nil
 }
 
+// RegisterReportArtifact 为当前编制版本登记文件并冻结已送审证据。
+// 参数：ctx 为请求，tenantID/itemID/revision 为版本身份，input 为文件，actor/now 为操作者及时刻。
+// 返回值：过期版本、已送审或写入失败时拒绝，成功返回nil。
 func (r *Repository) RegisterReportArtifact(ctx context.Context, tenantID, itemID string, revision uint64, input domain.ReportArtifactInput, actor string, now time.Time) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var item serviceItemRecord
@@ -146,6 +152,13 @@ func (r *Repository) RegisterReportArtifact(ctx context.Context, tenantID, itemI
 			return application.PreconditionError("只能为当前处于编制阶段的报告版本登记文件")
 		}
 		if err := ensureReportRevision(tx, &item, now); err != nil {
+			return err
+		}
+		current, err := lockReportRevision(tx, &item)
+		if err != nil {
+			return err
+		}
+		if err = metricArtifactGate(tx, &current); err != nil {
 			return err
 		}
 		result := tx.Model(&reportRevisionRecord{}).Where("tenant_id=? AND subject_type='SERVICE_ITEM' AND subject_id=? AND revision=? AND validity_status='ACTIVE'", tenantID, itemID, revision).
@@ -257,6 +270,9 @@ func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase st
 	case "COMPILING":
 		updates["prepared_by"], updates["prepared_at"] = actor, event.CreatedAt
 	case "REVIEWED":
+		if revision.ReviewRequired {
+			return application.PreconditionError("请通过真实审核轮次提交并由质量管理员独立审核")
+		}
 		if revision.PreparedBy == "" || actor == revision.PreparedBy {
 			return application.PreconditionError("报告审核人与编制人必须是不同人员")
 		}
@@ -265,6 +281,9 @@ func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase st
 		}
 		updates["reviewed_by"], updates["reviewed_at"] = actor, event.CreatedAt
 	case "ISSUED":
+		if err := metricReportIssueGate(tx, revision); err != nil {
+			return err
+		}
 		if revision.ReviewedBy == "" || actor == revision.PreparedBy || actor == revision.ReviewedBy {
 			return application.PreconditionError("报告签发人必须与编制人、审核人不同")
 		}
@@ -289,6 +308,9 @@ func advanceReportRevision(tx *gorm.DB, revision *reportRevisionRecord, phase st
 	return nil
 }
 
+// invalidateAndCreateReportRevision 作废旧版并开启必须真实审核的新更正版本。
+// 参数：tx 为事务，item 为父项，event 为已获独立批准的更正事件。
+// 返回值：旧版非有效或写入失败时返回错误。
 func invalidateAndCreateReportRevision(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
 	current, err := lockReportRevision(tx, item)
 	if err != nil {
@@ -306,7 +328,7 @@ func invalidateAndCreateReportRevision(tx *gorm.DB, item *serviceItemRecord, eve
 		return application.ErrConflict
 	}
 	return tx.Create(&reportRevisionRecord{
-		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision + 1,
+		ReviewRequired: true, TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID, Revision: item.ReportRevision + 1,
 		Status: "NONE", ValidityStatus: "ACTIVE", CorrectionRequestID: stringValue(event.Payload, "request_id"),
 		CorrectionReason: stringValue(event.Payload, "reason"), CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
 	}).Error

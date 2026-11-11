@@ -75,9 +75,9 @@ func (r *Repository) CreateEquipmentForImport(ctx context.Context, item domain.C
 	return item, err
 }
 
-// DeleteEquipment 与预留写入方共享设备主记录锁。
-// 取得锁后读取有效 JSON 计划：旧计划可能早于每日
-// 预留索引。历史或已归还快照保留为不可变证据。
+// DeleteEquipment 在设备锁内核验活动占用与不可变指标事实后删除未使用档案。
+// 参数：ctx 为请求，tenantID 为租户，resourceID 为设备资源身份。
+// 返回值：存在容量或实际用量时要求停用保留档案，其余占用及存储错误原样返回。
 func (r *Repository) DeleteEquipment(ctx context.Context, tenantID, resourceID string) error {
 	resourceID = strings.TrimSpace(resourceID)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -89,6 +89,17 @@ func (r *Repository) DeleteEquipment(ctx context.Context, tenantID, resourceID s
 		if !exists {
 			return application.ErrNotFound
 		}
+		for _, model := range []any{&metricCapacityRecord{}, &metricUsageRecord{}} {
+			var facts int64
+			if err := tx.Model(model).Where("tenant_id=? AND resource_type='EQUIPMENT' AND resource_id=?",
+				tenantID, master.ResourceID).Limit(1).Count(&facts).Error; err != nil {
+				return err
+			}
+			if facts > 0 {
+				return application.ConflictError("设备已有容量或实际用量历史，请停用设备并保留档案用于审计和更正")
+			}
+		}
+
 		var plans []struct {
 			ServiceItemID string
 			Equipment     []byte

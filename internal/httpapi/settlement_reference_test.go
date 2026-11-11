@@ -62,3 +62,10 @@ func TestSettlementReferenceUsesVerifiedTenant(t *testing.T) {
 		}
 	}
 }
+
+// SettlementReferenceServiceItems 为机器引用测试返回同项目最小服务项身份。
+// 参数：ctx 为请求，tenant/project 为已验签且已授权引用。
+// 返回值：非空服务项集合，不含明细。
+func (r *settlementRefRepo) SettlementReferenceServiceItems(ctx context.Context, tenant, project string) ([]string, error) {
+	return []string{"SI1"}, nil
+}

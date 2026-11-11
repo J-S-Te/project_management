@@ -220,6 +220,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		daInternal.Use(h.authenticateDashboardIntegration(*integration), h.auditWrites())
 		daInternal.GET("/dashboard", h.dashboard)
 		daInternal.GET("/dashboard/reports", h.reportDashboard)
+		daInternal.GET("/dashboard/metrics", h.metricFacts)
 		daInternal.GET("/dashboard/projects/snapshot", h.projectSnapshot(snapshotLimits))
 	}
 	if flow, ok := identity.(OIDCFlow); ok {
@@ -295,6 +296,18 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.PUT("/service-items/:id/penetration-work-package/report-artifact", require("project.report.prepare"), h.registerPenetrationReportArtifact)
 	api.POST("/service-items/:id/penetration-work-package/report-status", requireAny("project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive"), h.advancePenetrationReport)
 	api.GET("/service-items/:id/report-revisions", require("project.read"), h.listReportRevisions)
+	api.GET("/service-items/:id/report-reviews", require("project.read"), h.metricReviewList)
+	api.GET("/service-items/:id/report-reviews/current", require("project.read"), h.metricReviewCurrent)
+	api.POST("/service-items/:id/report-reviews/submit", require("project.report.prepare"), h.metricReviewCommand(false))
+	api.POST("/service-items/:id/report-reviews/decision", require("project.report.review"), h.metricReviewCommand(true))
+	api.GET("/metric-facts/capacities", require("project.read"), h.metricResourceList("capacities"))
+	api.POST("/metric-facts/capacities", requireAny("project.person_capacity.manage", "project.equipment_capacity.manage"), h.metricCapacityPublish)
+	api.GET("/metric-facts/usages", require("project.read"), h.metricResourceList("usages"))
+	api.POST("/metric-facts/usages", require("project.resource_usage.record"), h.metricUsageCreate)
+	api.POST("/metric-facts/usages/:usageID/submit", require("project.resource_usage.record"), h.metricUsageCommand("SUBMIT"))
+	api.POST("/metric-facts/usages/:usageID/cancel", require("project.resource_usage.record"), h.metricUsageCommand("CANCEL"))
+	api.POST("/metric-facts/usages/:usageID/decision", require("project.resource_usage.confirm"), h.metricUsageCommand("DECISION"))
+
 	api.POST("/service-items/:id/evidence", requireAny("project.field.execute", "project.deviation.report", "project.report.prepare"), h.uploadEvidence)
 	api.PUT("/service-items/:id/report-revisions/:revision/artifact", require("project.report.prepare"), h.registerReportArtifact)
 	// 目录与字典类只读接口统一以 project.read 为基线：这些接口只提供表单下拉选项
