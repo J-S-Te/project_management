@@ -56,9 +56,9 @@ type ExpenseProjectReference struct {
 	ReasonCodes          []string              `json:"reason_codes"`
 }
 
-// ExpenseReference 区分当前参与资格和对象状态障碍，不凭历史参与放行终止项目。
+// ExpenseReference 区分当前参与资格和阶段障碍，仅从报告编制起开放正常项目报销。
 // 参数：p为权威项目，item为可选服务项，actor为稳定主体，grant为当前名单，now为校验时刻。
-// 返回值：最小引用；终止保持Eligible为false，错误归属或失效资格不保留ParticipantEligible。
+// 返回值：最小引用；阶段不符或终止时不可报销，错误归属或失效资格不保留参与资格。
 func ExpenseReference(p Project, item *ServiceItem, actor string, grant *ExpenseParticipant, now time.Time) ExpenseProjectReference {
 	r := ExpenseProjectReference{ProjectID: p.ID, ProjectName: p.Name, SourceKind: p.SourceKind, ContractID: p.ContractID, CustomerID: p.CustomerID, ProjectVersion: p.Version, ProjectStatus: p.Status, ValidatedAt: now, ValidUntil: now.Add(2 * time.Minute), RequiredApproverRefs: []ExpenseApprover{}, ReasonCodes: []string{}}
 	if actor != "" && strings.TrimSpace(actor) == actor {
@@ -88,6 +88,9 @@ func ExpenseReference(p Project, item *ServiceItem, actor string, grant *Expense
 	if expenseTerminated(p.Status) {
 		r.Eligible = false
 		r.ReasonCodes = append(r.ReasonCodes, "PROJECT_TERMINATED")
+	} else if p.Status != ProjectStatusReporting && p.Status != ProjectStatusCompleted {
+		r.Eligible = false
+		r.ReasonCodes = append(r.ReasonCodes, "PROJECT_REPORT_STAGE_REQUIRED")
 	}
 	if item != nil && validItem && expenseTerminated(item.Status) {
 		r.Eligible = false

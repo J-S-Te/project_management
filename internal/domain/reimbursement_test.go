@@ -10,7 +10,7 @@ import (
 // 返回值：无；边界不符时测试失败。
 func TestExpenseEligibilityPreservesServiceBoundary(t *testing.T) {
 	now := time.Now().UTC()
-	p := Project{ID: "p", TenantID: "t", SourceKind: "NATIVE", Version: 1}
+	p := Project{ID: "p", TenantID: "t", SourceKind: "NATIVE", Status: ProjectStatusReporting, Version: 1}
 	a := ServiceItem{ID: "a", ProjectID: "p", TenantID: "t", EngineerIDs: []string{"u"}, Version: 1}
 	b := ServiceItem{ID: "b", ProjectID: "p", TenantID: "t", Version: 1}
 	if ExpenseReference(p, &a, "u", nil, now).Eligible != true {

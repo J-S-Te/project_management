@@ -24,7 +24,10 @@ func expenseRepositoryFixture(t *testing.T) *Repository {
 			t.Fatal(err)
 		}
 	}
-	if err := db.Create(&projectRecord{ID: "p", TenantID: "t", Name: "项目", Version: 1}).Error; err != nil {
+	project := projectRecord{
+		ID: "p", TenantID: "t", Name: "项目", Status: domain.ProjectStatusReporting, Version: 1,
+	}
+	if err := db.Create(&project).Error; err != nil {
 		t.Fatal(err)
 	}
 	return NewRepository(db)
@@ -104,7 +107,12 @@ func TestExpenseSearchAndBatchUseSameQualification(t *testing.T) {
 	if err := r.db.Model(&projectRecord{}).Where("id=?", "p").Update("source_kind", "NATIVE").Error; err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []serviceItemRecord{{ID: "a", TenantID: "t", ProjectID: "p", EngineerIDs: []byte(`["u"]`), Version: 1}, {ID: "b", TenantID: "t", ProjectID: "p", EngineerIDs: []byte(`[]`), Version: 1}} {
+	for _, s := range []serviceItemRecord{
+		{ID: "a", TenantID: "t", ProjectID: "p", EngineerIDs: []byte(`["u"]`),
+			Status: domain.ProjectStatusFieldCompleted, ReportStatus: "COMPILING", Version: 1},
+		{ID: "b", TenantID: "t", ProjectID: "p", EngineerIDs: []byte(`[]`),
+			Status: domain.ProjectStatusFieldCompleted, ReportStatus: "COMPILING", Version: 1},
+	} {
 		if err := r.db.Create(&s).Error; err != nil {
 			t.Fatal(err)
 		}
