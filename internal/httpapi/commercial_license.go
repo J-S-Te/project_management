@@ -21,6 +21,7 @@ var commercialHistoryRoutes = map[string]bool{
 	"/internal/v1/contract-imports/capabilities":                            true,
 	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": true,
 	"/internal/v1/settlement/project-references/:projectID":                 true,
+	"/internal/v1/dashboard/reports":                                        true,
 	"/internal/v1/dashboard/projects/snapshot":                              true,
 	"/internal/v1/contracts/detection-categories":                           true, "/internal/v1/dashboard": true,
 	"/internal/v1/handover/responsibilities": true, "/internal/v1/handover/transfers/:item_id": true,

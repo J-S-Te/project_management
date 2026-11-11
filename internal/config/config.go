@@ -370,9 +370,9 @@ func fieldIncompleteReasonGate() (string, error) {
 	}
 }
 
-// validate 检查运行配置和集成门禁。
-// 参数：c 为待使用的配置。
-// 返回值：配置不满足契约时返回错误。
+// validate 校验应用基础配置及各独立机器用途的信任域。
+// 参数：无，读取当前配置。
+// 返回值：配置有效时为空；依赖、用途或运行参数非法时返回错误。
 func (c Config) validate() error {
 	if strings.TrimSpace(c.HTTPAddress) == "" {
 		return fmt.Errorf("PM_HTTP_ADDR must not be empty")
@@ -568,6 +568,9 @@ func (c Config) validate() error {
 				return fmt.Errorf("%s is required when dashboard bearer authentication is enabled", item.name)
 			}
 		}
+	}
+	if c.DashboardMachineRequireBearer && (c.DashboardMachineCallerApp != "data_analysis" || c.DashboardMachineScope != "dashboard.project.read") {
+		return fmt.Errorf("DASHBOARD_MACHINE_CALLER_APPLICATION_CODE must be data_analysis and DASHBOARD_MACHINE_REQUIRED_SCOPE must be dashboard.project.read")
 	}
 	// 项目汇总包含全租户数据，机器接口启用后必须校验调用方身份。
 	if c.DashboardMachineEnabled && !c.DashboardMachineRequireBearer {

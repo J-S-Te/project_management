@@ -219,6 +219,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		daInternal := router.Group("/internal/v1")
 		daInternal.Use(h.authenticateDashboardIntegration(*integration), h.auditWrites())
 		daInternal.GET("/dashboard", h.dashboard)
+		daInternal.GET("/dashboard/reports", h.reportDashboard)
 		daInternal.GET("/dashboard/projects/snapshot", h.projectSnapshot(snapshotLimits))
 	}
 	if flow, ok := identity.(OIDCFlow); ok {
