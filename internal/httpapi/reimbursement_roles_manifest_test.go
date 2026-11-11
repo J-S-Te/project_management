@@ -23,7 +23,7 @@ func TestSalesDirectorIsMinimumProjectDirectoryRole(t *testing.T) {
 	}
 	for _, role := range manifest.Roles {
 		if role.Code == "sales_director" {
-			if manifest.Catalog != "12" || len(role.Permissions) != 1 || role.Permissions[0] != "project.expense_reference.eligible" {
+			if manifest.Catalog != "13" || len(role.Permissions) != 1 || role.Permissions[0] != "project.expense_reference.eligible" {
 				t.Fatal("sales role too broad", manifest.Catalog, role.Permissions)
 			}
 			return

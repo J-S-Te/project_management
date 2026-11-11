@@ -90,6 +90,7 @@ type serviceItemRecord struct {
 func (serviceItemRecord) TableName() string { return "pm_service_item" }
 
 type reportRevisionRecord struct {
+	ReviewRequired      bool   `gorm:"not null"`
 	ID                  uint64 `gorm:"primaryKey;autoIncrement"`
 	TenantID            string `gorm:"size:64;not null"`
 	ServiceItemID       string `gorm:"size:32;not null"`

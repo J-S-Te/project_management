@@ -94,6 +94,7 @@ type ServiceItem struct {
 // ReportRevision 是不可变报告版本台账投影。更正后仍保留该行；
 // validity_status=VOID 阻止新下载，同时完整保留旧审计和下载历史。
 type ReportRevision struct {
+	ReviewRequired      bool   `json:"review_required"`
 	ID                  uint64 `json:"id"`
 	ServiceItemID       string `json:"service_item_id"`
 	SubjectType         string `json:"subject_type"`

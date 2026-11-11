@@ -88,8 +88,8 @@ func TestFieldExecutionPermissionBelongsToProjectManagerAndEngineers(t *testing.
 	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
 		t.Fatalf("decode permission manifest: %v", err)
 	}
-	if manifest.CatalogVersion != "12" {
-		t.Fatalf("catalog_version=%q, want 12 for engineer field execution", manifest.CatalogVersion)
+	if manifest.CatalogVersion != "13" {
+		t.Fatalf("catalog_version=%q, want 13 for metric facts", manifest.CatalogVersion)
 	}
 	// 角色配置哈希必须按 `<应用>-v<目录版本>-<变更>` 命名，平台据此判断授权目录是否需要重新发布。
 	hashPrefix := "project-management-v" + manifest.CatalogVersion + "-"
@@ -138,9 +138,9 @@ func TestFieldExecutionPermissionBelongsToProjectManagerAndEngineers(t *testing.
 		}
 	}
 
-	// 工程师岗位的最小权限集：查看、现场执行、现场完成与偏离上报。
+	// 工程师岗位的最小权限集：查看、现场执行、现场完成、偏离上报及本人实际用量登记。
 	// 任何新增权限都必须显式改这份期望，避免管理类权限被顺手放宽。
-	engineerPermissions := []string{"project.read", "project.field.execute", "project.deviation.report", "project.field.complete"}
+	engineerPermissions := []string{"project.read", "project.field.execute", "project.deviation.report", "project.field.complete", "project.resource_usage.record"}
 	engineerBoundaries := map[string][]string{
 		"engineer":             engineerPermissions,
 		"penetration_engineer": engineerPermissions,

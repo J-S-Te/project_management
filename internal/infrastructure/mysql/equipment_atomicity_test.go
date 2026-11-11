@@ -33,7 +33,7 @@ func equipmentAtomicityDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.AutoMigrate(&capabilityRecord{}, &equipmentReservationRecord{}, &implPlanRecord{}, &serviceItemRecord{}, &projectRecord{}, &contractImportBindingRecord{}, &contractIdentityGuardRecord{}); err != nil {
+	if err := db.AutoMigrate(&capabilityRecord{}, &equipmentReservationRecord{}, &implPlanRecord{}, &serviceItemRecord{}, &projectRecord{}, &contractImportBindingRecord{}, &contractIdentityGuardRecord{}, &metricCapacityRecord{}, &metricUsageRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Exec("CREATE UNIQUE INDEX uq_pm_capability_resource ON pm_capability (tenant_id, resource_type, resource_id)").Error; err != nil {

@@ -324,9 +324,9 @@ func auditIPSource(value string) string {
 	}
 }
 
-// reworkReportRevision 处理“报告回退现场”的修订规则：
-//  1. 当前修订置为 SUPERSEDED，保留原文件与审批证据，便于追溯；
-//  2. 为下一个修订号创建 ACTIVE/NONE 的空修订，供重新编制使用（幂等）。
+// reworkReportRevision 保留返工旧版本并开启必须真实审核的新版本。
+// 参数：tx 为父项锁内事务，item 为当前服务项，event 为受控返工事件。
+// 返回值：存储失败时返回错误，已创建的同版保持幂等。
 func reworkReportRevision(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
 	if err := tx.Model(&reportRevisionRecord{}).
 		Where("tenant_id=? AND subject_type=? AND subject_id=? AND revision=? AND validity_status=?",
@@ -344,7 +344,7 @@ func reworkReportRevision(tx *gorm.DB, item *serviceItemRecord, event domain.Del
 		return nil
 	}
 	return tx.Create(&reportRevisionRecord{
-		TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID,
+		ReviewRequired: true, TenantID: item.TenantID, ServiceItemID: item.ID, SubjectType: "SERVICE_ITEM", SubjectID: item.ID,
 		Revision: item.ReportRevision + 1, Status: "NONE", ValidityStatus: "ACTIVE",
 		CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt,
 	}).Error
