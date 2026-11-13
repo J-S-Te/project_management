@@ -1,10 +1,11 @@
 # 主报告整改状态升级说明
 
-本文件是发布说明，编写此说明不代表已发布。当前实现未提交、未部署。
+本文件说明状态升级与恢复策略，具体发布状态以对应发布记录为准。
 
 ## 行为与数据
 
-- 主报告链：NONE → RECTIFYING → COMPILING → REVIEWED → ISSUED → ARCHIVED。
+- 主报告默认链：NONE → RECTIFYING → COMPILING → REVIEWED → ISSUED → ARCHIVED。
+- 2026-11-13补充：待整改可单次选择NONE → COMPILING；默认仍先整改，其余跳步不开放。此次补充无需新增迁移。
 - NONE 表示待整改，现场完成不会自动进入编制。整改和编制共用 project.report.prepare；权限目录版本仍为8。
 - 整改归入项目级报告编制rank7，前端报告局部进度每阶段20%。
 - 存量编制/审核/签发/归档记录的字符串值及修订证据不变，无需数据回填。
@@ -64,7 +65,7 @@ DDL完成而迁移账本尚未写入时，重新运行迁移会核验新定义�
 
 - `GET /projects-monitoring` 接受 `report_stage`，语义与列表一致；每行项目内嵌 `project.report_stage`。
 - 快照新增 `report_stage_counts`（按派生报告阶段对全筛选集分组）。既有 `status_counts` 同步改为按**派生**状态表达式分组，不再按存储列 `pm_project.status` 分组（与行口径对齐，属既有缺陷修复）。
-- SLA 规则目录新增 5 个报告阶段码（整改中/编制中/审核中/已签发/已归档），供运营配置阈值；不写种子数据、不进迁移。
+- SLA 规则目录新增 5 个报告阶段码（整改中/编制中/已审核/已签发/已归档），供运营配置阈值；不写种子数据、不进迁移。
 - 报告阶段停留以 `pm_service_item.report_updated_at` 计时（每次报告推进刷新），匹配 `report_status`；状态规则仍用 `status_changed_at`。命中条目带 `report_stage` 与 `rule_dimension`，并沿用既有 `slaProjects` 逻辑进入 sla/risk 筛选。
 - 通知幂等键改为 `sla-{itemID}-{kind}-{dimension}-{ruleStatus}-{bizday}`：同一服务项同一天同时命中状态规则与报告阶段规则时两条通知都会送达；报告阶段文案使用「报告·整改中」等阶段名。
 - `monitoringMilestone` 与 `action_section` 未改动，前端既有展示不变。

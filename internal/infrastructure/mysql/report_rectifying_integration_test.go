@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -155,12 +156,12 @@ func (f rectifyingFixture) snapshotProjectStage(t *testing.T, want string) {
 	}
 }
 
-// TestReportRectifyingChainOnMySQL 验证整改必经、职责分离及文件门禁的完整主报告链。
+// TestReportRectifyingChainOnMySQL 验证默认整改链、职责分离及文件门禁。
 // 参数：t 为测试上下文。
 // 返回值：无；状态跳级、证据误写或原有审核签发门禁失效时测试失败。
 func TestReportRectifyingChainOnMySQL(t *testing.T) {
 	f := newRectifyingFixture(t)
-	f.rejectAdvance(t, "preparer", "COMPILING", application.ErrValidation)
+	f.rejectAdvance(t, "preparer", "REVIEWED", application.ErrValidation)
 	before := f.snapshot(t)
 	if err := f.advance(t, "rectifier", "RECTIFYING"); err != nil {
 		t.Fatalf("开始整改: %v", err)
@@ -227,4 +228,44 @@ func TestReportRectifyingChainOnMySQL(t *testing.T) {
 	}
 	f.snapshotProjectStage(t, domain.ReportPhaseArchived)
 	f.rejectAdvance(t, "rectifier", "RECTIFYING", application.ErrValidation)
+}
+
+// TestReportOptionalRectificationOnMySQL 验证待整改直接编制及真实审核守卫。
+// 参数：t 为仅使用明确隔离 MySQL 的测试上下文。
+// 返回值：无；编制证据、选择留痕、项目投影或审核限制不符时失败。
+func TestReportOptionalRectificationOnMySQL(t *testing.T) {
+	f := newRectifyingFixture(t)
+	if err := f.db.Model(&reportRevisionRecord{}).Where("tenant_id=?", f.tenant).
+		Update("review_required", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	before := f.snapshot(t)
+	if err := f.advance(t, "preparer", "COMPILING"); err != nil {
+		t.Fatal(err)
+	}
+	s := f.snapshot(t)
+	if s.Item.ReportStatus != "COMPILING" || s.Item.Version != before.Item.Version+1 ||
+		s.Item.ReportPreparedBy != "preparer" || s.Revision.Status != "COMPILING" ||
+		s.Revision.PreparedBy != "preparer" || s.Revision.PreparedAt == nil ||
+		s.Project.Status != domain.ProjectStatusReporting {
+		t.Fatal("直接编制未同步阶段、版本、编制身份和项目状态")
+	}
+	var event deliveryEventRecord
+	if err := f.db.Where("tenant_id=?", f.tenant).Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Previous string `json:"previous_phase"`
+		Skipped  bool   `json:"rectification_skipped"`
+		Revision uint64 `json:"report_revision"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Previous != "NONE" || !payload.Skipped || payload.Revision != s.Item.ReportRevision {
+		t.Fatal("直接编制选择未真实留痕")
+	}
+	f.snapshotProjectStage(t, domain.ReportPhaseCompiling)
+	f.rejectAdvance(t, "preparer", "RECTIFYING", application.ErrValidation)
+	f.rejectAdvance(t, "reviewer", "REVIEWED", application.ErrPrecondition)
 }

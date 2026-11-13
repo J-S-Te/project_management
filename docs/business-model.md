@@ -265,14 +265,19 @@ GROUP BY p.id, p.status LIMIT 20;
 
 ## 主报告整改阶段与发布兼容（2026-11-04）
 
-主服务项报告强制经过 `RECTIFYING`（整改中），复用 `project.report.prepare`；
+主服务项报告默认经过 `RECTIFYING`（整改中），无需整改时允许从 `NONE` 直接进入 `COMPILING`。
+两种路径复用 `project.report.prepare` 和预期版本校验；
 整改状态归入项目级「报告编制」rank 7。进入整改只更新状态与时间，进入编制时才记录编制人。
 该约束适用于所有主服务项报告，包括独立渗透服务项；内嵌渗透专项独立状态链保持不变。
 本轮只增加流程阶段，不包含整改清单、客户反馈、复测证据或整改验收管理。
 
 报告文件仍只可在 `NONE/COMPILING` 登记，界面只在编制中显示上传入口。
 报告返工允许 `RECTIFYING/COMPILING/REVIEWED`，旧修订保留为 `SUPERSEDED`，新修订为 `NONE`；
-重新完成现场后必须再次进入整改。已签发/归档报告仍走原更正审批，新修订同样从待整改开始。
+重新完成现场后从待整改选择整改或直接编制。已签发/归档报告仍走原更正审批，新修订同样从待整改开始。
+
+2026-11-13：`REVIEWED` 展示统一为「已审核」；真实审核中的轮次仍显示「待审核」。
+阶段事件由事务层记录 `previous_phase`、`report_revision`、`rectification_skipped`，
+直接编制照常登记编制人及时间，不绕过后续独立审核、签发或归档。本次调整无需新增迁移。
 
 迁移 `000041_report_rectifying.sql` 必须先行，保留共享修订表的渗透专项状态和既有数据。
 具体顺序、受控项目更新入口及旧版本回退限制见 [整改状态升级说明](report-rectifying-upgrade.md)。
