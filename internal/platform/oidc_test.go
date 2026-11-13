@@ -171,17 +171,18 @@ func TestAuthorizationContextClientDecodesMetadata(t *testing.T) {
 }
 
 type fakeOIDCStore struct {
-	login      LoginTransaction
-	session    StoredOIDCSession
-	created    StoredOIDCSession
-	calls      int
-	revoked    bool
-	revokedAll bool
-	updated    bool
-	touched    bool
-	touchErr   error
-	touchNow   time.Time
-	touchAt    time.Time
+	login       LoginTransaction
+	session     StoredOIDCSession
+	created     StoredOIDCSession
+	calls       int
+	revoked     bool
+	revokedAll  bool
+	updated     bool
+	seenTouched bool
+	touched     bool
+	touchErr    error
+	touchNow    time.Time
+	touchAt     time.Time
 }
 
 func (s *fakeOIDCStore) SaveLoginTransaction(_ context.Context, value LoginTransaction) error {
@@ -203,6 +204,12 @@ func (s *fakeOIDCStore) FindSession(context.Context, []byte, time.Time) (StoredO
 }
 func (s *fakeOIDCStore) UpdateSession(_ context.Context, value StoredOIDCSession, _ time.Time) error {
 	s.updated, s.session = true, value
+	return nil
+}
+
+func (s *fakeOIDCStore) TouchSessionLastSeen(_ context.Context, _ []byte, now time.Time) error {
+	s.seenTouched = true
+	s.session.LastSeenAt = now
 	return nil
 }
 func (s *fakeOIDCStore) TouchSessionActivity(_ context.Context, _ []byte, now, idleCutoff time.Time) error {
@@ -468,8 +475,11 @@ func TestOrdinaryRequestUpdatesLastSeenOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
 	request.AddCookie(auth.cookie("session-1", now.Add(time.Hour)))
 	principal, err := auth.Authenticate(context.Background(), request)
-	if err != nil || principal.IdentityID != expected.IdentityID || !store.updated {
-		t.Fatalf("principal=%+v error=%v updated=%v", principal, err, store.updated)
+	if err != nil || principal.IdentityID != expected.IdentityID || !store.seenTouched {
+		t.Fatalf("principal=%+v error=%v seenTouched=%v", principal, err, store.seenTouched)
+	}
+	if store.updated {
+		t.Fatal("ordinary request must not rewrite token/principal ciphertext")
 	}
 	if !store.session.LastSeenAt.Equal(now) {
 		t.Fatalf("last_seen_at = %s, want %s", store.session.LastSeenAt, now)

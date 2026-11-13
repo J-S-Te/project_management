@@ -225,7 +225,7 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 		return current, nil
 	}
 	stored.LastSeenAt = now
-	if err := a.store.UpdateSession(ctx, stored, now); err != nil {
+	if err := a.store.TouchSessionLastSeen(ctx, hash, now); err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
 	return principal, nil
