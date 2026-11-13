@@ -402,11 +402,8 @@ func (a *OIDCAuthenticator) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 // Callback 消费原登录事务，验证身份并创建受中央期限约束的本地会话。
-// 参数：w为HTTP响应写入器。
-//
-//	r为原始HTTP请求。
-//
-// 返回值：无。
+// 参数：w为HTTP响应写入器，r为携带同浏览器state及授权码的回调。
+// 返回值：无；旧周期最多重登一次，故障、身份冲突及再次失效保持失败关闭。
 func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 	if a.options.CentralClient != nil {
 		cookie, err := r.Cookie(a.options.SessionCookieName + "_oidc_state")
@@ -466,11 +463,7 @@ func (a *OIDCAuthenticator) Callback(w http.ResponseWriter, r *http.Request) {
 			err = central.Validate(binding.Context, a.centralExpectation(), identity.IdentityID)
 		}
 		if err != nil {
-			status := 503
-			if errors.Is(err, central.ErrInactive) || errors.Is(err, central.ErrBindingConflict) {
-				status = 401
-			}
-			http.Error(w, "central session unavailable", status)
+			a.writeCentralLoginFailure(w, r, tx, err)
 			return
 		}
 	}
