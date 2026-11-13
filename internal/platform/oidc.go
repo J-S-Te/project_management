@@ -75,6 +75,7 @@ type OIDCAuthenticator struct {
 	now                  func() time.Time
 	refreshAuthorization func(context.Context, StoredOIDCSession, time.Time, string) (StoredOIDCSession, Principal, error)
 	backchannelVerifier  backchannelLogoutVerifier
+	centralReads         centralReadGroup
 }
 
 // NewOIDCAuthenticator 装配原OIDC认证、持久存储及可选中央会话依赖。

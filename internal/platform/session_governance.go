@@ -39,7 +39,7 @@ func (a *OIDCAuthenticator) centralState(ctx context.Context, record StoredOIDCS
 	if interact {
 		state, err = a.options.CentralClient.Activity(ctx, string(secret))
 	} else {
-		state, err = a.options.CentralClient.State(ctx, string(secret))
+		state, err = a.readCentralState(ctx, string(secret))
 	}
 	if err == nil {
 		err = central.Validate(state, a.centralExpectation(), record.IdentityID)
