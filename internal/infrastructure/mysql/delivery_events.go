@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// applyItemEvent 在行锁事务内校验并更新服务项及关联交付证据。
+// applyItemEvent 在行锁事务内校验、更新服务项并记录实际报告阶段选择。
 // 参数：tx 为当前事务，item 为已锁定服务项，event 为待应用的交付事件。
 // 返回值：状态、版本或关联证据校验失败时返回错误，成功返回 nil。
 func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
@@ -137,8 +137,7 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return application.ErrValidation
 		}
 		current := domain.ReportPhaseRank(item.ReportStatus)
-		next := domain.ReportPhaseRank(phase)
-		if next != current+1 {
+		if !domain.CanAdvanceReportPhase(item.ReportStatus, phase) {
 			return application.ErrValidation
 		}
 		if err := validatePenetrationReportGate(tx, item, phase); err != nil {
@@ -154,6 +153,10 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if err := advanceReportRevision(tx, &revision, phase, event); err != nil {
 			return err
 		}
+		// 从锁内状态生成选择事实，不能信任客户端提供的跳过标记。
+		event.Payload["previous_phase"] = domain.ReportPhaseCode(current)
+		event.Payload["report_revision"] = revision.Revision
+		event.Payload["rectification_skipped"] = current == 0 && phase == domain.ReportPhaseCompiling
 		updates["report_status"] = phase
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
