@@ -26,7 +26,7 @@ func (r *Repository) ReadMetricFacts(ctx context.Context, tenant string) (domain
 		return empty, tx.Error
 	}
 	defer tx.Rollback()
-	out := domain.MetricFactsSnapshot{SchemaVersion: 1, TenantID: tenant, SourceCode: "project_management", SnapshotAt: time.Now().UTC().Format(time.RFC3339Nano), Complete: true, Rows: []domain.MetricFactRow{}, Basis: "逻辑报告仅完整新审核首轮终决；历史首次未知。实际利用率仅明确发布容量与独立确认实施时段，按北京业务月及冻结容量组织；未登记容量不推算，每资源当月未知覆盖单列。"}
+	out := domain.MetricFactsSnapshot{SchemaVersion: 1, TenantID: tenant, SourceCode: "project_management", SnapshotAt: time.Now().UTC().Format(time.RFC3339Nano), Complete: true, Rows: []domain.MetricFactRow{}, Basis: "逻辑报告仅完整新审核首轮终决；历史首次未知。实际利用率仅明确发布容量与独立确认实施时段，按北京业务月及冻结容量组织；强证据自动确认单独计数且仍属于已确认实际；未登记容量不推算，每资源当月未知覆盖单列。"}
 	if err := metricReportRows(tx, tenant, &out); err != nil {
 		return empty, err
 	}
@@ -181,6 +181,10 @@ func metricResourceRows(tx *gorm.DB, tenant string, out *domain.MetricFactsSnaps
 		switch usage.Status {
 		case "CONFIRMED", "CANCEL_PENDING":
 			row.ActualMinutes += usage.Minutes
+			if usage.AutoConfirmed {
+				row.AutoConfirmedMinutes += usage.Minutes
+				row.AutoConfirmedCount++
+			}
 		case "PENDING":
 			row.PendingCount++
 		}

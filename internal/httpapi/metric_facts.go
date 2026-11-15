@@ -111,6 +111,22 @@ func (h *Handler) metricUsageCommand(action string) gin.HandlerFunc {
 	}
 }
 
+// metricUsageBatch 接收原子批量用量提交、确认或取消命令。
+// 参数：c 为具有登记或确认动作权限的会话。
+// 返回值：无；整批成功返回逐条真实用量，任一失败整批回滚。
+func (h *Handler) metricUsageBatch(c *gin.Context) {
+	var in domain.MetricUsageBatchInput
+	if !decodeNativeScope(c, &in) {
+		return
+	}
+	out, err := h.service.BatchMutateMetricUsages(c.Request.Context(), principal(c), in)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, out)
+}
+
 // metricResourceList 绑定有界分页资源事实查询。
 // 参数：kind 为服务器固定的容量或用量集合名。
 // 返回值：按真实授权范围读取事实的处理函数。

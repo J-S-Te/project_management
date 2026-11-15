@@ -50,6 +50,10 @@ var registeredGETOperations = map[string]core.Operation{
 	"/api/v1/service-items/:id/report-reviews":                              core.READ_HISTORY,
 	"/api/v1/metric-facts/capacities":                                       core.READ_HISTORY,
 	"/api/v1/metric-facts/usages":                                           core.READ_HISTORY,
+	"/api/v1/metric-facts/calendar":                                         core.READ_HISTORY,
+	"/api/v1/metric-facts/calendar-exceptions":                              core.READ_HISTORY,
+	"/api/v1/metric-facts/auto-confirm":                                     core.READ_HISTORY,
+	"/api/v1/service-items/:id/metric-usage-candidates":                     core.READ_HISTORY,
 	"/internal/v1/dashboard/reports":                                        core.READ_HISTORY,
 	"/internal/v1/dashboard/projects/snapshot":                              core.READ_HISTORY,
 
