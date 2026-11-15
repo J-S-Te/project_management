@@ -241,7 +241,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	}
 	// SEC-D11：cookie 会话写请求必须通过同源 Origin 校验（失败关闭）；
 	// 放在 auditWrites 之后，使跨站拒绝尝试同样进入审计。
-	api.Use(h.authenticate(), h.auditWrites(), h.requireSameOriginWrite())
+	api.Use(h.securityFailures(), h.authenticate(), h.auditWrites(), h.requireSameOriginWrite())
 	api.GET("/auth/me", h.me)
 	// 显式用户交互续期：只有该接口推进 last_interactive_at；普通业务请求只更新
 	// last_seen_at。空闲到期由前端探测 401 后回本系统登录，不写全账号登出。
@@ -440,6 +440,39 @@ func securityHeaders() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// securityFailures 在认证失败后记录全局安全事件。认证中间件 Abort 后 auditWrites
+// 不再执行，因此必须放在 authenticate 之前；已认证的 403 仍由 auditWrites 记录。
+func (h *Handler) securityFailures() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+		status := c.Writer.Status()
+		if status != http.StatusUnauthorized && status != http.StatusForbidden {
+			return
+		}
+		if _, ok := c.Get("principal"); ok {
+			return
+		}
+		reporter, ok := h.audit.(platform.SecurityReporter)
+		if !ok {
+			return
+		}
+		requestID := c.GetHeader("X-Request-ID")
+		event := platform.SecurityEvent{
+			EventID: ulid.Make().String(), OccurredAt: time.Now().UTC(),
+			Action: "AUTHENTICATION_DENIED", Method: c.Request.Method, Path: c.Request.URL.Path,
+			ClientIP: requestClientIP(c.Request), UserAgent: c.Request.UserAgent(),
+			RequestID: requestID, Result: "DENIED", ReasonCode: strconv.Itoa(status), RiskLevel: "HIGH",
+			Summary: "project management authentication failed",
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 2*time.Second)
+		defer cancel()
+		if err := reporter.ReportSecurity(ctx, event); err != nil {
+			h.logger.Error("report security event failed", "error", err, "request_id", requestID, "status", status)
+		}
+	}
+}
+
 func (h *Handler) authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if h.identity == nil {
