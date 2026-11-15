@@ -158,6 +158,11 @@ func (s *Service) metricVerifyOrganization(ctx context.Context, org, witness str
 // 参数：ctx/p 为请求，in 为实际时段、说明与证据。
 // 返回值：草稿；非法日期、时长、未来事实或越权代登时拒绝。
 func (s *Service) CreateMetricUsage(ctx context.Context, p platform.Principal, in domain.ResourceUsageInput) (domain.ResourceUsage, error) {
+	return s.createMetricUsage(ctx, p, in, false)
+}
+
+// createMetricUsage 是普通登记与候选应用共用的实现；allowAuto 只由服务端候选链传入。
+func (s *Service) createMetricUsage(ctx context.Context, p platform.Principal, in domain.ResourceUsageInput, allowAuto bool) (domain.ResourceUsage, error) {
 	filter, err := authorizeProjectScope(p, "project.resource_usage.record")
 	if err != nil {
 		return domain.ResourceUsage{}, err
@@ -168,6 +173,27 @@ func (s *Service) CreateMetricUsage(ctx context.Context, p platform.Principal, i
 		return domain.ResourceUsage{}, ErrForbidden
 	}
 
+	if in.AutoConfirm && !allowAuto {
+		return domain.ResourceUsage{}, ErrForbidden
+	}
+	in.Source = strings.ToUpper(strings.TrimSpace(in.Source))
+	if in.Source == "" {
+		in.Source = "MANUAL"
+	}
+	if in.Source != "MANUAL" && in.Source != "FIELD_EVENTS" && in.Source != "PLAN" {
+		return domain.ResourceUsage{}, ErrValidation
+	}
+	if len(in.SourceRef) > 128 || len(in.SourceEventIDs) > 20 {
+		return domain.ResourceUsage{}, ErrValidation
+	}
+	for _, eventID := range in.SourceEventIDs {
+		if eventID == "" || len(eventID) > 64 {
+			return domain.ResourceUsage{}, ErrValidation
+		}
+	}
+	if in.AutoConfirm && in.Source != "FIELD_EVENTS" {
+		return domain.ResourceUsage{}, ValidationError("仅现场事件候选允许强证据自动确认")
+	}
 	if in.ResourceType != "PERSON" && in.ResourceType != "EQUIPMENT" || !metricKeyValid(in.IdempotencyKey) || in.ResourceID == "" || len(in.ResourceID) > 64 || strings.TrimSpace(in.Note) == "" || strings.TrimSpace(in.Evidence) == "" || len([]rune(in.Note)) > 1000 || len([]rune(in.Evidence)) > 1000 {
 		return domain.ResourceUsage{}, ErrValidation
 	}
