@@ -35,6 +35,32 @@ type AuditReporter interface {
 	Report(context.Context, AuditEvent) error
 }
 
+// SecurityEvent 是认证失败等无法归属可信租户的全局安全事件；来源应用/环境由服务端令牌决定。
+type SecurityEvent struct {
+	EventID    string
+	OccurredAt time.Time
+	Action     string
+	Method     string
+	Path       string
+	ClientIP   string
+	UserAgent  string
+	RequestID  string
+	Result     string
+	ReasonCode string
+	RiskLevel  string
+	Summary    string
+}
+
+// SecurityReporter 是审计客户端的可选能力；不影响只实现 Report 的测试/旧适配器。
+type SecurityReporter interface {
+	ReportSecurity(context.Context, SecurityEvent) error
+}
+
+// OutboxHealthReporter 上报本地审计 outbox 积压；平台按应用/环境保存最新快照。
+type OutboxHealthReporter interface {
+	ReportOutboxHealth(context.Context, int64, int64, time.Time) error
+}
+
 type serviceClient struct {
 	baseURL, clientID, clientSecret string
 	client                          *http.Client
@@ -243,4 +269,80 @@ func riskLevelOrDefault(level string) string {
 		return "LOW"
 	}
 	return level
+}
+
+// ReportSecurity 上报认证失败安全事件；认证失败没有租户，服务端按应用令牌归属。
+func (c *auditClient) ReportSecurity(ctx context.Context, event SecurityEvent) error {
+	token, err := c.service.token(ctx, "audit.ingest")
+	if err != nil {
+		return err
+	}
+	eventID := strings.TrimSpace(event.EventID)
+	if eventID == "" {
+		eventID = ulid.Make().String()
+	}
+	requestID := strings.TrimSpace(event.RequestID)
+	if requestID == "" {
+		requestID = ulid.Make().String()
+	}
+	payload := map[string]any{
+		"event_id": eventID, "occurred_at": event.OccurredAt.UTC().Format(time.RFC3339Nano),
+		"action": event.Action, "method": event.Method, "path": event.Path,
+		"client_ip": event.ClientIP, "user_agent": event.UserAgent,
+		"request_id": requestID, "result": event.Result,
+		"reason_code": event.ReasonCode, "risk_level": event.RiskLevel, "summary": event.Summary,
+	}
+	if event.OccurredAt.IsZero() {
+		payload["occurred_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.service.baseURL+"/api/v1/security-events", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Request-ID", requestID)
+	response, err := c.service.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode != http.StatusAccepted && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("platform security event returned %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (c *auditClient) ReportOutboxHealth(ctx context.Context, pending, dead int64, oldest time.Time) error {
+	token, err := c.service.token(ctx, "audit.ingest")
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"pending": pending, "dead": dead}
+	if !oldest.IsZero() {
+		payload["oldest_at"] = oldest.UTC().Format(time.RFC3339Nano)
+	}
+	body, _ := json.Marshal(payload)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.service.baseURL+"/api/v1/audit/outbox-health", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.service.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode != http.StatusAccepted && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("platform outbox health returned %d", response.StatusCode)
+	}
+	return nil
 }

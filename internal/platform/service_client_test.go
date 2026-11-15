@@ -82,3 +82,36 @@ func TestCheckAuditReporterConfigurationReportsMissingFieldsWithoutCredentials(t
 		t.Fatalf("missing fields = %q", got)
 	}
 }
+
+func TestSecurityReporterPostsGlobalSecurityEvent(t *testing.T) {
+	var payload map[string]any
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"access_token":"token","token_type":"Bearer","expires_in":3600,"scope":"audit.ingest"}`))}, nil
+		case "/api/v1/security-events":
+			if got := r.Header.Get("Authorization"); got != "Bearer token" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusAccepted, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"ACCEPTED"}`))}, nil
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		return nil, nil
+	})
+	service := newServiceClient("http://platform.test", "client", "secret")
+	service.client.Transport = transport
+	reporter := &auditClient{service: service, applicationCode: "project_management", environmentCode: "dev"}
+	if err := reporter.ReportSecurity(context.Background(), SecurityEvent{
+		Action: "AUTHENTICATION_DENIED", Method: http.MethodPost, Path: "/api/v1/projects",
+		Result: "DENIED", RiskLevel: "HIGH", ReasonCode: "401",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if payload["path"] != "/api/v1/projects" || payload["result"] != "DENIED" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}

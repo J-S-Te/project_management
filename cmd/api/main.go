@@ -86,6 +86,7 @@ func main() {
 		}
 		// B2：dispatcher 挂在生命周期上下文上，退出时被有界 join，而不是随进程消失。
 		group.Go("audit-outbox-dispatcher", func() { auditDispatcher.Run(lifeCtx) })
+		group.Go("audit-outbox-health-reporter", func() { reportAuditOutboxHealth(lifeCtx, auditStore, audit, logger) })
 		// C2：同进程私有指标端口（:9092）暴露审计 outbox 积压，读的仍是现有 prj_audit_outbox。
 		backlogCollector := &temporalworker.OutboxBacklogCollector{
 			Source: auditOutboxBacklog{store: auditStore}, Registry: metrics, Logger: logger,
