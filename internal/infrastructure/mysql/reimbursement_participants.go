@@ -20,12 +20,16 @@ import (
 func (r *Repository) ExpenseCandidates(ctx context.Context, tenant, actor, keyword, project, item string, limit int) ([]application.ExpenseCandidate, error) {
 	actorJSON, _ := json.Marshal(actor)
 	responsibility := `(p.owner_identity_id=? OR p.manager_identity_id=? OR EXISTS (SELECT 1 FROM pm_expense_participant ep WHERE ep.tenant_id=p.tenant_id AND ep.project_id=p.id AND ep.subject_id=? AND ep.status='ACTIVE' AND ep.valid_from<=? AND ep.valid_until>?))`
+	implementation := `EXISTS (SELECT 1 FROM pm_impl_plan ip JOIN pm_capability c
+ ON c.tenant_id=ip.tenant_id AND c.resource_type='PERSON' AND c.user_id=?
+ WHERE ip.tenant_id=s.tenant_id AND ip.service_item_id=s.id AND ` +
+		r.expensePlanPersonMatch() + `)`
 	query := `SELECT project_id,service_item_id FROM (
  SELECT p.id AS project_id,'' AS service_item_id,p.name FROM pm_project p WHERE p.tenant_id=? AND ` + responsibility + `
- UNION ALL SELECT p.id AS project_id,s.id AS service_item_id,p.name FROM pm_project p JOIN pm_service_item s ON s.project_id=p.id AND s.tenant_id=p.tenant_id WHERE p.tenant_id=? AND s.archived_at IS NULL AND (` + responsibility + ` OR s.team_lead_id=? OR s.project_manager_id=? OR INSTR(s.engineer_ids,?)>0)
+ UNION ALL SELECT p.id AS project_id,s.id AS service_item_id,p.name FROM pm_project p JOIN pm_service_item s ON s.project_id=p.id AND s.tenant_id=p.tenant_id WHERE p.tenant_id=? AND s.archived_at IS NULL AND (` + responsibility + ` OR s.team_lead_id=? OR s.project_manager_id=? OR INSTR(s.engineer_ids,?)>0 OR ` + implementation + `)
  ) candidates WHERE name LIKE ? AND (project_id>? OR (project_id=? AND service_item_id>?)) ORDER BY project_id,service_item_id LIMIT ?`
 	now := time.Now().UTC()
-	args := []any{tenant, actor, actor, actor, now, now, tenant, actor, actor, actor, now, now, actor, actor, string(actorJSON), "%" + keyword + "%", project, project, item, limit}
+	args := []any{tenant, actor, actor, actor, now, now, tenant, actor, actor, actor, now, now, actor, actor, string(actorJSON), actor, "%" + keyword + "%", project, project, item, limit}
 	rows := []application.ExpenseCandidate{}
 	err := r.db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error
 	return rows, err

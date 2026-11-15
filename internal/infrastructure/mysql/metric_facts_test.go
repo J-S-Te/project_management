@@ -26,7 +26,7 @@ func metricTestDB(t *testing.T) (*Repository, *gorm.DB) {
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
-	if err = db.AutoMigrate(&reportRevisionRecord{}, &serviceItemRecord{}, &projectRecord{}, &penetrationWorkPackageRecord{}, &metricReviewRecord{}, &metricResourceMutexRecord{}, &metricCapacityRecord{}, &metricUsageRecord{}, &metricOperationRecord{}, &auditOutboxRecord{}, &capabilityRecord{}); err != nil {
+	if err = db.AutoMigrate(&deliveryEventRecord{}, &reportRevisionRecord{}, &serviceItemRecord{}, &projectRecord{}, &penetrationWorkPackageRecord{}, &metricReviewRecord{}, &metricResourceMutexRecord{}, &metricCapacityRecord{}, &metricUsageRecord{}, &metricOperationRecord{}, &auditOutboxRecord{}, &capabilityRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	return NewRepository(db), db

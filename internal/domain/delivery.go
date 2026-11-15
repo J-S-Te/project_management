@@ -247,14 +247,16 @@ type PlanResourceInput struct {
 // PlanResource 是实施计划里的人员/设备清单行，资质与有效期在发布计划时快照，
 // 让已发布的计划保留当时的派工依据。
 type PlanResource struct {
-	ResourceType string   `json:"resource_type"`
-	ResourceID   string   `json:"resource_id"`
-	ResourceName string   `json:"resource_name"`
-	Codes        []string `json:"codes"`
-	ValidUntil   string   `json:"valid_until,omitempty"`
-	WindowStart  string   `json:"window_start,omitempty"`
-	WindowEnd    string   `json:"window_end,omitempty"`
-	Note         string   `json:"note,omitempty"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	ResourceName string `json:"resource_name"`
+	// UserID 仅由同租户人员档案解析，用于费用资格，不能把资源编号当作主体。
+	UserID      string   `json:"user_id,omitempty"`
+	Codes       []string `json:"codes"`
+	ValidUntil  string   `json:"valid_until,omitempty"`
+	WindowStart string   `json:"window_start,omitempty"`
+	WindowEnd   string   `json:"window_end,omitempty"`
+	Note        string   `json:"note,omitempty"`
 	// ReturnedAt 为归还时间；归还后的设备行保留历史，但不再占用设备、也不再算"不在公司"。
 	ReturnedAt string `json:"returned_at,omitempty"`
 }

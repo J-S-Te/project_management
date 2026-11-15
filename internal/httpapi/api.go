@@ -396,6 +396,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 归档用 project.report.archive）由应用层 reportPhasePermission 判定。
 	// 缺 project.report.manage 会让质量管理员在路由层就被拦死，编制/审核/签发全部不可用。
 	api.POST("/service-items/:id/report-status", requireAny("project.report.prepare", "project.report.review", "project.report.issue", "project.report.archive"), h.updateReportStatus)
+	api.POST("/service-items/:id/report-status/manual", require("project.report.prepare"), h.advanceManualReportStatus)
 	return router
 }
 

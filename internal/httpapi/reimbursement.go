@@ -225,7 +225,7 @@ func (h *Handler) expenseRebuild(c *gin.Context) {
 	writeData(c, 200, map[string]any{"rebuilt": true})
 }
 
-// expenseParticipants 在当前项目管理范围分页读取显式名单。
+// expenseParticipants 在当前项目管理范围读取手工名单和独立分页的实施人员默认资格。
 // 参数：c 为有管理权限的真实会话。
 // 返回值：无；输出人员资格或范围错误。
 func (h *Handler) expenseParticipants(c *gin.Context) {
@@ -247,7 +247,14 @@ func (h *Handler) expenseParticipants(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	writeData(c, 200, map[string]any{"items": out})
+	implementation, err := repo.ListExpenseImplementationParticipants(
+		c.Request.Context(), scope, c.Param("id"), c.Query("implementation_cursor"), limit,
+	)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, 200, map[string]any{"items": out, "implementation_participants": implementation})
 }
 
 // expenseManageParticipant 在管理权限、当前项目范围和人员目录下写入带版本的资格。

@@ -10,7 +10,11 @@
 - `POST /internal/v1/reimbursement/project-references/batch-validate`：`actor_subject_id,claim_id,draft_version,references[{project_id,service_item_id,occurred_date,approval_org_id?}]`，最多100项。费用日期严格为 `YYYY-MM-DD`。返回相同最小引用及草稿绑定字段。
 - `GET/PUT /api/v1/projects/:id/expense-participants`：读取或带 `subject_id,status,valid_from,valid_until,reason,expected_version` 更新。名单最多有效366天，撤销仍需正确版本；新增为 expected_version=0。版本冲突409，审计与名单同事务提交。
 
-资格来自项目 owner/manager、指定服务项当前 team_lead/project_manager/engineer、有效显式名单。仅服务项A工程师不能选择项目级或服务项B；项目级负责人或显式名单可按项目级关联。NATIVE不强制合同ID。归档报告不剥夺引用资格；被替换归档的服务项不参与新引用。终止项目/服务项仍 `eligible=false`，当前资格有效时保留 `participant_eligible=true` 的最小引用，历史例外由报销侧受控政策决定。审批目标缺失单独放在 `approver_reason_codes[node_role]`，不混入参与资格 `reason_codes`，消费方只对本次路线必需节点执行 `APPROVER_MISSING`。
+GET 响应保留显式名单 `items`，并增加默认实施人员页 `implementation_participants: {items, next_cursor?}`。默认页以 `implementation_cursor` 独立翻页，共用 `page_size`（1..100，默认20）；每行包含 `subject_id,display_name,resource_id,service_item_id`。同一人员参与不同服务项分别显示，不截断为项目级授权。读取仍要求管理权限和项目数据范围，受理人角色仅显示其可管理的服务项。
+
+资格来自项目 owner/manager、指定服务项当前 team_lead/project_manager/engineer、当前实施计划人员、有效显式名单。仅服务项A工程师或实施人员不能选择项目级或服务项B；项目级负责人或显式名单可按项目级关联。NATIVE不强制合同ID。归档报告不剥夺引用资格；被替换归档的服务项不参与新引用。终止项目/服务项仍 `eligible=false`，当前资格有效时保留 `participant_eligible=true` 的最小引用，历史例外由报销侧受控政策决定。审批目标缺失单独放在 `approver_reason_codes[node_role]`，不混入参与资格 `reason_codes`，消费方只对本次路线必需节点执行 `APPROVER_MISSING`。
+
+实施计划人员通过同租户 PERSON 资质档案的 `resource_id` 解析不可改绑的 `user_id`，资格来源为 `IMPLEMENTATION_PERSONNEL`。历史计划无需补写人工授权，人员退出当前计划或计划撤销后，其计划来源资格消失；其他独立来源按原规则保留。资质启停不追溯撤销已发布计划中的费用资格，但申请人的当前平台目录有效性仍须通过。未关联平台账号的历史人员不能按姓名或资源编号推造主体，需要先维护人员资质关联。默认资格只用于费用引用，不授予项目工作区、交付或报告权限；手工资格的移除不撤销计划来源资格。
 
 审批引用明确 `node_role`：`PROJECT_EXPENSE_OWNER` 只取服务项 `project_manager_id` 或项目级 `manager_identity_id`，不回退团队负责人或owner，并精确复核当前 `project_manager` 角色及有效任职组织（不要求经理与项目同部门）；技术总监按项目 `OwnerOrgID` 的当前 `technical_director` 角色目录解析；销售总监按后端员工费用档案组织 `approval_org_id` 的当前 `sales_director` 角色解析。该销售组织必须仍在申请人当前有效目录组织中，不能借项目技术组织替代；浏览器不得指定此字段，报销后端从已发布档案派生并绑定批验集合。search无费用组织时只返回经理/技术目标和销售节点缺上下文提示，不猜销售主组织。
 
