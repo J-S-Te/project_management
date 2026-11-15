@@ -37,7 +37,8 @@ var projectStatusNodes = []string{
 	ProjectStatusCompleted,
 }
 
-// 主报告阶段码：报告链 NONE → RECTIFYING → COMPILING → REVIEWED → ISSUED → ARCHIVED。
+// 主报告阶段码：默认 NONE → RECTIFYING → COMPILING → REVIEWED → ISSUED → ARCHIVED。
+// 无需整改时允许 NONE 直接进入 COMPILING，其余节点保持顺序推进。
 // 只有 NONE 表示"尚未进入报告流程"，其余五个阶段都可以作为 SLA 停留规则的配置值。
 const (
 	ReportPhaseNone       = "NONE"
@@ -96,7 +97,7 @@ var reportPhaseLabels = map[string]string{
 	ReportPhaseNone:       "待整改",
 	ReportPhaseRectifying: "整改中",
 	ReportPhaseCompiling:  "编制中",
-	ReportPhaseReviewed:   "审核中",
+	ReportPhaseReviewed:   "已审核",
 	ReportPhaseIssued:     "已签发",
 	ReportPhaseArchived:   "已归档",
 }
@@ -116,6 +117,19 @@ func ReportPhaseRank(code string) int {
 		return stage.Phase
 	}
 	return -1
+}
+
+// CanAdvanceReportPhase 判断报告是否按默认顺序推进或在待整改时直接开始编制。
+// 参数：current 为当前报告阶段，target 为本次操作选择的目标阶段。
+// 返回值：相邻推进或 NONE 到 COMPILING 返回 true，未知、重复或其它跳步返回 false。
+func CanAdvanceReportPhase(current, target string) bool {
+	from, to := ReportPhaseRank(current), ReportPhaseRank(target)
+	if from < 0 || to <= 0 {
+		return false
+	}
+	return to == from+1 ||
+		(normalizeReportPhase(current) == ReportPhaseNone &&
+			normalizeReportPhase(target) == ReportPhaseCompiling)
 }
 
 // IsReportPhase 判断 code 是否是已知的主报告阶段码（含 NONE）。

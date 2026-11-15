@@ -19,6 +19,8 @@ type ExpenseRepository interface {
 	ExpenseCandidates(context.Context, string, string, string, string, string, int) ([]ExpenseCandidate, error)
 	ReadExpenseParticipant(context.Context, string, string, string) (*domain.ExpenseParticipant, error)
 	ListExpenseParticipants(context.Context, platform.ScopeFilter, string, string, int) ([]domain.ExpenseParticipant, error)
+	ListExpenseImplementationParticipants(context.Context, platform.ScopeFilter, string, string, int) (domain.ExpenseImplementationParticipantPage, error)
+	ReadExpenseImplementationPersonnel(context.Context, string, string, string) ([]domain.PlanResource, error)
 	SaveExpenseParticipant(context.Context, platform.ScopeFilter, domain.ExpenseParticipant, uint64) (domain.ExpenseParticipant, error)
 	ApplyExpenseSpend(context.Context, domain.SpendSnapshot) (domain.SpendReceipt, error)
 	ReconcileExpenseSpend(context.Context, string, string, string, int) ([]domain.SpendReconciliation, error)
@@ -118,6 +120,11 @@ func (s *Service) resolveExpenseReference(ctx context.Context, tenant, actor str
 		if value.ProjectID != p.ID || value.TenantID != tenant {
 			return domain.ExpenseProjectReference{}, ErrForbidden
 		}
+		personnel, err := repo.ReadExpenseImplementationPersonnel(ctx, tenant, p.ID, value.ID)
+		if err != nil {
+			return domain.ExpenseProjectReference{}, err
+		}
+		value.ImplementationPlan = &domain.ImplementationPlan{Personnel: personnel}
 		item = &value
 	}
 	reference := domain.ExpenseReference(p, item, actor, grant, time.Now().UTC())

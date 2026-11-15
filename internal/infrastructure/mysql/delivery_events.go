@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// applyItemEvent 在行锁事务内校验并更新服务项及关联交付证据。
+// 用途：在行锁内更新交付状态，保留实际报告阶段选择及可公开拒绝原因。
 // 参数：tx 为当前事务，item 为已锁定服务项，event 为待应用的交付事件。
 // 返回值：状态、版本或关联证据校验失败时返回错误，成功返回 nil。
 func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
@@ -130,16 +130,17 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		updates["tech_review_comment"] = stringValue(event.Payload, "comment")
 	case application.EventReportStatusUpdated:
 		if item.Status != "现场实施完成" {
-			return application.ErrValidation
+			return application.PreconditionError("服务项须先达到「现场实施完成」，再推进报告阶段；请刷新核对当前状态")
 		}
 		phase := strings.ToUpper(stringValue(event.Payload, "phase"))
 		if !allowedReportPhase(phase) {
-			return application.ErrValidation
+			return application.ValidationError("报告阶段无效，请刷新页面后重新选择报告操作")
 		}
 		current := domain.ReportPhaseRank(item.ReportStatus)
-		next := domain.ReportPhaseRank(phase)
-		if next != current+1 {
-			return application.ErrValidation
+		if !domain.CanAdvanceReportPhase(item.ReportStatus, phase) {
+			return application.PreconditionError(fmt.Sprintf(
+				"当前报告为「%s」，不能直接推进至「%s」；请按阶段处理，审核请在「报告送审与审核记录」办理",
+				domain.ReportPhaseLabel(item.ReportStatus), domain.ReportPhaseLabel(phase)))
 		}
 		if err := validatePenetrationReportGate(tx, item, phase); err != nil {
 			return err
@@ -151,19 +152,25 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		if revision.ValidityStatus != "ACTIVE" || domain.ReportPhaseRank(revision.Status) != current {
 			return application.ErrConflict
 		}
-		if err := advanceReportRevision(tx, &revision, phase, event); err != nil {
+		if err := advanceReportRevisionWithMode(tx, item, &revision, phase, event); err != nil {
 			return err
 		}
+		// 从锁内状态生成选择事实，不能信任客户端提供的跳过标记。
+		event.Payload["previous_phase"] = domain.ReportPhaseCode(current)
+		event.Payload["report_revision"] = revision.Revision
+		event.Payload["rectification_skipped"] = current == 0 && phase == domain.ReportPhaseCompiling
 		updates["report_status"] = phase
 		updates["report_updated_at"] = event.CreatedAt
 		updates["report_updated_by"] = event.ActorUserID
-		switch phase {
-		case "COMPILING":
-			updates["report_prepared_by"] = event.ActorUserID
-		case "REVIEWED":
-			updates["report_reviewed_by"] = event.ActorUserID
-		case "ISSUED":
-			updates["report_issued_by"] = event.ActorUserID
+		if stringValue(event.Payload, "transition_mode") != application.ManualProjectManagerReportMode {
+			switch phase {
+			case "COMPILING":
+				updates["report_prepared_by"] = event.ActorUserID
+			case "REVIEWED":
+				updates["report_reviewed_by"] = event.ActorUserID
+			case "ISSUED":
+				updates["report_issued_by"] = event.ActorUserID
+			}
 		}
 	case application.EventEquipmentReturned:
 		// 设备归还只能作用于已进入交付的服务项：待确认/待复核/待分配还没有设备清单可还，
@@ -859,8 +866,9 @@ func lockItemEquipment(tx *gorm.DB, tenantID, serviceItemID string, incoming []d
 	return lockEquipmentResources(tx, tenantID, ids)
 }
 
-// syncEquipmentReservations 在与删除共用的锁下重检当前主状态，
-// 再原子替换按日预留索引。
+// 用途：在设备锁内重检主状态并原子替换按日预留，保留可公开的冲突原因。
+// 参数：tx 为当前事务，item 为服务项，event 为已校验的设备准备事件。
+// 返回值：成功返回 nil；设备业务冲突保留原错误匹配并携带安全原因。
 func syncEquipmentReservations(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
 	encoded := jsonBytes(event.Payload, "equipment")
 	// 显式 [] 表示释放设备。缺失快照不能在
@@ -893,13 +901,16 @@ func syncEquipmentReservations(tx *gorm.DB, item *serviceItemRecord, event domai
 		if !exists || master.Status != "ACTIVE" || master.UsageScope == domain.EquipmentUsageCompanyOnly ||
 			(master.ValidFrom != nil && businessclock.CalendarDay(*master.ValidFrom).After(start)) ||
 			(master.ValidUntil != nil && businessclock.CalendarDay(*master.ValidUntil).Before(end)) {
-			return fmt.Errorf("%w: 设备「%s」已删除、停用或不再适用于使用时段，请重新选择设备", application.ErrConflict, resource.ResourceID)
+			return errors.Join(application.ErrConflict, application.ConflictError(fmt.Sprintf(
+				"设备「%s」已删除、停用或不再适用于使用时段，请重新选择设备", resource.ResourceID)))
 		}
 		for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
 			row := &equipmentReservationRecord{TenantID: item.TenantID, ResourceID: master.ResourceID, UseDate: day, ServiceItemID: item.ID, WindowStart: start, WindowEnd: end, CreatedAt: event.CreatedAt}
 			if err := tx.Create(row).Error; err != nil {
 				if isDuplicateKey(err) || isDeadlock(err) {
-					return fmt.Errorf("%w: 设备 %s 在 %s 已被其他服务项占用", application.ErrConflict, resource.ResourceID, day.Format("2006-01-02"))
+					return errors.Join(application.ErrConflict, application.ConflictError(fmt.Sprintf(
+						"设备 %s 在 %s 已被其他服务项占用，请调整设备或使用日期",
+						resource.ResourceID, day.Format("2006-01-02"))))
 				}
 				return err
 			}

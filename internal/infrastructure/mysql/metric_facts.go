@@ -117,7 +117,7 @@ func metricReportIssueGate(tx *gorm.DB, revision *reportRevisionRecord) error {
 
 // MetricReportReview 在父服务项锁内提交或决定当前报告的真实审核轮次。
 // 参数：ctx 为请求，filter 为可信项目范围，itemID 为父项，actor 为实际用户，in 为提交或决定。
-// 返回值：不可变审核事实；旧版、重复决定、自审或越界时拒绝。
+// 返回值：不可变审核事实；手动主报告修订、旧版、重复决定、自审或越界时拒绝。
 func (r *Repository) MetricReportReview(ctx context.Context, filter platform.ScopeFilter, itemID, actor string, in domain.ReportReviewInput) (domain.ReportReviewRound, error) {
 	var out domain.ReportReviewRound
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -143,6 +143,9 @@ func (r *Repository) MetricReportReview(ctx context.Context, filter platform.Sco
 		}
 		if revision.Revision != in.Revision || version != in.ExpectedVersion || revision.ValidityStatus != "ACTIVE" {
 			return application.ErrConflict
+		}
+		if err = guardManualReportWorkflow(tx, &revision); err != nil {
+			return err
 		}
 		if in.Decision == "" {
 			err = metricSubmitReport(tx, &item, &project, &revision, actor, in, &out)

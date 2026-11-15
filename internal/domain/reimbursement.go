@@ -21,6 +21,18 @@ type ExpenseParticipant struct {
 	Version    uint64    `json:"version"`
 }
 
+type ExpenseImplementationParticipant struct {
+	SubjectID     string `json:"subject_id"`
+	DisplayName   string `json:"display_name"`
+	ResourceID    string `json:"resource_id"`
+	ServiceItemID string `json:"service_item_id"`
+}
+
+type ExpenseImplementationParticipantPage struct {
+	Items      []ExpenseImplementationParticipant `json:"items"`
+	NextCursor string                             `json:"next_cursor,omitempty"`
+}
+
 type ExpenseApprover struct {
 	NodeRole      string `json:"node_role"`
 	SourceDigest  string `json:"source_digest,omitempty"`
@@ -137,6 +149,15 @@ func expenseReferenceResponsibilities(r *ExpenseProjectReference, p Project, ite
 		if actor != "" && strings.TrimSpace(actor) == actor && (actor == item.TeamLeadID || actor == item.ProjectManagerID || slices.Contains(item.EngineerIDs, actor)) {
 			r.ParticipantEligible = true
 			r.EligibilitySource = "SERVICE_ITEM_RESPONSIBILITY"
+		}
+		if actor != "" && strings.TrimSpace(actor) == actor && item.ImplementationPlan != nil {
+			for _, person := range item.ImplementationPlan.Personnel {
+				if person.ResourceType == "PERSON" && person.UserID == actor {
+					r.ParticipantEligible = true
+					r.EligibilitySource = "IMPLEMENTATION_PERSONNEL"
+					break
+				}
+			}
 		}
 		approvers = []ExpenseApprover{{NodeRole: ExpenseNodeProjectOwner, SubjectID: item.ProjectManagerID, SourceField: "project_manager_id", SourceVersion: item.Version}}
 	}

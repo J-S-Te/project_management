@@ -41,7 +41,7 @@ var automationTriggerCatalog = []RuleOption{
 
 // slaStatusCatalog 是 SLA 规则可配置的停留阶段词表：服务项状态 + 主报告阶段。
 // 报告阶段的 5 个码由 domain.ReportPhaseSLACodes 派生（不写第二份清单）：
-// 运营可以为「整改中/编制中/审核中/已签发/已归档」分别配置时限，
+// 运营可以为「整改中/编制中/已审核/已签发/已归档」分别配置时限，
 // NONE 表示报告尚未开始，其停留由「现场实施完成」状态规则覆盖。
 var slaStatusCatalog = newSLAStatusCatalog()
 
