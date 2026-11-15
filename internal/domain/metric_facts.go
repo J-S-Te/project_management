@@ -141,6 +141,10 @@ type ResourceUsageInput struct {
 	Note           string    `json:"note"`
 	Evidence       string    `json:"evidence"`
 	CorrectsID     string    `json:"corrects_id"`
+	Source         string    `json:"source,omitempty"`
+	SourceRef      string    `json:"source_ref,omitempty"`
+	SourceEventIDs []string  `json:"source_event_ids,omitempty"`
+	AutoConfirm    bool      `json:"auto_confirm,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key"`
 }
 
@@ -170,6 +174,10 @@ type ResourceUsage struct {
 	Note           string    `json:"note" gorm:"size:1000"`
 	Evidence       string    `json:"evidence" gorm:"size:1000"`
 	CorrectsID     string    `json:"corrects_id" gorm:"size:32"`
+	Source         string    `json:"source" gorm:"size:32"`
+	SourceRef      string    `json:"source_ref" gorm:"size:128"`
+	SourceEventIDs []string  `json:"source_event_ids,omitempty" gorm:"serializer:json;type:json"`
+	AutoConfirmed  bool      `json:"auto_confirmed" gorm:"column:auto_confirmed"`
 	CreatedBy      string    `json:"created_by" gorm:"size:64"`
 	SubmittedBy    string    `json:"submitted_by" gorm:"size:64"`
 	DecidedBy      string    `json:"decided_by" gorm:"size:64"`
@@ -179,20 +187,22 @@ type ResourceUsage struct {
 }
 
 type MetricFactRow struct {
-	SubjectID       string `json:"subject_id,omitempty"`
-	Kind            string `json:"kind"`
-	RecordID        string `json:"record_id"`
-	OrganizationID  string `json:"organization_id"`
-	IdentityID      string `json:"identity_id"`
-	ProjectID       string `json:"project_id"`
-	Period          string `json:"period"`
-	Status          string `json:"status"`
-	FirstDecidedAt  string `json:"first_decided_at,omitempty"`
-	ReasonCode      string `json:"reason_code,omitempty"`
-	ActualMinutes   int64  `json:"actual_minutes"`
-	CapacityMinutes int64  `json:"capacity_minutes"`
-	PendingCount    int64  `json:"pending_count"`
-	UnknownCount    int64  `json:"unknown_count"`
+	SubjectID            string `json:"subject_id,omitempty"`
+	Kind                 string `json:"kind"`
+	RecordID             string `json:"record_id"`
+	OrganizationID       string `json:"organization_id"`
+	IdentityID           string `json:"identity_id"`
+	ProjectID            string `json:"project_id"`
+	Period               string `json:"period"`
+	Status               string `json:"status"`
+	FirstDecidedAt       string `json:"first_decided_at,omitempty"`
+	ReasonCode           string `json:"reason_code,omitempty"`
+	ActualMinutes        int64  `json:"actual_minutes"`
+	CapacityMinutes      int64  `json:"capacity_minutes"`
+	AutoConfirmedMinutes int64  `json:"auto_confirmed_minutes"`
+	AutoConfirmedCount   int64  `json:"auto_confirmed_count"`
+	PendingCount         int64  `json:"pending_count"`
+	UnknownCount         int64  `json:"unknown_count"`
 }
 
 type MetricFactsSnapshot struct {

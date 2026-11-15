@@ -203,11 +203,32 @@ func (r *Repository) CreateMetricUsage(ctx context.Context, filter platform.Scop
 			}
 		}
 		now := time.Now().UTC()
-		out = domain.ResourceUsage{ID: ulid.Make().String(), TenantID: filter.TenantID, ResourceType: in.ResourceType, ResourceID: in.ResourceID, IdentityID: cap.IdentityID, ProjectID: item.ProjectID, ServiceItemID: item.ID, BusinessDate: in.BusinessDate, OrganizationID: cap.OrganizationID, CapacityID: cap.ID, Start: in.Start.UTC(), End: in.End.UTC(), Minutes: int64(in.End.Sub(in.Start) / time.Minute), Status: "DRAFT", Version: 1, Note: in.Note, Evidence: in.Evidence, CorrectsID: in.CorrectsID, CreatedBy: actor, CreatedAt: now, UpdatedAt: now}
+		source := strings.ToUpper(strings.TrimSpace(in.Source))
+		if source == "" {
+			source = "MANUAL"
+		}
+		out = domain.ResourceUsage{ID: ulid.Make().String(), TenantID: filter.TenantID, ResourceType: in.ResourceType, ResourceID: in.ResourceID, IdentityID: cap.IdentityID, ProjectID: item.ProjectID, ServiceItemID: item.ID, BusinessDate: in.BusinessDate, OrganizationID: cap.OrganizationID, CapacityID: cap.ID, Start: in.Start.UTC(), End: in.End.UTC(), Minutes: int64(in.End.Sub(in.Start) / time.Minute), Status: "DRAFT", Version: 1, Note: in.Note, Evidence: in.Evidence, CorrectsID: in.CorrectsID, Source: source, SourceRef: in.SourceRef, SourceEventIDs: append([]string(nil), in.SourceEventIDs...), CreatedBy: actor, CreatedAt: now, UpdatedAt: now}
+		if in.AutoConfirm {
+			if err = metricUsageOverlap(tx, &out, out.CorrectsID); err != nil {
+				return err
+			}
+			out.Status = "CONFIRMED"
+			out.SubmittedBy = actor
+			out.DecidedBy = "SYSTEM"
+			out.DecisionNote = "强证据自动确认"
+			out.AutoConfirmed = true
+		}
 		if err = tx.Create(&metricUsageRecord{out}).Error; err != nil {
+			if isDuplicateKey(err) {
+				return application.ErrConflict
+			}
 			return err
 		}
-		return saveMetricOperation(tx, filter.TenantID, in.IdempotencyKey, hash, actor, "USAGE_CREATED", out.ID, out)
+		action := "USAGE_CREATED"
+		if in.AutoConfirm {
+			action = "USAGE_AUTO_CONFIRMED"
+		}
+		return saveMetricOperation(tx, filter.TenantID, in.IdempotencyKey, hash, actor, action, out.ID, out)
 	})
 	return out, err
 }
