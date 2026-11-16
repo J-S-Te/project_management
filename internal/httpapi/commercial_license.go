@@ -25,6 +25,8 @@ var commercialHistoryRoutes = map[string]bool{
 	"/api/v1/service-items/:id/report-reviews/current":                      true,
 	"/api/v1/service-items/:id/report-reviews":                              true,
 	"/api/v1/metric-facts/capacities":                                       true,
+	"/api/v1/service-items/:id/metric-facts/capacities":                     true,
+	"/api/v1/service-items/:id/metric-facts/usages":                         true,
 	"/api/v1/metric-facts/usages":                                           true,
 	"/api/v1/metric-facts/calendar":                                         true,
 	"/api/v1/metric-facts/calendar-exceptions":                              true,

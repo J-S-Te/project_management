@@ -49,6 +49,8 @@ var registeredGETOperations = map[string]core.Operation{
 	"/api/v1/service-items/:id/report-reviews/current":                      core.READ_HISTORY,
 	"/api/v1/service-items/:id/report-reviews":                              core.READ_HISTORY,
 	"/api/v1/metric-facts/capacities":                                       core.READ_HISTORY,
+	"/api/v1/service-items/:id/metric-facts/capacities":                     core.READ_HISTORY,
+	"/api/v1/service-items/:id/metric-facts/usages":                         core.READ_HISTORY,
 	"/api/v1/metric-facts/usages":                                           core.READ_HISTORY,
 	"/api/v1/metric-facts/calendar":                                         core.READ_HISTORY,
 	"/api/v1/metric-facts/calendar-exceptions":                              core.READ_HISTORY,
