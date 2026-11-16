@@ -107,13 +107,18 @@ func (s *Service) MetricUsageCandidates(ctx context.Context, p platform.Principa
 		actor := parts[0]
 		capability := capabilityByUser[actor]
 		candidate := domain.MetricUsageCandidate{ServiceItemID: itemID, ResourceType: "PERSON", ResourceID: capability.ResourceID, IdentityID: actor, BusinessDate: parts[1], Start: current.start, Source: "FIELD_EVENTS", SourceEventIDs: uniqueMetricIDs(current.eventIDs)}
+		// 现场采集包含秒和毫秒，仅核算事件明确覆盖的完整分钟，不向外扩张实际时段。
+		candidate.Start = current.start.Truncate(time.Minute)
+		if candidate.Start.Before(current.start) {
+			candidate.Start = candidate.Start.Add(time.Minute)
+		}
 		if capability.ResourceID == "" {
 			candidate.Reason = "未找到该现场人员的有效能力档案"
 		}
 		if !current.end.IsZero() {
-			candidate.End = current.end
-			if current.end.After(current.start) {
-				candidate.Minutes = int64(current.end.Sub(current.start) / time.Minute)
+			candidate.End = current.end.Truncate(time.Minute)
+			if candidate.End.After(candidate.Start) {
+				candidate.Minutes = int64(candidate.End.Sub(candidate.Start) / time.Minute)
 			}
 		}
 		sameDay := !current.end.IsZero() && metricBusinessDate(current.end) == candidate.BusinessDate
@@ -141,7 +146,7 @@ func (s *Service) MetricUsageCandidates(ctx context.Context, p platform.Principa
 		if current.signature {
 			evidence = append(evidence, "电子签名")
 		}
-		candidate.Evidence = strings.Join(evidence, " + ") + "（自动生成候选，待核对）"
+		candidate.Evidence = strings.Join(evidence, " + ") + "（按完整分钟生成候选，待核对）"
 		out = append(out, candidate)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -158,10 +163,14 @@ func (s *Service) MetricUsageCandidates(ctx context.Context, p platform.Principa
 
 // ApplyMetricUsageCandidate 重新计算候选并登记；策略开启且事件链完整时直接强证据确认。
 // 参数：ctx/p 为真实命令，itemID 为服务项，in 为资源、业务日和幂等键。
-// 返回值：草稿或自动确认用量；候选不存在、缺容量或事件链被改动时拒绝。
+// 返回值：原命令精确回执或新登记；新命令缺证据/容量或原键绑定不符时拒绝。
 func (s *Service) ApplyMetricUsageCandidate(ctx context.Context, p platform.Principal, itemID string, in domain.MetricUsageCandidateApplyInput) (domain.ResourceUsage, error) {
 	if itemID == "" || in.ResourceID == "" || !validMetricDate(in.BusinessDate) || !metricKeyValid(in.IdempotencyKey) {
 		return domain.ResourceUsage{}, ErrValidation
+	}
+	prior, found, err := s.replayMetricUsageCandidate(ctx, p, itemID, in)
+	if err != nil || found {
+		return prior, err
 	}
 	candidates, err := s.MetricUsageCandidates(ctx, p, itemID)
 	if err != nil {
