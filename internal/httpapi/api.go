@@ -221,6 +221,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		daInternal.GET("/dashboard", h.dashboard)
 		daInternal.GET("/dashboard/reports", h.reportDashboard)
 		daInternal.GET("/dashboard/metrics", h.metricFacts)
+		daInternal.GET("/dashboard/metrics/stream", h.metricFactsStream)
 		daInternal.GET("/dashboard/projects/snapshot", h.projectSnapshot(snapshotLimits))
 	}
 	if flow, ok := identity.(OIDCFlow); ok {

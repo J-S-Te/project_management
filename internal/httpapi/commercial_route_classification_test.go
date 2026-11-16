@@ -46,6 +46,7 @@ var registeredGETOperations = map[string]core.Operation{
 	"/internal/v1/handover/transfers/:item_id":                              core.READ_HISTORY,
 	"/internal/v1/dashboard":                                                core.READ_HISTORY,
 	"/internal/v1/dashboard/metrics":                                        core.READ_HISTORY,
+	"/internal/v1/dashboard/metrics/stream":                                 core.READ_HISTORY,
 	"/api/v1/service-items/:id/report-reviews/current":                      core.READ_HISTORY,
 	"/api/v1/service-items/:id/report-reviews":                              core.READ_HISTORY,
 	"/api/v1/metric-facts/capacities":                                       core.READ_HISTORY,

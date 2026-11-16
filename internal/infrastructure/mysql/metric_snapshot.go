@@ -94,6 +94,10 @@ func metricReportRows(tx *gorm.DB, tenant string, out *domain.MetricFactsSnapsho
 			out.Rows = append(out.Rows, domain.MetricFactRow{Kind: "report_return", RecordID: round.ID, SubjectID: subject, OrganizationID: round.OrganizationID, IdentityID: round.IdentityID, ProjectID: round.ProjectID, Period: metricPeriod(*round.DecidedAt), Status: "RETURNED", ReasonCode: round.ReasonCode})
 		}
 	}
+	owners, err := metricMissingOwners(tx, tenant, revisions, first)
+	if err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, rev := range revisions {
 		key := rev.SubjectType + ":" + rev.SubjectID
@@ -109,17 +113,11 @@ func metricReportRows(tx *gorm.DB, tenant string, out *domain.MetricFactsSnapsho
 			row.ProjectID = round.ProjectID
 		}
 		if !ok {
-			var item serviceItemRecord
-			if err := tx.Unscoped().Where("tenant_id=? AND id=?", tenant, rev.ServiceItemID).Take(&item).Error; err != nil {
-				return err
+			owner, exists := owners[rev.ServiceItemID]
+			if !exists {
+				return gorm.ErrRecordNotFound
 			}
-			var project projectRecord
-			if err := tx.Where("tenant_id=? AND id=?", tenant, item.ProjectID).Take(&project).Error; err != nil {
-				return err
-			}
-			row.OrganizationID = project.OwnerOrgID
-			row.IdentityID = item.ProjectManagerID
-			row.ProjectID = item.ProjectID
+			row.OrganizationID, row.IdentityID, row.ProjectID = owner.OrganizationID, owner.IdentityID, owner.ProjectID
 		}
 		if rev.ReviewRequired && rev.Revision == 0 && (!ok || round.Revision == 0 && round.RoundNo == 1) {
 			row.Status = "PENDING"
@@ -235,3 +233,44 @@ func metricResourceGroupKey(kind, id, identity, period, org string) string {
 	}
 	return kind + ":" + key + ":" + period + ":" + org
 }
+
+// metricMissingOwners 分批读取缺少审核轮次报告的真实归属，避免逐报告二次查询。
+// 参数：tx/tenant 为同一租户快照，revisions/first 为本轮已读取事实。
+// 返回值：按服务项索引的归属；缺失父项目或读取失败时拒绝发布。
+func metricMissingOwners(tx *gorm.DB, tenant string, revisions []reportRevisionRecord, first map[string]metricReviewRecord) (map[string]metricOwner, error) {
+	ids := []string{}
+	seen := map[string]bool{}
+	subjects := map[string]bool{}
+	for _, rev := range revisions {
+		subject := rev.SubjectType + ":" + rev.SubjectID
+		if subjects[subject] {
+			continue
+		}
+		subjects[subject] = true
+		if _, ok := first[subject]; !ok && !seen[rev.ServiceItemID] {
+			ids = append(ids, rev.ServiceItemID)
+			seen[rev.ServiceItemID] = true
+		}
+	}
+	out := map[string]metricOwner{}
+	for start := 0; start < len(ids); start += 256 {
+		end := start + 256
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var rows []metricOwner
+		err := tx.Table("pm_service_item i").Select("i.id, i.project_id, i.project_manager_id identity_id, p.owner_org_id organization_id").Joins("JOIN pm_project p ON p.tenant_id=i.tenant_id AND p.id=i.project_id").Where("i.tenant_id=? AND i.id IN ?", tenant, ids[start:end]).Scan(&rows).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			out[row.ID] = row
+		}
+	}
+	if len(out) != len(ids) {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return out, nil
+}
+
+type metricOwner struct{ ID, ProjectID, IdentityID, OrganizationID string }
