@@ -17,6 +17,7 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 	var rows []struct {
 		ID              string
 		ProjectID       string
+		ProjectName     string
 		Site            string
 		Category        string
 		Status          string
@@ -30,7 +31,7 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 	// 报告阶段的停留时长必须用 report_updated_at（每次报告推进都会刷新），
 	// status_changed_at 只反映现场状态的进入时间。
 	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).
-		Select("id, project_id, site, category, status, report_status, planned_end, status_changed_at, report_updated_at, COALESCE(TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()), 0) AS overdue_hours").
+		Select("id, project_id, (SELECT p.name FROM pm_project p WHERE p.id = project_id LIMIT 1) AS project_name, site, category, status, report_status, planned_end, status_changed_at, report_updated_at, COALESCE(TIMESTAMPDIFF(HOUR, planned_end, UTC_TIMESTAMP()), 0) AS overdue_hours").
 		// 候选集必须同时覆盖两类口径：①计划完成时间已过（固定口径）②按规则的状态停留超时/临近。
 		// 后者恰恰包含「计划时间未到但已临近超时」的项，因此不能在此按 planned_end 过滤，
 		// 否则提前提醒永远不会触发；计划完成口径的状态过滤下沉到 computeSlaItems。
@@ -45,7 +46,7 @@ func (r *Repository) ListSlaOverdue(ctx context.Context, filter platform.ScopeFi
 		if row.PlannedEnd != nil {
 			plannedEnd = row.PlannedEnd.Format(time.RFC3339)
 		}
-		item := domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, Site: row.Site, Category: row.Category, Status: row.Status, ReportStatus: row.ReportStatus, PlannedEnd: plannedEnd, OverdueHours: row.OverdueHours}
+		item := domain.SlaOverdueItem{ID: row.ID, ProjectID: row.ProjectID, ProjectName: row.ProjectName, Site: row.Site, Category: row.Category, Status: row.Status, ReportStatus: row.ReportStatus, PlannedEnd: plannedEnd, OverdueHours: row.OverdueHours}
 		if row.StatusChangedAt != nil {
 			item.StatusChangedAt = *row.StatusChangedAt
 		}

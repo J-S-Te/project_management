@@ -182,6 +182,7 @@ type Dashboard struct {
 type SlaOverdueItem struct {
 	ID            string `json:"id"`
 	ProjectID     string `json:"project_id"`
+	ProjectName   string `json:"project_name,omitempty"`
 	Site          string `json:"site"`
 	Category      string `json:"category"`
 	Status        string `json:"status"`
