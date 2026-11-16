@@ -169,9 +169,10 @@ func SplitCapabilityCodes(value string) []string {
 
 // DetectionCategory 是检测类别（服务类型）域的一项。
 type DetectionCategory struct {
-	TenantID string `json:"-"`
-	ID       int64  `json:"id,omitempty"`
-	Category string `json:"category"`
+	TenantID           string `json:"-"`
+	ID                 int64  `json:"id,omitempty"`
+	DictionaryItemCode string `json:"dictionary_item_code"`
+	Category           string `json:"category"`
 	// SystemStandard 是默认体系要求（等保 2.0 / ISO 9001 / ISO 27001 …）。
 	SystemStandard string `json:"system_standard"`
 	// RequiredQualifications 是必备资质（默认），自由文本，供展示与分配提示。

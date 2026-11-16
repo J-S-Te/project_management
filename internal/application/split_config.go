@@ -33,6 +33,10 @@ type SplitRuleConfigRepository interface {
 	DeleteSplitOverride(context.Context, string, int64) (domain.SplitOverride, error)
 }
 
+type detectionCategorySyncer interface {
+	SyncDetectionCategories(context.Context, string, []domain.DetectionCategory) error
+}
+
 type detectionCategoryReader interface {
 	ListDetectionCategories(context.Context, string) ([]domain.DetectionCategory, error)
 }
@@ -92,6 +96,23 @@ func (s *Service) ListDetectionCategories(ctx context.Context, p platform.Princi
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if s.Dictionary != nil {
+		if syncer, syncOK := s.Repo.(detectionCategorySyncer); syncOK {
+			items, dictErr := s.Dictionary.List(ctx, "CONTRACT_SERVICE_TYPE")
+			if dictErr == nil {
+				rows := make([]domain.DetectionCategory, 0, len(items))
+				for _, item := range items {
+					if strings.TrimSpace(item.Code) == "" || strings.TrimSpace(item.Value) == "" {
+						continue
+					}
+					rows = append(rows, domain.DetectionCategory{DictionaryItemCode: item.Code, Category: item.Value, SpecialMethod: domain.SpecialMethodNo, Enabled: true})
+				}
+				if len(rows) > 0 {
+					_ = syncer.SyncDetectionCategories(ctx, p.TenantID, rows)
+				}
+			}
+		}
+	}
 	return repo.ListDetectionCategories(ctx, p.TenantID)
 }
 
@@ -102,6 +123,7 @@ func (s *Service) SaveDetectionCategory(ctx context.Context, p platform.Principa
 	}
 	requiredCodes := normalizeCapabilityCodes(domain.SplitCapabilityCodes(input.RequiredCodes))
 	normalized := domain.DetectionCategory{
+		DictionaryItemCode:     strings.TrimSpace(input.DictionaryItemCode),
 		Category:               strings.TrimSpace(input.Category),
 		SystemStandard:         strings.TrimSpace(input.SystemStandard),
 		RequiredQualifications: strings.TrimSpace(input.RequiredQualifications),
@@ -111,6 +133,27 @@ func (s *Service) SaveDetectionCategory(ctx context.Context, p platform.Principa
 	}
 	if normalized.SpecialMethod == "" {
 		normalized.SpecialMethod = domain.SpecialMethodNo
+	}
+	if s.Dictionary != nil {
+		items, dictErr := s.Dictionary.List(ctx, "CONTRACT_SERVICE_TYPE")
+		if dictErr != nil {
+			return domain.DetectionCategory{}, fmt.Errorf("读取平台字典失败: %w", dictErr)
+		}
+		matched := false
+		for _, item := range items {
+			if item.Code == normalized.DictionaryItemCode && item.Value == normalized.Category {
+				matched = true
+				break
+			}
+			if normalized.DictionaryItemCode == "" && item.Value == normalized.Category {
+				normalized.DictionaryItemCode = item.Code
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return domain.DetectionCategory{}, ValidationError("检测类别必须来自平台 CONTRACT_SERVICE_TYPE 启用字典项")
+		}
 	}
 	if err := domain.ValidateDetectionCategory(normalized); err != nil {
 		return domain.DetectionCategory{}, ValidationError(err.Error())

@@ -130,6 +130,8 @@ type Service struct {
 	// Personnel 是基础平台负责人目录；未开通该集成时为 nil，读取人员会返回
 	// ErrPersonnelUnavailable，不影响其余项目功能。
 	Personnel platform.OwnerDirectory
+	// Dictionary 读取平台 CONTRACT_SERVICE_TYPE 字典；未开通时沿用本地类别。
+	Dictionary platform.DictionaryReader
 	// Notifications 是基础平台统一站内信 outbox；未开通该集成时为 nil，
 	// 自动化规则仍会写入派生事件，只是不额外投递站内信。
 	Notifications platform.NotificationPublisher

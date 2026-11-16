@@ -39,6 +39,7 @@ func (splitPolicyRecord) TableName() string { return "pm_split_policy" }
 type detectionCategoryRecord struct {
 	ID                     int64 `gorm:"primaryKey;autoIncrement"`
 	TenantID               string
+	DictionaryItemCode     *string
 	Category               string
 	SystemStandard         string
 	RequiredQualifications string
@@ -80,8 +81,12 @@ func splitPolicyFromRecord(record splitPolicyRecord) domain.SplitPolicy {
 }
 
 func detectionCategoryFromRecord(record detectionCategoryRecord) domain.DetectionCategory {
+	code := ""
+	if record.DictionaryItemCode != nil {
+		code = *record.DictionaryItemCode
+	}
 	return domain.DetectionCategory{
-		TenantID: record.TenantID, ID: record.ID, Category: record.Category,
+		TenantID: record.TenantID, ID: record.ID, DictionaryItemCode: code, Category: record.Category,
 		SystemStandard: record.SystemStandard, RequiredQualifications: record.RequiredQualifications,
 		RequiredCodes: record.RequiredCodes,
 		SpecialMethod: record.SpecialMethod, Enabled: record.Enabled,
@@ -214,16 +219,42 @@ func (r *Repository) countServiceItemsByCategory(ctx context.Context, tenant str
 }
 
 // SaveDetectionCategory 按「租户 + 检测类别」幂等写入一项检测类别。
+
+// SyncDetectionCategories 按字典编码补齐平台字典项；已有行只更新名称，不覆盖项目扩展字段。
+func (r *Repository) SyncDetectionCategories(ctx context.Context, tenant string, items []domain.DetectionCategory) error {
+	now := time.Now().UTC()
+	for _, item := range items {
+		code := strings.TrimSpace(item.DictionaryItemCode)
+		if code == "" || strings.TrimSpace(item.Category) == "" {
+			continue
+		}
+		record := detectionCategoryRecord{TenantID: tenant, DictionaryItemCode: &code, Category: item.Category,
+			SpecialMethod: domain.SpecialMethodNo, Enabled: true, CreatedAt: now, UpdatedAt: now, UpdatedBy: "platform-dictionary"}
+		if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "dictionary_item_code"}},
+			DoUpdates: clause.AssignmentColumns([]string{"category", "updated_at", "updated_by"}),
+		}).Create(&record).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Repository) SaveDetectionCategory(ctx context.Context, tenant string, item domain.DetectionCategory, actor string) (domain.DetectionCategory, error) {
 	now := time.Now().UTC()
+	var dictionaryCode *string
+	if strings.TrimSpace(item.DictionaryItemCode) != "" {
+		value := strings.TrimSpace(item.DictionaryItemCode)
+		dictionaryCode = &value
+	}
 	record := detectionCategoryRecord{
-		TenantID: tenant, Category: item.Category, SystemStandard: item.SystemStandard,
+		TenantID: tenant, DictionaryItemCode: dictionaryCode, Category: item.Category, SystemStandard: item.SystemStandard,
 		RequiredQualifications: item.RequiredQualifications, RequiredCodes: item.RequiredCodes,
 		SpecialMethod: item.SpecialMethod,
 		Enabled:       item.Enabled, CreatedAt: now, UpdatedAt: now, UpdatedBy: actor,
 	}
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "category"}},
+		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "dictionary_item_code"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"system_standard", "required_qualifications", "required_codes", "special_method", "enabled",
 			"updated_at", "updated_by",
@@ -232,7 +263,13 @@ func (r *Repository) SaveDetectionCategory(ctx context.Context, tenant string, i
 		return domain.DetectionCategory{}, err
 	}
 	var stored detectionCategoryRecord
-	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND category = ?", tenant, item.Category).Take(&stored).Error; err != nil {
+	query := r.db.WithContext(ctx).Where("tenant_id = ?", tenant)
+	if dictionaryCode != nil {
+		query = query.Where("dictionary_item_code = ?", *dictionaryCode)
+	} else {
+		query = query.Where("category = ?", item.Category)
+	}
+	if err := query.Take(&stored).Error; err != nil {
 		return domain.DetectionCategory{}, err
 	}
 	return detectionCategoryFromRecord(stored), nil
