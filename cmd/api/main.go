@@ -274,7 +274,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	service := &application.Service{NativeEnabled: cfg.ProjectNativeEnabled, Repo: repository, Personnel: personnel, Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger,
+	service := &application.Service{NativeEnabled: cfg.ProjectNativeEnabled, Repo: repository, Personnel: personnel, Dictionary: platform.NewDictionary(cfg.PlatformBaseURL, cfg.PlatformOwnerDirectoryClientID, cfg.PlatformOwnerDirectorySecret, cfg.PlatformOwnerDirectoryScope), Notifications: notifications, Contracts: contracts, EvidenceFiles: evidenceFiles, AuditStore: auditStore, Logger: logger,
 		// BIZ-PROJECT-05：签到坐标与站点主数据的一致性格局由部署配置决定（阈值/站点缺失策略）。
 		FieldCheckIn: application.FieldCheckInPolicy{SiteDistanceMeters: cfg.FieldCheckIn.SiteDistanceMeters, SiteMissingPolicy: cfg.FieldCheckIn.SiteMissingPolicy},
 		// BIZ-PROJECT-06：缺项说明门禁的强度由部署配置决定（新装 enforce，存量升级先 advisory）。
