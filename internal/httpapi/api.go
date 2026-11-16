@@ -301,6 +301,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/report-reviews/submit", require("project.report.prepare"), h.metricReviewCommand(false))
 	api.POST("/service-items/:id/report-reviews/decision", require("project.report.review"), h.metricReviewCommand(true))
 	api.GET("/metric-facts/capacities", require("project.read"), h.metricResourceList("capacities"))
+	api.GET("/service-items/:id/metric-facts/capacities", require("project.read"), h.metricItemResourceList("capacities"))
+	api.GET("/service-items/:id/metric-facts/usages", require("project.read"), h.metricItemResourceList("usages"))
 	api.POST("/metric-facts/capacities", requireAny("project.person_capacity.manage", "project.equipment_capacity.manage"), h.metricCapacityPublish)
 	api.GET("/metric-facts/usages", require("project.read"), h.metricResourceList("usages"))
 	api.POST("/metric-facts/usages", require("project.resource_usage.record"), h.metricUsageCreate)
@@ -946,12 +948,15 @@ func (h *Handler) ruleConfigurationCatalog(c *gin.Context) {
 var allNavigationSections = []string{
 	"dashboard", "monitoring",
 	"projects", "decomposition",
-	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "assignments", "methods",
+	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "resource-usage", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
 	"notifications",
 }
 
+// navigationSections 用途：提供岗位工作区与集中资源台账入口，不改变默认页或接口授权。
+// 参数：roles 为当前已确认的项目岗位角色。
+// 返回值：去重后的栏目清单，未知岗位保留原最小入口。
 func navigationSections(roles []string) []string {
 	profiles := map[string][]string{
 		// 拥有全部应用权限的管理员必须看到完整功能模块，而不是只有配置页。
@@ -961,21 +966,21 @@ func navigationSections(roles []string) []string {
 		"business_admin": {"projects", "decomposition", "allocation"},
 		// inbox 是「已指派团队负责人但尚未配齐项目经理/工程师」的待办队列，
 		// 归团队负责人处理；此前它只存在于 allNavigationSections，任何业务角色都看不到。
-		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions"},
+		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions", "resource-usage"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla"},
-		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports"},
+		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla", "resource-usage"},
+		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports", "resource-usage"},
 		// 设备管理员维护设备与共用的资质/能力编码目录，不暴露其它规则配置。
 		// equipment 放在首位，使其成为该角色的默认工作区。
-		"device_admin": {"equipment", "qualifications", "capability-codes"},
+		"device_admin": {"equipment", "qualifications", "capability-codes", "resource-usage"},
 		// 质量管理员只进入「现场实施」分组：跟踪实施、评审异常、评估标准变更并审核报告。
 		// 项目列表和系统配置不属于该岗位工作台。
-		"quality_manager": {"implementation", "exceptions", "standards", "reports"},
-		"engineer":        {"projects", "implementation", "exceptions"},
+		"quality_manager": {"implementation", "exceptions", "standards", "reports", "resource-usage"},
+		"engineer":        {"projects", "implementation", "exceptions", "resource-usage"},
 		// 渗透测试工程师不持有 project.implementation.plan（该权限按职责矩阵只授予项目经理），
 		// 因此不能看到 planning：那里是实施计划与设备清单的录入表单，能填却没有提交按钮。
-		"penetration_engineer": {"projects", "implementation", "exceptions"},
+		"penetration_engineer": {"projects", "implementation", "exceptions", "resource-usage"},
 	}
 	seen := map[string]bool{}
 	sections := make([]string, 0, len(allNavigationSections))

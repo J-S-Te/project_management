@@ -65,3 +65,31 @@ func TestMetricCalendarIntervalsNormalizeAndShift(t *testing.T) {
 }
 
 func ptrTime(value time.Time) *time.Time { return &value }
+
+// TestMetricUsageCandidateUsesCoveredWholeMinutes 用途：验证真实秒级现场事件可生成符合分钟精度的候选。
+// 参数：t 为应用边界测试，事件均为同一人的完整现场链。
+// 返回值：无；候选包含未观察到的秒数或无法通过现有精度校验时失败。
+func TestMetricUsageCandidateUsesCoveredWholeMinutes(t *testing.T) {
+	start := time.Date(2026, 11, 15, 1, 0, 30, 0, time.UTC)
+	end := time.Date(2026, 11, 15, 2, 0, 15, 0, time.UTC)
+	repo := &candidateEventRepository{capabilityRepository: capabilityRepository{capabilities: []domain.Capability{
+		{ResourceType: "PERSON", ResourceID: "P-1", UserID: "person-a", Status: "ACTIVE"},
+	}}, events: []domain.DeliveryEvent{
+		{ID: "E1", ServiceItemID: "SI-a", ActorUserID: "person-a", Type: EventFieldCheckedIn, CreatedAt: start},
+		{ID: "E2", ServiceItemID: "SI-a", ActorUserID: "person-a", Type: EventFieldRecordSubmitted, CreatedAt: end},
+	}}
+	p := platform.Principal{TenantID: "tenant", UserID: "person-a", Permissions: map[string]bool{"project.read": true},
+		DataScopes: []platform.DataScope{{RoleCode: "engineer", ScopeType: "APPLICATION"}}}
+	rows, err := (&Service{Repo: repo}).MetricUsageCandidates(t.Context(), p, "SI-a")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("候选生成失败：%+v %v", rows, err)
+	}
+	row := rows[0]
+	if !row.Start.Equal(start.Truncate(time.Minute).Add(time.Minute)) ||
+		!row.End.Equal(end.Truncate(time.Minute)) || row.Minutes != 59 || !row.Complete {
+		t.Fatalf("候选没有按完整覆盖分钟核算：%+v", row)
+	}
+	if _, err = domain.ValidateMetricIntervals(row.BusinessDate, []domain.MetricInterval{{Start: row.Start, End: row.End}}); err != nil {
+		t.Fatalf("候选不能通过实际用量精度校验：%v", err)
+	}
+}
