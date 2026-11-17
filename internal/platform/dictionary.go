@@ -14,9 +14,13 @@ const contractServiceTypeDictionary = "CONTRACT_SERVICE_TYPE"
 
 // DictionaryItem 是平台业务字典中的启用项。
 type DictionaryItem struct {
-	Code  string `json:"code"`
-	Label string `json:"label"`
-	Value string `json:"value"`
+	Code       string `json:"code"`
+	Label      string `json:"label"`
+	I18nKey    string `json:"i18n_key"`
+	Value      string `json:"value"`
+	Tone       string `json:"tone"`
+	Terminal   bool   `json:"terminal"`
+	Actionable bool   `json:"actionable"`
 }
 
 // DictionaryReader 读取平台业务字典。
