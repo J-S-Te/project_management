@@ -9,11 +9,14 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// centralAuthenticationError 保留确定失效与暂时故障的边界。
-// 参数：err为中央校验、令牌或权限查询返回的错误。
-// 返回值：明确拒绝为未认证，其他失败为依赖暂不可用。
+// centralAuthenticationError 区分认证失效、授权拒绝和暂时依赖故障。
+// 参数：err 为中央校验、令牌或在线授权读取错误。
+// 返回值：认证失效保持 401、授权拒绝保持 403、依赖故障保持 503 语义。
 func centralAuthenticationError(err error) error {
-	if errors.Is(err, ErrUnauthenticated) || errors.Is(err, ErrAuthorizationDenied) || errors.Is(err, ErrInvalidAuthorization) {
+	if errors.Is(err, ErrAuthorizationDenied) || errors.Is(err, ErrInvalidAuthorization) {
+		return err
+	}
+	if errors.Is(err, ErrUnauthenticated) {
 		return ErrUnauthenticated
 	}
 	return ErrAuthorizationUnavailable
