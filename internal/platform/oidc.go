@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/j-s-te/project-management/internal/authorizationrefresh"
 	central "github.com/j-s-te/project-management/internal/sessiongovernance"
 	"golang.org/x/oauth2"
 )
@@ -156,13 +157,12 @@ func NewOIDCAuthenticator(ctx context.Context, options OIDCOptions, store OIDCSt
 	return authenticator, nil
 }
 
-// Authenticate 校验当前浏览器会话、中央期限与业务授权。
-// 参数：ctx为调用上下文与取消边界。
-//
-//	request为经过调用方校验的请求内容。
-//
-// 返回值：经过核验的主体或会话；明确失效与暂时依赖错误分别返回。
+// Authenticate 校验当前会话，显式页面刷新强制重算授权。
+// 参数：ctx 为请求上下文，request 携带本应用 Cookie 及可选刷新标记。
+// 返回值：当前主体；认证、授权及依赖故障保留各自错误语义。
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
+	ctx = authorizationrefresh.FromRequest(ctx, request)
+	forced := authorizationrefresh.Forced(ctx)
 	cookie, err := request.Cookie(a.options.SessionCookieName)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return Principal{}, ErrUnauthenticated
@@ -192,38 +192,11 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, request *http.Requ
 	if !a.sessionWithinDeadlines(stored, now) {
 		return Principal{}, ErrUnauthenticated
 	}
-	refreshDue := !stored.TokenExpiresAt.After(now) || now.Sub(stored.AuthorizationCheckedAt) >= a.options.AuthorizationRefreshInterval
+	refreshDue := forced ||
+		!stored.TokenExpiresAt.After(now) ||
+		now.Sub(stored.AuthorizationCheckedAt) >= a.options.AuthorizationRefreshInterval
 	if refreshDue {
-		if stored.RefreshRetryAt.After(now) {
-			if staleReadAllowed(request.Method, now, stored.AuthorizationCheckedAt, a.options.AuthorizationMaxStale, stored.TokenExpiresAt) {
-				return principal, nil
-			}
-			return Principal{}, ErrAuthorizationUnavailable
-		}
-		refresh := a.refreshAuthorization
-		if refresh == nil {
-			refresh = a.refreshStoredSession
-		}
-		updated, current, refreshErr := refresh(ctx, stored, now, request.Method)
-		if refreshErr != nil {
-			if errors.Is(refreshErr, ErrAuthorizationUnavailable) && staleReadAllowed(request.Method, now, stored.AuthorizationCheckedAt, a.options.AuthorizationMaxStale, stored.TokenExpiresAt) {
-				stored.RefreshRetryAt = now.Add(authorizationRefreshRetryInterval)
-				stored.LastSeenAt = now
-				_ = a.store.UpdateSession(ctx, stored, now)
-				return principal, nil
-			}
-			if errors.Is(refreshErr, ErrAuthorizationDenied) || errors.Is(refreshErr, ErrInvalidAuthorization) {
-				_ = a.store.RevokeSessionsForIdentity(ctx, stored.TenantID, stored.IdentityID, now)
-			} else if errors.Is(refreshErr, ErrUnauthenticated) {
-				_ = a.store.RevokeSession(ctx, hash, now)
-			}
-			return Principal{}, refreshErr
-		}
-		updated.LastSeenAt = now
-		if err := a.store.UpdateSession(ctx, updated, now); err != nil {
-			return Principal{}, ErrUnauthenticated
-		}
-		return current, nil
+		return a.authenticateLegacyRefresh(ctx, stored, now, request.Method)
 	}
 	stored.LastSeenAt = now
 	if err := a.store.TouchSessionLastSeen(ctx, hash, now); err != nil {

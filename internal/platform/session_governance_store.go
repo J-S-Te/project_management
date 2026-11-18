@@ -3,9 +3,10 @@ package platform
 import (
 	"context"
 	"errors"
+	"time"
+
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"time"
 )
 
 // AttachSessionLink 将票据绑定原始state，重复桥接不覆盖已经保存的票据。
@@ -34,7 +35,7 @@ func (s *GORMOIDCStore) AttachSessionLink(ctx context.Context, hash, cipher []by
 		CentralTicketCipher: cipher, ForceLogin: row.ForceLogin}, nil
 }
 
-// WithSessionLock 对同一Cookie的令牌轮换加数据库行锁，普通读取不覆盖轮换结果。
+// WithSessionLock 对同一Cookie的凭据和授权更新加行锁，旧读取不得覆盖新结果。
 // 参数：ctx为请求，hash为Cookie摘要，now为时钟，update为有界的刷新与快照核验。
 // 返回值：最新持久会话；明确失效提交当前行撤销，暂时失败回滚并返回依赖错误。
 func (s *GORMOIDCStore) WithSessionLock(ctx context.Context, hash []byte, now time.Time, update sessionUpdateFunc) (StoredOIDCSession, error) {
@@ -52,7 +53,7 @@ func (s *GORMOIDCStore) WithSessionLock(ctx context.Context, hash []byte, now ti
 		result = storedSession(row)
 		updated, changed, err := update(result)
 		if errors.Is(err, ErrUnauthenticated) || errors.Is(err, ErrAuthorizationDenied) || errors.Is(err, ErrInvalidAuthorization) {
-			rejection = ErrUnauthenticated
+			rejection = err
 			return tx.Model(&oidcSessionRecord{}).Where("session_id_hash = ?", hash).Update("revoked_at", now).Error
 		}
 		if err != nil {
@@ -65,7 +66,7 @@ func (s *GORMOIDCStore) WithSessionLock(ctx context.Context, hash []byte, now ti
 		return tx.Model(&oidcSessionRecord{}).Where("session_id_hash = ?", hash).Updates(map[string]any{
 			"principal_json": updated.PrincipalJSON, "id_token_ciphertext": updated.IDTokenCipher,
 			"oauth_token_ciphertext": updated.OAuthTokenCipher, "authorization_revision": updated.AuthorizationRevision,
-			"authorization_checked_at": updated.AuthorizationCheckedAt, "refresh_retry_at": nil,
+			"authorization_checked_at": updated.AuthorizationCheckedAt, "refresh_retry_at": sessionRecord(updated).RefreshRetryAt,
 			"token_expires_at": updated.TokenExpiresAt, "last_seen_at": now,
 			"oidc_subject": updated.OIDCSubject, "oidc_session_id": updated.OIDCSessionID,
 		}).Error

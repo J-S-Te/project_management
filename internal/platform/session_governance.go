@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/j-s-te/project-management/internal/authorizationrefresh"
 	central "github.com/j-s-te/project-management/internal/sessiongovernance"
 )
 
@@ -72,7 +73,9 @@ func (a *OIDCAuthenticator) authenticateCentral(ctx context.Context, record Stor
 	if err != nil || principal.IdentityID != record.IdentityID || principal.TenantID != record.TenantID {
 		return Principal{}, ErrUnauthenticated
 	}
-	if record.TokenExpiresAt.After(now.Add(time.Minute)) && now.Sub(record.AuthorizationCheckedAt) < a.options.AuthorizationRefreshInterval {
+	if !authorizationrefresh.Forced(ctx) &&
+		record.TokenExpiresAt.After(now.Add(time.Minute)) &&
+		now.Sub(record.AuthorizationCheckedAt) < a.options.AuthorizationRefreshInterval {
 		return principal, nil
 	}
 	store, ok := a.store.(centralOIDCStore)
@@ -94,7 +97,9 @@ func (a *OIDCAuthenticator) authenticateCentral(ctx context.Context, record Stor
 		if _, err := a.centralState(ctx, current, false, false); err != nil {
 			return current, false, err
 		}
-		if current.TokenExpiresAt.After(lockedNow.Add(time.Minute)) && lockedNow.Sub(current.AuthorizationCheckedAt) < a.options.AuthorizationRefreshInterval {
+		if !authorizationrefresh.Forced(ctx) &&
+			current.TokenExpiresAt.After(lockedNow.Add(time.Minute)) &&
+			lockedNow.Sub(current.AuthorizationCheckedAt) < a.options.AuthorizationRefreshInterval {
 			return current, false, nil
 		}
 		refreshed, _, err := a.refreshStoredSessionWithTokenPolicy(ctx, current, lockedNow, method, false)
@@ -189,7 +194,9 @@ func (a *OIDCAuthenticator) lifecycle(writer http.ResponseWriter, request *http.
 	}
 	if _, err := a.Authenticate(request.Context(), request); err != nil {
 		status := 503
-		if errors.Is(err, ErrUnauthenticated) {
+		if errors.Is(err, ErrAuthorizationDenied) || errors.Is(err, ErrInvalidAuthorization) {
+			status = 403
+		} else if errors.Is(err, ErrUnauthenticated) {
 			status = 401
 		}
 		http.Error(writer, "session unavailable", status)
@@ -208,7 +215,9 @@ func (a *OIDCAuthenticator) lifecycle(writer http.ResponseWriter, request *http.
 	state, err := a.centralState(request.Context(), record, interact, true)
 	if err != nil {
 		status := 503
-		if errors.Is(err, ErrUnauthenticated) {
+		if errors.Is(err, ErrAuthorizationDenied) || errors.Is(err, ErrInvalidAuthorization) {
+			status = 403
+		} else if errors.Is(err, ErrUnauthenticated) {
 			status = 401
 		}
 		http.Error(writer, "session unavailable", status)
