@@ -276,11 +276,9 @@ func (s *Service) SubmitFieldRecord(ctx context.Context, p platform.Principal, i
 	return s.applyEvent(ctx, fieldDeliveryEvent(p, itemID, EventFieldRecordSubmitted, payload, operationID, capturedAt))
 }
 
-// CheckInField 在现场作业前记录 GPS 和设备精度，支持安全重放，
-// 使离线客户端恢复连接后可提交相同操作。
-
-// CheckInField 在现场作业前记录 GPS 和设备精度，支持安全重放，
-// 使离线客户端恢复连接后可提交相同操作。
+// CheckInField 在现场作业前校验 GPS 质量并记录不可变签到，支持离线安全重放。
+// 参数：ctx 为请求上下文，p 为已认证操作人，itemID 为服务项，input 为设备定位和采集证据。
+// 返回值：成功返回 nil；权限、数据范围、坐标精度、站点偏离或持久化失败返回相应错误。
 func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID string, input domain.FieldCheckInInput) error {
 	filter, err := authorizeProjectScope(p, "project.field.execute")
 	if err != nil {
@@ -290,11 +288,12 @@ func (s *Service) CheckInField(ctx context.Context, p platform.Principal, itemID
 	if err != nil {
 		return err
 	}
-	if input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 {
+	if math.IsNaN(input.Latitude) || math.IsInf(input.Latitude, 0) || math.IsNaN(input.Longitude) || math.IsInf(input.Longitude, 0) ||
+		input.Latitude < -90 || input.Latitude > 90 || input.Longitude < -180 || input.Longitude > 180 {
 		return ValidationError("签到经纬度超出有效范围")
 	}
-	if input.AccuracyMeters <= 0 || input.AccuracyMeters > 10000 {
-		return ValidationError("签到定位精度必须在 0 到 10000 米之间")
+	if math.IsNaN(input.AccuracyMeters) || math.IsInf(input.AccuracyMeters, 0) || input.AccuracyMeters <= 0 || input.AccuracyMeters > 100 {
+		return ValidationError("签到定位误差必须大于 0 且不超过 100 米；请开启精确定位并重新获取位置")
 	}
 	if err := validateProjectTextLength(input.DeviationReason, 1000, "签到偏离原因"); err != nil {
 		return err
