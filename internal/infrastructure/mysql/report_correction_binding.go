@@ -106,7 +106,12 @@ func closeSupersededReportCorrections(tx *gorm.DB, item *serviceItemRecord, even
 			Payload: map[string]any{"request_id": request.ID, "old_revision": revision,
 				"automatic": true, "cause_event_id": event.ID, "initiated_by": event.ActorUserID,
 				"comment": "原报告修订已由其他更正申请替代，本申请自动失效"}}
+		closed.Payload["report_correction_requester_id"] = request.ActorUserID
+		application.AttachApprovalNotification(&closed)
 		if err := createEvent(tx, closed); err != nil {
+			return err
+		}
+		if err := createNotificationOutbox(tx, closed); err != nil {
 			return err
 		}
 	}

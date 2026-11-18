@@ -25,6 +25,7 @@ import (
 //   - core.MUTATE_BUSINESS：该 GET 实际带副作用，到期必须 403（当前没有此类 GET，
 //     若将来出现必须在这里显式登记并说明副作用）。
 var registeredGETOperations = map[string]core.Operation{
+	"/api/v1/approval-tasks":                                    core.READ_HISTORY,
 	"/api/v1/projects/:id/expense-participants":                 core.READ_HISTORY,
 	"/api/v1/projects/:id/reimbursement-spend":                  core.READ_HISTORY,
 	"/internal/v1/reimbursement/spend-snapshots/reconciliation": core.READ_HISTORY,

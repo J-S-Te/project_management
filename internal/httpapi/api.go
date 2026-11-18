@@ -344,6 +344,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/field-start", require("project.field.execute"), h.startFieldExecution)
 	api.POST("/service-items/:id/field-check-ins", require("project.field.execute"), h.checkInField)
 	api.POST("/service-items/:id/field-signatures", require("project.field.execute"), h.captureFieldSignature)
+	api.GET("/approval-tasks", require("project.read"), h.approvalTasks)
 	api.POST("/service-items/:id/rollback-requests", require("project.rollback.request"), h.requestRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/withdraw", require("project.rollback.request"), h.withdrawRollback)
 	api.POST("/service-items/:id/rollback-requests/:request_id/decision", require("project.rollback.approve"), h.decideRollback)
@@ -949,7 +950,7 @@ func (h *Handler) ruleConfigurationCatalog(c *gin.Context) {
 var allNavigationSections = []string{
 	"dashboard", "monitoring",
 	"projects", "decomposition",
-	"allocation", "inbox", "planning", "preparation", "qualifications", "equipment", "resource-usage", "assignments", "methods",
+	"allocation", "inbox", "approvals", "planning", "preparation", "qualifications", "equipment", "resource-usage", "assignments", "methods",
 	"implementation", "exceptions", "standards", "reports",
 	"split-rules", "warning-rules", "automations", "permissions", "sla", "capability-codes",
 	"notifications",
@@ -967,11 +968,11 @@ func navigationSections(roles []string) []string {
 		"business_admin": {"projects", "decomposition", "allocation"},
 		// inbox 是「已指派团队负责人但尚未配齐项目经理/工程师」的待办队列，
 		// 归团队负责人处理；此前它只存在于 allNavigationSections，任何业务角色都看不到。
-		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions", "resource-usage"},
+		"team_lead": {"projects", "allocation", "inbox", "approvals", "assignments", "implementation", "exceptions", "resource-usage"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director": {"dashboard", "monitoring", "projects", "allocation", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla", "resource-usage"},
-		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports", "resource-usage"},
+		"technical_director": {"dashboard", "monitoring", "projects", "allocation", "inbox", "approvals", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla", "resource-usage"},
+		"project_manager":    {"dashboard", "monitoring", "projects", "approvals", "planning", "preparation", "assignments", "implementation", "reports", "resource-usage"},
 		// 设备管理员维护设备与共用的资质/能力编码目录，不暴露其它规则配置。
 		// equipment 放在首位，使其成为该角色的默认工作区。
 		"device_admin": {"equipment", "qualifications", "capability-codes", "resource-usage"},
