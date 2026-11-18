@@ -970,7 +970,7 @@ func navigationSections(roles []string) []string {
 		"team_lead": {"projects", "allocation", "inbox", "assignments", "implementation", "exceptions", "resource-usage"},
 		// 报告归档权限只授予技术总监与质量管理员；两者必须同时能看到 reports 栏目，
 		// 否则报告永远停在「已签发」，项目也到不了「已完成」终态。
-		"technical_director": {"dashboard", "monitoring", "projects", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla", "resource-usage"},
+		"technical_director": {"dashboard", "monitoring", "projects", "allocation", "inbox", "qualifications", "methods", "exceptions", "standards", "reports", "capability-codes", "warning-rules", "automations", "permissions", "sla", "resource-usage"},
 		"project_manager":    {"dashboard", "monitoring", "projects", "planning", "preparation", "assignments", "implementation", "reports", "resource-usage"},
 		// 设备管理员维护设备与共用的资质/能力编码目录，不暴露其它规则配置。
 		// equipment 放在首位，使其成为该角色的默认工作区。
