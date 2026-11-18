@@ -88,8 +88,8 @@ func TestFieldExecutionPermissionBelongsToProjectManagerAndEngineers(t *testing.
 	if err := json.Unmarshal(authz.PermissionManifest, &manifest); err != nil {
 		t.Fatalf("decode permission manifest: %v", err)
 	}
-	if manifest.CatalogVersion != "13" {
-		t.Fatalf("catalog_version=%q, want 13 for metric facts", manifest.CatalogVersion)
+	if manifest.CatalogVersion != "14" {
+		t.Fatalf("catalog_version=%q, want 14 for technical director assignment", manifest.CatalogVersion)
 	}
 	// 角色配置哈希必须按 `<应用>-v<目录版本>-<变更>` 命名，平台据此判断授权目录是否需要重新发布。
 	hashPrefix := "project-management-v" + manifest.CatalogVersion + "-"

@@ -1,6 +1,6 @@
 {
-  "catalog_version": "13",
-  "claims_role_config_hash": "project-management-v13-metric-facts",
+  "catalog_version": "14",
+  "claims_role_config_hash": "project-management-v14-technical-director-assignment",
   "policy": {"max_effective_roles": 16},
   "permissions": [
     {"code":"project.read","name":"查看项目与执行数据","action":"read","resource_code":"project","resource_name":"项目","risk_level":"LOW"},
@@ -15,9 +15,9 @@
     ,{"code":"project.resource.manage","name":"管理人员资质","action":"manage","resource_code":"project_resource","resource_name":"项目资源","risk_level":"HIGH"}
     ,{"code":"project.device.read","name":"查看设备基础信息与能力","action":"read","resource_code":"equipment","resource_name":"设备","risk_level":"LOW"}
     ,{"code":"project.device.manage","name":"维护设备、停用与检定信息","action":"manage","resource_code":"equipment","resource_name":"设备","risk_level":"HIGH"}
-    ,{"code":"project.team.assign","name":"业务管理员分配团队负责人","action":"assign_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.team.assign","name":"分配团队负责人","action":"assign_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.team.revoke","name":"撤销团队负责人分配","action":"revoke_team","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
-    ,{"code":"project.execution.assign","name":"团队负责人指派项目经理和实施工程师","action":"assign_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
+    ,{"code":"project.execution.assign","name":"指派项目经理和实施工程师","action":"assign_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.execution.revoke","name":"撤销项目经理和实施工程师分配","action":"revoke_execution","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
     ,{"code":"project.implementation.plan","name":"制定实施计划与准备事项","action":"plan","resource_code":"service_item","resource_name":"服务项","risk_level":"MEDIUM"}
     ,{"code":"project.implementation.revoke","name":"撤销实施计划与实施准备","action":"revoke_plan","resource_code":"service_item","resource_name":"服务项","risk_level":"HIGH"}
@@ -49,7 +49,7 @@
     {"code":"system_admin","name":"平台系统管理员","description":"平台系统管理员负责项目系统配置与运维；项目创建仅由超级管理员和业务管理员执行。","permissions":["project.read","service_item.confirm","project_rule.manage","project.capability_code.manage","project.contract.import","project.decomposition.manage","project.resource.read","project.resource.manage","project.device.read","project.device.manage","project.team.assign","project.team.revoke","project.execution.assign","project.execution.revoke","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.rollback.approve","project.deviation.report","project.deviation.review","project.special_method.review","project.field.complete","project.report.manage","project.report.prepare","project.report.review","project.report.issue","project.report.archive","project.report.correction.request","project.report.correction.approve","project.field_permission.manage","project.person_capacity.manage","project.equipment_capacity.manage","project.resource_usage.record","project.resource_usage.confirm"]},
     {"code":"business_admin","name":"业务管理员","permissions":["project.expense_participant.manage","project.reimbursement_spend.read","project.read","project.create","service_item.confirm","project.decomposition.manage","project.resource.read","project.team.assign","project.team.revoke"]},
     {"code":"team_lead","name":"团队负责人","permissions":["project.reimbursement_spend.read","project.read","project.resource.read","project.execution.assign","project.execution.revoke","project.rollback.request","project.deviation.review"]},
-    {"code":"technical_director","name":"技术总监","permissions":["project.reimbursement_spend.read","project.native_scope.approve","project.read","project_rule.manage","project.capability_code.manage","project.field_permission.manage","project.resource.read","project.rollback.approve","project.report.correction.approve","project.deviation.review","project.special_method.review","project.report.issue","project.report.archive"]},
+    {"code":"technical_director","name":"技术总监","permissions":["project.reimbursement_spend.read","project.native_scope.approve","project.read","project_rule.manage","project.capability_code.manage","project.field_permission.manage","project.resource.read","project.team.assign","project.team.revoke","project.execution.assign","project.execution.revoke","project.rollback.approve","project.report.correction.approve","project.deviation.review","project.special_method.review","project.report.issue","project.report.archive"]},
     {"code":"sales_director","name":"销售总监","description":"用于项目权威销售审批目录，仅提供最小费用引用资格，不授予项目详情或交付操作。","permissions":["project.expense_reference.eligible"]},
     {"code":"project_manager","name":"项目经理","permissions":["project.reimbursement_spend.read","project.read","project.resource.read","project.implementation.plan","project.implementation.revoke","project.rollback.request","project.report.correction.request","project.field.execute","project.field.complete","project.report.prepare","project.resource_usage.record"]},
     {"code":"engineer","name":"实施工程师","description":"现场执行角色：按指派受理服务项并开始实施、提交现场记录与确认现场完成；不含审批、报告签发与规则配置。","permissions":["project.read","project.field.execute","project.deviation.report","project.field.complete","project.resource_usage.record"]},

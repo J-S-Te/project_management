@@ -19,14 +19,14 @@
 | 项目 | 九个线性节点加补充协议处理中、已终止，共 11 节点；空项目回退存储值，值为空才待拆解确认。 |
 | 等保内嵌专项 | 决策、执行、报告独立状态与版本；不增加父服务项数量或进度，但可阻止父现场结束/报告签发/归档。 |
 
-当前内置目录版本为 8；菜单、权限码和数据范围不能混为一谈，平台实际授权仍需目标环境核对。
+当前内置目录版本为 14；菜单、权限码和数据范围不能混为一谈，平台实际授权仍需目标环境核对。
 
 | 动作 | 权限码 | 主要业务角色 |
 | --- | --- | --- |
 | 创建项目 | project.create + admin/business_admin 角色资格 | 项目系统管理员、业务管理员；system_admin 不可手工创建 |
 | 确认 / 调整 / 退回拆解 | service_item.confirm / project.decomposition.manage | 业务管理员 |
-| 团队分配 / 撤销 | project.team.assign / project.team.revoke | 业务管理员 |
-| 执行团队分配 / 撤销 | project.execution.assign / project.execution.revoke | 团队负责人 |
+| 团队分配 / 撤销 | project.team.assign / project.team.revoke | 技术总监、业务管理员 |
+| 执行团队分配 / 撤销 | project.execution.assign / project.execution.revoke | 技术总监、团队负责人 |
 | 计划 / 准备 / 撤销 | project.implementation.plan / project.implementation.revoke | 项目经理 |
 | 开始现场 / 签到 / 记录 / 签字 | project.field.execute | 项目经理；内置 admin/system_admin 不持有该权限 |
 | 结束现场 | project.field.complete | 项目经理；治理角色按目录可代办 |
