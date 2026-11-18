@@ -89,7 +89,10 @@ type NotificationMessage struct {
 	Content        string    `json:"content"`
 	ReferenceType  string    `json:"reference_type"`
 	ReferenceID    string    `json:"reference_id"`
+	TargetURL      string    `json:"target_url,omitempty"`
 	Recipients     []string  `json:"recipient_user_ids"`
+	RecipientRole  string    `json:"recipient_role,omitempty"`
+	ExcludeUserID  string    `json:"exclude_user_id,omitempty"`
 	OccurredAt     time.Time `json:"occurred_at"`
 	IdempotencyKey string    `json:"idempotency_key"`
 }

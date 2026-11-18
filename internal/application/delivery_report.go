@@ -154,6 +154,9 @@ func (s *Service) RequestReportCorrection(ctx context.Context, p platform.Princi
 	return event.ID, nil
 }
 
+// DecideReportCorrection 独立审批已签发或已归档报告的更正申请。
+// 参数：ctx 为请求，p 为审批人，itemID/requestID 为申请身份，input 为决定、意见及版本。
+// 返回值：无；越权、自批、申请不存在或版本冲突时返回错误。
 func (s *Service) DecideReportCorrection(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.ReportCorrectionDecisionInput) error {
 	if err := validateProjectTextLength(input.Comment, 1000, "报告更正审批意见"); err != nil {
 		return err
@@ -179,23 +182,9 @@ func (s *Service) DecideReportCorrection(ctx context.Context, p platform.Princip
 	if err != nil {
 		return err
 	}
-	repo, err := s.deliveryRepo()
+	request, err := s.findApprovalRequest(ctx, filter, item, requestID, EventReportCorrectionRequested)
 	if err != nil {
 		return err
-	}
-	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
-	if err != nil {
-		return err
-	}
-	var request domain.DeliveryEvent
-	for _, event := range events {
-		if event.ID == requestID && event.ServiceItemID == itemID && event.Type == EventReportCorrectionRequested {
-			request = event
-			break
-		}
-	}
-	if request.ID == "" {
-		return ErrNotFound
 	}
 	if request.ActorUserID == p.UserID {
 		return ErrForbidden

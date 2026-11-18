@@ -227,8 +227,14 @@ func (s *Service) applyEvent(ctx context.Context, event domain.DeliveryEvent) er
 	return nil
 }
 
+// attachNotification 为交付事件添加对应的持久站内提醒。
+// 参数：ctx 为请求，event 为待提交事务的可信事件。
+// 返回值：无；无收件人的普通事件不生成通知。
 func (s *Service) attachNotification(ctx context.Context, event *domain.DeliveryEvent) {
 	if event == nil || strings.TrimSpace(event.ServiceItemID) == "" {
+		return
+	}
+	if AttachApprovalNotification(event) {
 		return
 	}
 	spec, ok := assignmentNotificationFor(event.Type)
@@ -251,13 +257,9 @@ func (s *Service) attachNotification(ctx context.Context, event *domain.Delivery
 	}
 }
 
-// DispatchNotificationOutbox 为持久通知取得租约，并通过有界重试发布。
-// 生产事务已经提交；投递至少一次，平台
-// 幂等键保证重试安全。
-
-// DispatchNotificationOutbox 为持久通知取得租约，并通过有界重试发布。
-// 生产事务已经提交；投递至少一次，平台
-// 幂等键保证重试安全。
+// DispatchNotificationOutbox 租约认领通知，解析审批角色并以有界重试投递。
+// 参数：ctx 为请求，tenantID/workerID 为可信身份，limit 为批量上限，now 为本轮时钟。
+// 返回值：已确认投递数量；许可、存储或确认失败返回错误，投递失败保留重试。
 func (s *Service) DispatchNotificationOutbox(ctx context.Context, tenantID, workerID string, limit int, now time.Time) (int, error) {
 	if err := ValidateOutboxIdentity(tenantID, workerID); err != nil {
 		return 0, err
@@ -308,13 +310,27 @@ func (s *Service) DispatchNotificationOutbox(ctx context.Context, tenantID, work
 			}
 		}
 		message := item.Message
-		err = s.Notifications.Publish(ctx, platform.NotificationEvent{
-			EventID: message.EventID, EventType: message.EventType, Scope: message.Scope,
-			Priority: message.Priority, Title: message.Title, Content: message.Content,
-			ReferenceType: message.ReferenceType, ReferenceID: message.ReferenceID,
-			Recipients: message.Recipients, OccurredAt: message.OccurredAt,
-			IdempotencyKey: message.IdempotencyKey,
-		})
+		recipients, recipientErr := s.resolveApprovalRecipients(ctx, message)
+		err = recipientErr
+		message.Recipients = recipients
+		if err == nil && message.RecipientRole != "" {
+			if s.CheckBusinessLicense != nil {
+				if checkErr := s.CheckBusinessLicense(ctx); checkErr != nil {
+					return sent, checkErr
+				}
+			}
+			writer, available := s.Repo.(notificationAudienceRepository)
+			if !available {
+				err = errors.New("notification audience repository unavailable")
+			} else {
+				message.RecipientRole = ""
+				err = writer.SaveNotificationAudience(ctx, tenantID, item.ID, workerID,
+					now.Add(time.Since(started)), message)
+			}
+		}
+		if err == nil {
+			err = s.publishNotificationMessage(ctx, message)
+		}
 		// An accepted publication may cross a license boundary. Leave its lease intact;
 		// recovery republishes the persisted payload and key without spending an attempt.
 		if s.CheckBusinessLicense != nil {

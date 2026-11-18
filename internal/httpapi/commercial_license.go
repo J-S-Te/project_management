@@ -14,6 +14,7 @@ type CommercialLicenseGate interface {
 // 精确审查的读取路由：未来 GET 端点不能仅因使用 GET
 // 就继承计算或推进业务的权限。
 var commercialHistoryRoutes = map[string]bool{
+	"/api/v1/approval-tasks":                                                true,
 	"/api/v1/projects/:id/reimbursement-spend":                              true,
 	"/api/v1/projects/:id/expense-participants":                             true,
 	"/internal/v1/reimbursement/spend-snapshots/reconciliation":             true,

@@ -12,8 +12,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// createNotificationOutbox 与交付事件同事务保存明确用户或待解析角色的通知。
+// 参数：tx 为业务事务，event 为带有通知的可信交付事件。
+// 返回值：无通知时返回 nil；编码或持久化失败使业务事务回滚。
 func createNotificationOutbox(tx *gorm.DB, event domain.DeliveryEvent) error {
-	if event.Notification == nil || len(event.Notification.Recipients) == 0 {
+	if event.Notification == nil || (len(event.Notification.Recipients) == 0 && event.Notification.RecipientRole == "") {
 		return nil
 	}
 	payload, err := json.Marshal(event.Notification)
@@ -114,6 +117,32 @@ func (r *Repository) MarkNotificationOutboxRetry(ctx context.Context, tenantID s
 	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
 		Where("tenant_id=? AND id=? AND status='PROCESSING' AND locked_by=? AND locked_until > ?", tenantID, id, workerID, now).
 		Updates(map[string]any{"status": status, "retry_count": gorm.Expr("retry_count + 1"), "next_retry_at": next, "locked_by": "", "locked_until": nil})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return application.ErrConflict
+	}
+	return nil
+}
+
+// SaveNotificationAudience 在有效租约内冻结角色解析结果，确保部分批次失败后受众不变。
+// 参数：ctx 为请求，tenantID/id/workerID/now 为租约边界，message 为冻结后的完整通知。
+// 返回值：成功返回 nil；身份、租约、编码或更新冲突时返回错误。
+func (r *Repository) SaveNotificationAudience(ctx context.Context, tenantID string, id uint64, workerID string, now time.Time, message domain.NotificationMessage) error {
+	if err := application.ValidateOutboxIdentity(tenantID, workerID); err != nil {
+		return err
+	}
+	if message.RecipientRole != "" || len(message.Recipients) == 0 {
+		return application.ErrValidation
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	result := r.db.WithContext(ctx).Model(&notificationOutboxRecord{}).
+		Where("tenant_id=? AND id=? AND status='PROCESSING' AND locked_by=? AND locked_until>?",
+			tenantID, id, workerID, now).Update("payload", payload)
 	if result.Error != nil {
 		return result.Error
 	}

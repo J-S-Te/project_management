@@ -141,7 +141,12 @@ func closeOtherRollbacks(tx *gorm.DB, item *serviceItemRecord, event domain.Deli
 			ActorUserID: "SYSTEM", CreatedAt: event.CreatedAt, Payload: map[string]any{
 				"request_id": request.ID, "automatic": true, "cause_event_id": event.ID,
 				"initiated_by": event.ActorUserID, "comment": "原业务轮次已回退，本申请自动失效"}}
+		closed.Payload["rollback_requester_id"] = request.ActorUserID
+		application.AttachApprovalNotification(&closed)
 		if err := createEvent(tx, closed); err != nil {
+			return err
+		}
+		if err := createNotificationOutbox(tx, closed); err != nil {
 			return err
 		}
 	}

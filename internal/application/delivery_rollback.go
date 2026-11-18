@@ -22,9 +22,9 @@ func rollbackKindAllowed(kind string, item domain.ServiceItem) bool {
 	}
 }
 
-// RequestRollback 把现场/报告回退变成双人复核：申请本身不改变状态，也不会删除现场或报告证据。
-
-// RequestRollback 把现场/报告回退变成双人复核：申请本身不改变状态，也不会删除现场或报告证据。
+// RequestRollback 提交由技术总监审批的现场回退或报告返工申请。
+// 参数：ctx 为请求，p 为申请人，itemID 为服务项，input 为原因、类型及当前版本。
+// 返回值：持久申请编号；权限、状态、审批归属或重复申请不符时返回错误。
 func (s *Service) RequestRollback(ctx context.Context, p platform.Principal, itemID string, input domain.RollbackRequestInput) (string, error) {
 	if err := validateProjectTextLength(input.Reason, 1000, "回退原因"); err != nil {
 		return "", err
@@ -83,14 +83,18 @@ func hasPendingRollback(events []domain.DeliveryEvent, itemID, kind string) bool
 	return false
 }
 
+// DecideRollback 由归属审批人批准或驳回尚未处理的回退申请。
+// 参数：ctx 为请求，p 为审批人，itemID/requestID 为目标身份，input 为决定、意见及版本。
+// 返回值：无；越权、自批、版本或状态冲突时返回错误。
 func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, itemID, requestID string, input domain.RollbackDecisionInput) error {
 	if err := validateProjectTextLength(input.Comment, 1000, "回退审批意见"); err != nil {
 		return err
 	}
-	if err := s.authorizeServiceItem(ctx, p, "project.rollback.approve", itemID); err != nil {
+	permission := "project.rollback.approve"
+	if err := s.authorizeServiceItem(ctx, p, permission, itemID); err != nil {
 		return err
 	}
-	if err := s.verifyExpectedVersion(ctx, p, "project.rollback.approve", itemID, input.ExpectedVersion); err != nil {
+	if err := s.verifyExpectedVersion(ctx, p, permission, itemID, input.ExpectedVersion); err != nil {
 		return err
 	}
 	decision := strings.ToUpper(strings.TrimSpace(input.Decision))
@@ -100,7 +104,7 @@ func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, item
 	if strings.TrimSpace(input.Comment) == "" {
 		return ValidationError("请填写回退审批意见")
 	}
-	filter, err := authorizeProjectScope(p, "project.rollback.approve")
+	filter, err := authorizeProjectScope(p, permission)
 	if err != nil {
 		return err
 	}
@@ -108,23 +112,9 @@ func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, item
 	if err != nil {
 		return err
 	}
-	repo, err := s.deliveryRepo()
+	request, err := s.findApprovalRequest(ctx, filter, item, requestID, EventRollbackRequested)
 	if err != nil {
 		return err
-	}
-	events, err := repo.ListDeliveryEvents(ctx, filter, item.ProjectID)
-	if err != nil {
-		return err
-	}
-	var request domain.DeliveryEvent
-	for _, event := range events {
-		if event.ID == requestID && event.ServiceItemID == itemID && event.Type == EventRollbackRequested {
-			request = event
-			break
-		}
-	}
-	if request.ID == "" {
-		return ErrNotFound
 	}
 	if request.ActorUserID == p.UserID {
 		return ErrForbidden
@@ -137,7 +127,10 @@ func (s *Service) DecideRollback(ctx context.Context, p platform.Principal, item
 	if decision == "REJECTED" {
 		eventType = EventRollbackRejected
 	}
-	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, eventType, map[string]any{"request_id": requestID, "kind": kind, "comment": strings.TrimSpace(input.Comment), "expected_version": input.ExpectedVersion, "rollback_requester_id": payloadText(request.Payload, "requester_user_id")}))
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, eventType, map[string]any{
+		"request_id": requestID, "kind": kind, "comment": strings.TrimSpace(input.Comment),
+		"expected_version": input.ExpectedVersion, "rollback_requester_id": request.ActorUserID,
+	}))
 }
 
 // WithdrawRollback 仅允许原申请人在审批前撤回，避免用“驳回”冒充申请人取消。

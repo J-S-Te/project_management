@@ -42,6 +42,7 @@ type NotificationEvent struct {
 	Content        string
 	ReferenceType  string
 	ReferenceID    string
+	TargetURL      string
 	Recipients     []string
 	OccurredAt     time.Time
 	IdempotencyKey string
@@ -86,14 +87,16 @@ type notificationIngestPayload struct {
 	Content           string     `json:"content"`
 	ReferenceType     string     `json:"reference_type"`
 	ReferenceID       string     `json:"reference_id"`
+	TargetURL         string     `json:"target_url,omitempty"`
 	IdempotencyKey    string     `json:"idempotency_key"`
 	Recipients        []string   `json:"recipient_user_ids"`
 	OccurredAt        time.Time  `json:"occurred_at"`
 	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
 }
 
-// Publish 投递一条站内信事件。平台按 idempotency_key 幂等，重复投递返回 200 而非 201，
-// 两者都视为成功。收件人为空时直接跳过：平台会把它当作无人接收的事件。
+// Publish 使用机器凭据和幂等键投递站内提醒，保留受控业务直达地址。
+// 参数：ctx 为投递请求，event 为收件人、内容、关联业务及幂等身份。
+// 返回值：平台确认或无收件人时返回 nil；编码、鉴权及摄取失败返回错误。
 func (c *notificationPublisher) Publish(ctx context.Context, event NotificationEvent) error {
 	recipients := make([]string, 0, len(event.Recipients))
 	seen := make(map[string]struct{}, len(event.Recipients))
@@ -128,6 +131,7 @@ func (c *notificationPublisher) Publish(ctx context.Context, event NotificationE
 		Priority:          strings.ToUpper(firstNonBlankNotificationValue(event.Priority, "NORMAL")),
 		Title:             strings.TrimSpace(event.Title), Content: strings.TrimSpace(event.Content),
 		ReferenceType: strings.TrimSpace(event.ReferenceType), ReferenceID: strings.TrimSpace(event.ReferenceID),
+		TargetURL:      strings.TrimSpace(event.TargetURL),
 		IdempotencyKey: idempotencyKey, Recipients: recipients, OccurredAt: occurredAt.UTC(),
 	}
 	encoded, err := json.Marshal(payload)
