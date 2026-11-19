@@ -80,6 +80,7 @@ var registeredGETOperations = map[string]core.Operation{
 	"/api/v1/approved-contracts/:contractID/service-items":                core.READ_HISTORY,
 	"/api/v1/projects/:id":                                                core.READ_HISTORY,
 	"/api/v1/delivery-events":                                             core.READ_HISTORY,
+	"/api/v1/workflow/stream":                                             core.READ_HISTORY,
 	"/api/v1/delivery/sla-overdue":                                        core.READ_HISTORY,
 	"/api/v1/service-items":                                               core.READ_HISTORY,
 	"/api/v1/service-items/:id/field-evidence":                            core.READ_HISTORY,

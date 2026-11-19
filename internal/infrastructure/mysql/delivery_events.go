@@ -616,6 +616,9 @@ func createEvent(tx *gorm.DB, event domain.DeliveryEvent) error {
 	if err := tx.Create(&deliveryEventRecord{ID: event.ID, TenantID: event.TenantID, ProjectID: event.ProjectID, ServiceItemID: event.ServiceItemID, EventType: event.Type, ActorUserID: event.ActorUserID, ClientOperationID: operationID, CapturedAt: capturedAt, Payload: payload, CreatedAt: event.CreatedAt}).Error; err != nil {
 		return err
 	}
+	if err := advanceWorkflowRevision(tx, event.TenantID, event.ProjectID, event.ServiceItemID); err != nil {
+		return err
+	}
 	if err := createDeliveryEffects(tx, event); err != nil {
 		return err
 	}

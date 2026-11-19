@@ -37,6 +37,9 @@ func createSpecialMethodReviewRequest(tx *gorm.DB, item serviceItemRecord, user 
 	if created.Error != nil || created.RowsAffected == 0 {
 		return created.Error
 	}
+	if err := advanceWorkflowRevision(tx, item.TenantID, item.ProjectID, item.ID); err != nil {
+		return err
+	}
 	message := domain.NotificationMessage{EventID: "N_" + id, EventType: "SPECIAL_METHOD_REVIEW_REQUESTED",
 		Scope: platform.NotificationScopeCrossSystem, Priority: "NORMAL", Title: "特殊方法待复核",
 		Content: "有一项特殊方法待复核，请进入服务项核验。", ReferenceType: "SERVICE_ITEM", ReferenceID: item.ID,

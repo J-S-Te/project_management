@@ -455,8 +455,8 @@ func TestEmbeddedMigrationVersionsRemainUniqueAndContiguous(t *testing.T) {
 		}
 		expected++
 	}
-	if expected != 51 {
-		t.Fatalf("migration count=%d want=50", expected-1)
+	if expected != 52 {
+		t.Fatalf("migration count=%d want=51", expected-1)
 	}
 }
 

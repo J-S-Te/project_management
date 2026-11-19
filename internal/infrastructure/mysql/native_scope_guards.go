@@ -215,6 +215,9 @@ func saveNativeScopeEvent(ctx context.Context, tx *gorm.DB, project projectRecor
 	if err = tx.Create(&deliveryEventRecord{ID: eventID, TenantID: project.TenantID, ProjectID: project.ID, EventType: action, ActorUserID: actor, Payload: payload, CreatedAt: now}).Error; err != nil {
 		return err
 	}
+	if err := advanceWorkflowRevision(tx, project.TenantID, project.ID, ""); err != nil {
+		return err
+	}
 	meta := auditctx.FromContext(ctx)
 	if err := tx.Create(&auditOutboxRecord{ID: ulid.Make().String(), TenantID: project.TenantID, EventID: eventID, ActorID: actorPointer(actor), ActorType: "USER", Action: "PROJECT_MANAGEMENT:" + action, ResourceType: "native_scope_change", ResourceID: change.ID, RequestID: auditRequestID(meta.RequestID), LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource), Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: now, CreatedAt: now}).Error; err != nil {
 		return err
