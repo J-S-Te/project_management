@@ -2,6 +2,12 @@ package domain
 
 import "time"
 
+const (
+	ApprovalSpecialMethod = "SPECIAL_METHOD_REVIEW"
+	ApprovalDeviation     = "FIELD_DEVIATION"
+	ApprovalNativeScope   = "NATIVE_SCOPE_CHANGE"
+)
+
 type ApprovalTask struct {
 	ID                string    `json:"id"`
 	Type              string    `json:"type"`
@@ -18,17 +24,26 @@ type ApprovalTask struct {
 	Status            string    `json:"status"`
 	CanDecide         bool      `json:"can_decide"`
 	DecisionComment   string    `json:"decision_comment"`
+	Decision          string    `json:"decision,omitempty"`
+	Severity          string    `json:"severity,omitempty"`
+	TargetURL         string    `json:"target_url,omitempty"`
 	DecisionType      string    `json:"-"`
 }
 
 type ApprovalQuery struct {
-	RequestID     string
-	View          string
-	Page          int
-	PageSize      int
-	UserID        string
-	CanRollback   bool
-	CanCorrection bool
+	RequestID       string
+	TaskType        string
+	View            string
+	Page            int
+	PageSize        int
+	UserID          string
+	IdentityID      string
+	CanRollback     bool
+	CanCorrection   bool
+	CanSpecial      bool
+	CanDeviation    bool
+	CanNative       bool
+	NativeAvailable bool
 }
 
 type ApprovalPage struct {

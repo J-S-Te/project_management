@@ -8,6 +8,8 @@ type NativeScopeInput struct {
 	BaseScopeVersion       uint64            `json:"base_scope_version"`
 	Reason                 string            `json:"reason"`
 	ServiceItems           []ContractService `json:"service_items"`
+	// RequestedByUserID 只由应用层从当前主体写入，不接受浏览器反序列化。
+	RequestedByUserID string `json:"-"`
 }
 
 type NativeScopeDecision struct {

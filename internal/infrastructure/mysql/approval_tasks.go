@@ -48,22 +48,16 @@ func (r *Repository) approvalTaskQuery(ctx context.Context, filter platform.Scop
 // 参数：ctx/filter 为可信数据范围，q 为已校验的查询和权限能力。
 // 返回值：原申请、当前服务项版本及终决信息；查询失败返回错误。
 func (r *Repository) ListApprovalTasks(ctx context.Context, filter platform.ScopeFilter, q domain.ApprovalQuery) ([]domain.ApprovalTask, int64, error) {
-	query := r.approvalTaskQuery(ctx, filter, q)
+	rows := []domain.ApprovalTask{}
+	query := r.approvalWorkItems(ctx, filter, q)
+	if query == nil {
+		return rows, 0, nil
+	}
 	var total int64
-	if err := query.Count(&total).Error; err != nil {
+	if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	rows := []domain.ApprovalTask{}
-	columns := `req.id,req.project_id,req.service_item_id,req.actor_user_id AS requester_user_id,
- req.created_at,pm_service_item.site,pm_service_item.version,pm_service_item.report_status,
- pm_service_item.status AS service_item_status,JSON_UNQUOTE(JSON_EXTRACT(req.payload,'$.reason')) AS reason,
- CASE WHEN req.event_type='REPORT_CORRECTION_REQUESTED' THEN 'REPORT_CORRECTION'
- WHEN JSON_UNQUOTE(JSON_EXTRACT(req.payload,'$.kind'))='REPORT_TO_FIELD' THEN 'REPORT_REWORK'
- ELSE 'FIELD_ROLLBACK' END AS type,'' AS approver_user_id,
- COALESCE(decided.event_type,'') AS decision_type,
- COALESCE(JSON_UNQUOTE(JSON_EXTRACT(decided.payload,'$.comment')),
- JSON_UNQUOTE(JSON_EXTRACT(decided.payload,'$.reason')),'') AS decision_comment`
-	err := query.Select(columns).Order("req.created_at DESC,req.id DESC").
+	err := query.Order("created_at DESC, id DESC, type ASC").
 		Offset((q.Page - 1) * q.PageSize).Limit(q.PageSize).Scan(&rows).Error
 	return rows, total, err
 }

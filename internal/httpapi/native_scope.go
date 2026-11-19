@@ -9,11 +9,22 @@ import (
 	"net/http"
 )
 
-// nativeScope 返回真实当前范围、完整版本及本地审批能力。
-// 参数：c 为经过项目读取权限检查的请求。
+// nativeScope 返回当前范围、本地审批能力及有界历史或指定提案。
+// 参数：c 为经过项目读取权限检查的请求，change_id 可精确指定提案。
 // 返回值：无；错误经原服务错误契约输出。
 func (h *Handler) nativeScope(c *gin.Context) {
-	state, err := h.service.ReadNativeScope(c.Request.Context(), principal(c), c.Param("id"))
+	var state domain.NativeScopeState
+	var err error
+	if ids, present := c.GetQueryArray("change_id"); present {
+		if len(ids) != 1 {
+			writeServiceError(c, application.ValidationError("请指定一个范围变更提案编号"))
+			return
+		}
+		state, err = h.service.ReadNativeScopeChange(
+			c.Request.Context(), principal(c), c.Param("id"), ids[0])
+	} else {
+		state, err = h.service.ReadNativeScope(c.Request.Context(), principal(c), c.Param("id"))
+	}
 	if err != nil {
 		writeServiceError(c, err)
 		return

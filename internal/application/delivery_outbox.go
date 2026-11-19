@@ -8,6 +8,7 @@ import (
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"github.com/oklog/ulid/v2"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -254,6 +255,15 @@ func (s *Service) attachNotification(ctx context.Context, event *domain.Delivery
 		Title: spec.Title, Content: spec.Content, ReferenceType: "service_item",
 		ReferenceID: event.ServiceItemID, Recipients: uniqueStrings(recipients),
 		OccurredAt: event.CreatedAt, IdempotencyKey: event.ID + "-assigned",
+	}
+	if event.Type == EventDeviationReported {
+		if deviationID := payloadText(event.Payload, "deviation_id"); deviationID != "" {
+			event.Notification.ReferenceType = "DEVIATION"
+			event.Notification.ReferenceID = deviationID
+			event.Notification.TargetURL = "/project_management/exceptions?" + url.Values{
+				"service_item_id": {event.ServiceItemID}, "deviation_id": {deviationID},
+			}.Encode()
+		}
 	}
 }
 

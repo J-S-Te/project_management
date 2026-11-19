@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
+	"testing"
+
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"gorm.io/gorm"
-	"net/url"
-	"testing"
 )
 
 // scopeFixture 创建独立本地范围审批事务夹具。
@@ -18,7 +19,9 @@ import (
 func scopeFixture(t *testing.T) (*Repository, domain.Project, []domain.ServiceItem) {
 	t.Helper()
 	repo, filter, project, items := nativeFixture(t)
-	if err := repo.db.AutoMigrate(&nativeScopeChangeRecord{}, &deliveryEventRecord{}, &reportRevisionRecord{}, &evidenceFileRecord{}, &detectionCategoryRecord{}, &siteRecord{}, &notificationOutboxRecord{}); err != nil {
+	if err := repo.db.AutoMigrate(&nativeScopeChangeRecord{}, &deliveryEventRecord{},
+		&notificationOutboxRecord{}, &reportRevisionRecord{}, &evidenceFileRecord{},
+		&detectionCategoryRecord{}, &siteRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.CreateNativeProject(context.Background(), filter, project, items, "scope-fixture"); err != nil {
@@ -39,6 +42,7 @@ func TestNativeScopeApprovalIsAtomicAndTwoPerson(t *testing.T) {
 	ctx := context.Background()
 	filter := nativeScopeFilter(p)
 	in := domain.NativeScopeInput{OperationID: "request-1", ExpectedProjectVersion: 1, BaseScopeVersion: 1, Reason: "范围补充"}
+	in.RequestedByUserID = "business-user"
 	change, err := repo.RequestNativeScope(ctx, filter, p.ID, "business", in, items)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +67,7 @@ func TestNativeScopeApprovalIsAtomicAndTwoPerson(t *testing.T) {
 	if _, err = repo.DecideNativeScope(ctx, filter, p.ID, change.ID, "director", decision); err != nil {
 		t.Fatal(err)
 	}
-	assertNativeScopeNotification(t, repo, p, "business", "项目范围变更申请已通过")
+	assertNativeScopeNotification(t, repo, p, change.ID, "business-user", "原生委托范围变更已批准", "NATIVE_SCOPE_CHANGE_APPROVED")
 	var count int64
 	repo.db.Model(&nativeScopeRecord{}).Count(&count)
 	if count != 2 {
@@ -162,6 +166,7 @@ func TestNativeScopeRejectWithdrawScopeAndPhase(t *testing.T) {
 		t.Fatalf("withdraw mutated range=%+v %v", state, err)
 	}
 	input.OperationID = "request-2"
+	input.RequestedByUserID = "business-user"
 	change, err = repo.RequestNativeScope(ctx, filter, p.ID, "business", input, items)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +176,7 @@ func TestNativeScopeRejectWithdrawScopeAndPhase(t *testing.T) {
 	if err != nil || result.Status != "REJECTED" {
 		t.Fatalf("reject=%+v %v", result, err)
 	}
-	assertNativeScopeNotification(t, repo, p, "business", "项目范围变更申请已驳回")
+	assertNativeScopeNotification(t, repo, p, change.ID, "business-user", "原生委托范围变更已驳回", "NATIVE_SCOPE_CHANGE_REJECTED")
 	if err = repo.db.Transaction(func(tx *gorm.DB) error {
 		var project projectRecord
 		tx.Where("id=?", p.ID).Take(&project)
@@ -241,19 +246,24 @@ func TestNativeScopeReplayAfterApproval(t *testing.T) {
 	}
 }
 
-// assertNativeScopeNotification 校验范围审批只发一条通知给原申请人。
-// 参数：t、repo 为隔离库测试边界，p、recipient、title 为预期通知内容。
+// assertNativeScopeNotification 校验范围审批只发一条结果通知给原申请人。
+// 参数：t、repo 为隔离库测试边界，p、changeID 为项目与提案，recipient、title、eventType 为预期通知内容。
 // 返回值：无；重复通知、目标错误或收件人不符时失败。
-func assertNativeScopeNotification(t *testing.T, repo *Repository, p domain.Project, recipient, title string) {
+func assertNativeScopeNotification(t *testing.T, repo *Repository, p domain.Project,
+	changeID, recipient, title, eventType string,
+) {
 	t.Helper()
 	var rows []notificationOutboxRecord
-	if err := repo.db.Where("tenant_id=? AND aggregate_id=?", p.TenantID, p.ID).Find(&rows).Error; err != nil || len(rows) != 1 {
+	if err := repo.db.Where("tenant_id=? AND aggregate_id=? AND event_type=?",
+		p.TenantID, changeID, eventType).Find(&rows).Error; err != nil || len(rows) != 1 {
 		t.Fatalf("项目范围结果通知共 %d 条，错误=%v", len(rows), err)
 	}
 	var notice domain.NotificationMessage
 	if err := json.Unmarshal(rows[0].Payload, &notice); err != nil || notice.Title != title ||
 		len(notice.Recipients) != 1 || notice.Recipients[0] != recipient ||
-		notice.TargetURL != "/project_management/project_detail?project="+url.QueryEscape(p.ID) {
+		notice.ReferenceType != "NATIVE_SCOPE_CHANGE" || notice.ReferenceID != changeID ||
+		notice.TargetURL != "/project_management/project_detail?"+(url.Values{
+			"project": {p.ID}, "scope_change_id": {changeID}}).Encode() {
 		t.Fatalf("项目范围结果通知=%+v，错误=%v", notice, err)
 	}
 }

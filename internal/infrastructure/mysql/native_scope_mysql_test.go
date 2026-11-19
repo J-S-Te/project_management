@@ -137,7 +137,8 @@ func TestNativeScopeChangeMySQL(t *testing.T) {
 	if _, err = svc.DecideNativeScope(ctx, director, project.ID, changeID, decision); err != nil {
 		t.Fatal(err)
 	}
-	assertNativeScopeNotification(t, repo, project, business.UserID, "项目范围变更申请已通过")
+	assertNativeScopeNotification(t, repo, project, changeID, business.UserID,
+		"原生委托范围变更已批准", "NATIVE_SCOPE_CHANGE_APPROVED")
 	state, err = repo.ReadNativeScope(ctx, filter, project.ID)
 	if err != nil || state.ScopeVersion != 2 || state.ProjectVersion != 2 || len(state.ServiceItems) != 1 || state.ServiceItems[0].SourceServiceID != input.ServiceItems[0].SourceID || state.ServiceItems[0].Requirement != "新版范围" {
 		t.Fatalf("applied state=%+v err=%v", state, err)

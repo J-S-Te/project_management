@@ -457,6 +457,14 @@ func (r *Repository) ConfirmServiceItems(ctx context.Context, filter platform.Sc
 				return err
 			}
 		}
+		for _, record := range records {
+			if record.Special == "是" && record.TechReviewStatus != "APPROVED" && record.TechReviewStatus != "PENDING" {
+				record.Status, record.TechReviewStatus = "待分配", "PENDING"
+				if err := createSpecialMethodReviewRequest(tx, record, actor, now); err != nil {
+					return err
+				}
+			}
+		}
 		projectIDs := make([]string, 0)
 		seenProjects := map[string]bool{}
 		for _, record := range records {
