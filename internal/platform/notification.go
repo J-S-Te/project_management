@@ -125,8 +125,13 @@ func (c *notificationPublisher) Publish(ctx context.Context, event NotificationE
 	if idempotencyKey == "" {
 		idempotencyKey = event.EventID
 	}
+	eventID := strings.TrimSpace(event.EventID)
+	// 平台要求事件编号以字母开头。出站时兼容数字开头的历史 ULID，重试仍使用原幂等键。
+	if eventID != "" && eventID[0] >= '0' && eventID[0] <= '9' {
+		eventID = "pm-event-" + eventID
+	}
 	payload := notificationIngestPayload{
-		EventID: event.EventID, EventType: strings.TrimSpace(event.EventType),
+		EventID: eventID, EventType: strings.TrimSpace(event.EventType),
 		NotificationScope: firstNonBlankNotificationValue(event.Scope, NotificationScopeCrossSystem),
 		Priority:          strings.ToUpper(firstNonBlankNotificationValue(event.Priority, "NORMAL")),
 		Title:             strings.TrimSpace(event.Title), Content: strings.TrimSpace(event.Content),
