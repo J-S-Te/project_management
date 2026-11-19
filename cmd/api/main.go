@@ -27,6 +27,9 @@ import (
 // main 装配项目 API、会话认证及后台依赖并启动服务。
 // 参数：无。
 // 返回值：无；初始化失败终止启动。
+// 用途：装配项目 API 和后台进程，并按停机信号排空。
+// 参数：无。
+// 返回值：无；启动或运行失败时以非零状态结束。
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
@@ -308,7 +311,10 @@ func main() {
 	service.UseFreezeChecker(handoverRepository)
 	// 统一审计来源：显式可信代理列表，未列入的直接对端不能改写来源地址。
 	httpapi.ConfigureTrustedProxies(cfg.TrustedProxies)
+	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stopSignals()
 	router := httpapi.NewRouter(service, identity, audit, logger, httpapi.RouterOptions{
+		WorkflowShutdown:    shutdownCtx.Done(),
 		Reimbursement:       &httpapi.ReimbursementOptions{Enabled: reimbursementConfig.Enabled, ReferenceVerifier: reimbursementReferenceBearer, SpendVerifier: reimbursementSpendBearer},
 		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
 		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
@@ -352,8 +358,6 @@ func main() {
 	// AUD-2026-029：监听 SIGTERM/SIGINT 后先排空在途请求再退出（对齐 worker 的
 	// InterruptCh 风格）。强制审计模式下写请求的响应先缓冲、Report 成功才提交，
 	// 若 SIGTERM 直接断连，缓冲中的响应与在途审计上报都会丢失。
-	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stopSignals()
 	serveErr := serveWithGracefulShutdown(server, shutdownCtx.Done(), logger)
 	// B2：HTTP 排空之后取消后台上下文并按预算 join；超预算点名并非零退出。
 	if drainErr := drainRuntime(ctx, lifeCancel, group, shutdown.Budget(), logger); drainErr != nil {

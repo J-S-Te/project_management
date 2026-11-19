@@ -46,12 +46,14 @@ type SessionActivityReporter interface {
 }
 
 type Handler struct {
-	handover        *handover.Service
-	service         *application.Service
-	identity        Identity
-	sessionActivity SessionActivityReporter
-	audit           platform.AuditReporter
-	logger          *slog.Logger
+	handover         *handover.Service
+	service          *application.Service
+	identity         Identity
+	sessionActivity  SessionActivityReporter
+	audit            platform.AuditReporter
+	logger           *slog.Logger
+	workflowShutdown <-chan struct{}
+	workflowLicense  CommercialLicenseGate
 }
 
 // IntegrationDestinationStatus 是启动期审计/通知目的地的只读状态（BIZ-XAPI-10）。
@@ -65,6 +67,8 @@ type IntegrationDestinationStatus struct {
 
 // RouterOptions 统一收口可选的服务间集成配置，未启用集成的调用方无需传入占位参数。
 type RouterOptions struct {
+	// WorkflowShutdown 结束 SSE 读取，便于 HTTP 服务排空普通业务请求。
+	WorkflowShutdown    <-chan struct{}
 	Reimbursement       *ReimbursementOptions
 	SettlementReference *SettlementReferenceOptions
 	CRMProjectHistory   platform.ClientCredentialsTokenVerifier
@@ -98,6 +102,8 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	}
 	if len(options) > 0 {
 		h.handover = options[0].HandoverService
+		h.workflowShutdown = options[0].WorkflowShutdown
+		h.workflowLicense = options[0].CommercialLicense
 	}
 	router := gin.New()
 	router.Use(gin.Recovery(), requestID(), securityHeaders())
@@ -284,6 +290,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	// 补充协议分支的受控退出（BIZ-PROJECT-04）：确认拆解不再静默清零 supplement_status，
 	// 拆解已推进、无法重建清单时必须走这次显式关账。
 	api.POST("/projects/:id/supplement-closure", require("project.decomposition.manage"), h.closeSupplement)
+	api.GET("/workflow/stream", require("project.read"), h.workflowStream)
 	api.GET("/delivery-events", require("project.read"), h.listDeliveryEvents)
 	api.GET("/delivery/sla-overdue", require("project.read"), h.listSlaOverdue)
 	// 现场完成按服务项推进：多服务项项目里先做完的项不必等最后一个动作"顺带"完成。
