@@ -67,6 +67,7 @@ type IntegrationDestinationStatus struct {
 type RouterOptions struct {
 	Reimbursement       *ReimbursementOptions
 	SettlementReference *SettlementReferenceOptions
+	CRMProjectHistory   platform.ClientCredentialsTokenVerifier
 	CommercialLicense   CommercialLicenseGate
 	ContractImport      *ContractImportOptions
 	ContractIntegration *ContractIntegrationOptions
@@ -190,6 +191,9 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 		internal := router.Group("/internal/v1/settlement")
 		internal.Use(h.authenticateSettlementReference(*integration))
 		internal.GET("/project-references/:projectID", h.settlementProjectReference)
+	}
+	if verifier := routerOptions.CRMProjectHistory; verifier != nil {
+		router.GET(crmProjectHistoryPath, authenticateCRMProjectHistory(verifier), h.crmProjectHistory)
 	}
 	importOptions := ContractImportOptions{}
 	if routerOptions.ContractImport != nil {

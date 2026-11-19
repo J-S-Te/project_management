@@ -40,6 +40,7 @@ var registeredGETOperations = map[string]core.Operation{
 
 	// 受控机器读取（结算引用、合同导入、合同集成、交接、数据看板）。
 	"/internal/v1/settlement/project-references/:projectID":                 core.READ_HISTORY,
+	"/internal/v1/crm/customers/:customerID/projects":                       core.READ_HISTORY,
 	"/internal/v1/contract-imports/capabilities":                            core.READ_HISTORY,
 	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": core.READ_HISTORY,
 	"/internal/v1/contracts/detection-categories":                           core.READ_HISTORY,
@@ -123,6 +124,7 @@ func fullCommercialRouteTable(t *testing.T) *gin.Engine {
 	return NewRouter(&application.Service{}, classificationOIDCFlow{projectLicenseIdentity{&actor}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), RouterOptions{
 		Reimbursement:        &ReimbursementOptions{Enabled: true, ReferenceVerifier: verifier, SpendVerifier: verifier},
 		SettlementReference:  &SettlementReferenceOptions{Enabled: true, BearerVerifier: verifier},
+		CRMProjectHistory:    verifier,
 		ContractImport:       &ContractImportOptions{Enabled: true, BearerVerifier: verifier},
 		ContractIntegration:  &ContractIntegrationOptions{Enabled: true, BearerVerifier: verifier},
 		HandoverIntegration:  &HandoverIntegrationOptions{Enabled: true, BearerVerifier: verifier},

@@ -141,6 +141,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var crmProjectHistoryBearer platform.ClientCredentialsTokenVerifier
+	if history := cfg.CRMProjectHistory; history.Enabled {
+		crmProjectHistoryBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx,
+			platform.ClientCredentialsVerifierOptions{
+				Issuer: history.Issuer, Audience: history.Audience, PublicKeyPath: history.PublicKeyPath,
+				TenantID:              cfg.OIDCTenantID,
+				ClientID:              "customer_and_opportunity-" + history.CallerEnvironment + "-crm-project-history",
+				CallerApplicationCode: "customer_and_opportunity",
+				CallerEnvironmentCode: history.CallerEnvironment, RequiredScope: application.CRMProjectHistoryScope,
+			})
+		if err != nil {
+			logger.Error("initialize CRM project history verifier", "error", err)
+			os.Exit(1)
+		}
+	}
 	var contractImportBearer platform.ClientCredentialsTokenVerifier
 	if cfg.ProjectContractImportClientID != "" {
 		contractImportBearer, err = platform.NewClientCredentialsTokenVerifier(startupCtx, platform.ClientCredentialsVerifierOptions{
@@ -297,6 +312,7 @@ func main() {
 		Reimbursement:       &httpapi.ReimbursementOptions{Enabled: reimbursementConfig.Enabled, ReferenceVerifier: reimbursementReferenceBearer, SpendVerifier: reimbursementSpendBearer},
 		ContractImport:      &httpapi.ContractImportOptions{Enabled: cfg.ProjectContractImportEnabled, BearerVerifier: contractImportBearer},
 		SettlementReference: &httpapi.SettlementReferenceOptions{Enabled: cfg.SettlementReferenceEnabled, BearerVerifier: settlementReferenceBearer},
+		CRMProjectHistory:   crmProjectHistoryBearer,
 		CommercialLicense:   commercialGate,
 		PendingMigrations:   pendingMigrations,
 		// C14：能力维度快照；可选未启用只反映在 state=disabled，不影响整体就绪。
