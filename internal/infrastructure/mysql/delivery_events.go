@@ -352,7 +352,7 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 		}
 		if alreadyReviewed > 0 {
 			// 幂等：同一偏离的重复评审不再改变状态。
-			return nil
+			return application.ErrAlreadyApplied
 		}
 		if item.Status != "异常处理中" {
 			return application.ErrValidation
@@ -505,6 +505,9 @@ func applyProjectEvent(tx *gorm.DB, project *projectRecord, event domain.Deliver
 			}
 			rec := serviceItemRecord{ID: item.ID, TenantID: project.TenantID, ProjectID: project.ID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &event.CreatedAt, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt, UpdatedBy: event.ActorUserID}
 			if err := tx.Create(&rec).Error; err != nil {
+				return err
+			}
+			if err := createSpecialMethodReviewRequest(tx, rec, "", event.CreatedAt); err != nil {
 				return err
 			}
 		}

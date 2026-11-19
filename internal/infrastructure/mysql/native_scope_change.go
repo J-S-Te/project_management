@@ -76,36 +76,7 @@ func lockNativeProject(tx *gorm.DB, filter platform.ScopeFilter, id string) (pro
 // 参数：ctx/filter 为当前授权，id 为项目主键。
 // 返回值：范围状态；不将损坏基线或合同来源当成本地事实。
 func (r *Repository) ReadNativeScope(ctx context.Context, filter platform.ScopeFilter, id string) (domain.NativeScopeState, error) {
-	state := domain.NativeScopeState{Changes: []domain.NativeScopeChange{}}
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		project, err := lockNativeProject(tx, filter, id)
-		if err != nil {
-			return err
-		}
-		var scope nativeScopeRecord
-		if err = tx.Where("tenant_id=? AND project_id=? AND version=?", filter.TenantID, id, project.ScopeVersion).Take(&scope).Error; err != nil {
-			return err
-		}
-		state.ProjectID = id
-		state.ScopeVersion = project.ScopeVersion
-		state.ProjectVersion = project.Version
-		if err = json.Unmarshal(scope.ServiceItems, &state.ServiceItems); err != nil {
-			return err
-		}
-		var rows []nativeScopeChangeRecord
-		if err = tx.Where("tenant_id=? AND project_id=?", filter.TenantID, id).Order("created_at DESC,id DESC").Limit(20).Find(&rows).Error; err != nil {
-			return err
-		}
-		for _, row := range rows {
-			change, err := scopeChangeDomain(row)
-			if err != nil {
-				return err
-			}
-			state.Changes = append(state.Changes, change)
-		}
-		return nil
-	})
-	return state, err
+	return r.readNativeScope(ctx, filter, id, "")
 }
 
 // RequestNativeScope 将待审批范围与审计一起提交而不覆盖当前版本。
@@ -161,7 +132,7 @@ func (r *Repository) RequestNativeScope(ctx context.Context, filter platform.Sco
 		if err = tx.Create(&row).Error; err != nil {
 			return err
 		}
-		if err = saveNativeScopeEvent(ctx, tx, project, row, "NATIVE_SCOPE_CHANGE_REQUESTED", actor); err != nil {
+		if err = saveNativeScopeEvent(ctx, tx, project, row, "NATIVE_SCOPE_CHANGE_REQUESTED", actor, in.RequestedByUserID); err != nil {
 			return err
 		}
 		result, err = scopeChangeDomain(row)

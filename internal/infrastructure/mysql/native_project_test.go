@@ -17,7 +17,7 @@ import (
 func nativeFixture(t *testing.T) (*Repository, platform.ScopeFilter, domain.Project, []domain.ServiceItem) {
 	t.Helper()
 	db := equipmentAtomicityDB(t)
-	if err := db.AutoMigrate(&nativeProjectCommandRecord{}, &nativeCounterpartyRecord{}, &nativeScopeRecord{}, &nativeScopeChangeRecord{}, &auditOutboxRecord{}, &penetrationWorkPackageRecord{}); err != nil {
+	if err := db.AutoMigrate(&nativeProjectCommandRecord{}, &nativeCounterpartyRecord{}, &nativeScopeRecord{}, &nativeScopeChangeRecord{}, &auditOutboxRecord{}, &penetrationWorkPackageRecord{}, &notificationOutboxRecord{}, &deliveryEventRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -140,7 +140,8 @@ func TestNativeProjectReadModelsKeepSource(t *testing.T) {
 // 返回值：无；合同缺失阻断或特殊方法门禁丢失时标记失败。
 func TestNativeProjectApplicationConfirmsWithoutContract(t *testing.T) {
 	repo, filter, project, _ := nativeFixture(t)
-	if err := repo.db.AutoMigrate(&detectionCategoryRecord{}, &deliveryEventRecord{}); err != nil {
+	if err := repo.db.AutoMigrate(&detectionCategoryRecord{}, &deliveryEventRecord{},
+		&notificationOutboxRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	entry := detectionCategoryRecord{TenantID: filter.TenantID, Category: "受控特殊类别", Enabled: true, SpecialMethod: domain.SpecialMethodRequired, RequiredCodes: "QUAL-1"}

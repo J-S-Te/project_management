@@ -101,6 +101,9 @@ func (r *Repository) ActivateContract(ctx context.Context, project domain.Projec
 			if err := tx.Create(&rec).Error; err != nil {
 				return err
 			}
+			if err := createSpecialMethodReviewRequest(tx, rec, "", project.CreatedAt); err != nil {
+				return err
+			}
 		}
 		if err := createEvent(tx, event); err != nil {
 			return err
@@ -133,6 +136,9 @@ func (r *Repository) CreateProjectWithServiceItems(ctx context.Context, project 
 		for _, item := range items {
 			rec := serviceItemRecord{ID: item.ID, TenantID: item.TenantID, ProjectID: item.ProjectID, SourceServiceID: item.SourceServiceID, Batch: item.Batch, Site: item.Site, SiteCode: item.SiteCode, Category: item.Category, Requirement: item.Requirement, System: item.System, SystemLevel: item.SystemLevel, SystemStandard: item.SystemStandard, RequiredCodes: jsonValue(item.RequiredCodes), Special: item.Special, TestMode: item.TestMode, Status: item.Status, TechReviewStatus: item.TechReviewStatus, ConflictStatus: item.ConflictStatus, StatusChangedAt: &project.CreatedAt, CreatedAt: project.CreatedAt, UpdatedAt: project.UpdatedAt}
 			if err := tx.Create(&rec).Error; err != nil {
+				return err
+			}
+			if err := createSpecialMethodReviewRequest(tx, rec, "", project.CreatedAt); err != nil {
 				return err
 			}
 		}
@@ -178,6 +184,7 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 				return mapNotFound(err)
 			}
 			event.ProjectID, event.ServiceItemID = reported.ProjectID, reported.ServiceItemID
+			attachDeviationResult(&event, reported)
 		}
 		if event.ServiceItemID != "" {
 			var item serviceItemRecord
@@ -202,7 +209,15 @@ func (r *Repository) ApplyDeliveryEvent(ctx context.Context, event domain.Delive
 					return err
 				}
 			}
+			if event.Type == application.EventSpecialMethodReviewed {
+				if err := attachSpecialMethodResult(tx, item, &event); err != nil {
+					return err
+				}
+			}
 			if err := applyItemEvent(tx, &item, event); err != nil {
+				if errors.Is(err, application.ErrAlreadyApplied) {
+					return nil
+				}
 				return err
 			}
 			if event.Type == application.EventExecutionTeamAssigned {

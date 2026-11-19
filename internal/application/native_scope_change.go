@@ -125,6 +125,7 @@ func (s *Service) RequestNativeScope(ctx context.Context, p platform.Principal, 
 		}
 		items[index].SourceServiceID = line
 	}
+	in.RequestedByUserID = strings.TrimSpace(p.UserID)
 	return repo.RequestNativeScope(ctx, filter, id, p.IdentityID, in, items)
 }
 

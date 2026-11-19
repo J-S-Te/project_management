@@ -909,11 +909,12 @@ func idleStatusData(status platform.SessionIdleStatus) map[string]any {
 	}
 }
 
-// navigation 是服务端定义的工作台契约。浏览器可以隐藏或排序
-// 导航项，但不得从显示标签推断角色或扩大权限。
+// navigation 下发当前角色和已授权的工作台入口。
+// 参数：c 为已校验项目读取权限的请求。
+// 返回值：无；写入服务端确定的栏目和授权版本。
 func (h *Handler) navigation(c *gin.Context) {
 	p := principal(c)
-	sections := navigationSections(p.Roles)
+	sections := approvalNavigationSections(navigationSections(p.Roles), p, h.service.NativeEnabled)
 	writeData(c, http.StatusOK, map[string]any{
 		"roles":                  p.Roles,
 		"sections":               sections,
@@ -1284,11 +1285,19 @@ func (h *Handler) writeProjectStatus(c *gin.Context, code int, projectID string)
 	}
 	writeData(c, code, map[string]string{"status": project.Status})
 }
+
+// listServiceItems 返回授权分页、工作区快照或精确编号所指向的服务项。
+// 参数：c 为项目读取请求，含可选项目与服务项编号。
+// 返回值：无；分页、单条读取及错误复用原响应契约。
 func (h *Handler) listServiceItems(c *gin.Context) {
 	// 与 /projects 同一契约：省略 page_size 返回全部服务项，显式正数才分页。
 	query, err := pageParams(c)
 	if err != nil {
 		writeError(c, http.StatusUnprocessableEntity, "PM_VALIDATION_ERROR", "分页参数不合法")
+		return
+	}
+	if ids, present := c.GetQueryArray("service_item_id"); present {
+		h.readServiceItemByID(c, query, ids)
 		return
 	}
 	items, total, err := h.service.ListServiceItemsPage(c.Request.Context(), principal(c), c.Query("project_id"), query.Page, query.PageSize)
