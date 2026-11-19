@@ -2,11 +2,13 @@ package mysql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/j-s-te/project-management/internal/application"
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 	"gorm.io/gorm"
+	"net/url"
 	"testing"
 )
 
@@ -16,7 +18,7 @@ import (
 func scopeFixture(t *testing.T) (*Repository, domain.Project, []domain.ServiceItem) {
 	t.Helper()
 	repo, filter, project, items := nativeFixture(t)
-	if err := repo.db.AutoMigrate(&nativeScopeChangeRecord{}, &deliveryEventRecord{}, &reportRevisionRecord{}, &evidenceFileRecord{}, &detectionCategoryRecord{}, &siteRecord{}); err != nil {
+	if err := repo.db.AutoMigrate(&nativeScopeChangeRecord{}, &deliveryEventRecord{}, &reportRevisionRecord{}, &evidenceFileRecord{}, &detectionCategoryRecord{}, &siteRecord{}, &notificationOutboxRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.CreateNativeProject(context.Background(), filter, project, items, "scope-fixture"); err != nil {
@@ -61,6 +63,7 @@ func TestNativeScopeApprovalIsAtomicAndTwoPerson(t *testing.T) {
 	if _, err = repo.DecideNativeScope(ctx, filter, p.ID, change.ID, "director", decision); err != nil {
 		t.Fatal(err)
 	}
+	assertNativeScopeNotification(t, repo, p, "business", "项目范围变更申请已通过")
 	var count int64
 	repo.db.Model(&nativeScopeRecord{}).Count(&count)
 	if count != 2 {
@@ -168,6 +171,7 @@ func TestNativeScopeRejectWithdrawScopeAndPhase(t *testing.T) {
 	if err != nil || result.Status != "REJECTED" {
 		t.Fatalf("reject=%+v %v", result, err)
 	}
+	assertNativeScopeNotification(t, repo, p, "business", "项目范围变更申请已驳回")
 	if err = repo.db.Transaction(func(tx *gorm.DB) error {
 		var project projectRecord
 		tx.Where("id=?", p.ID).Take(&project)
@@ -234,5 +238,22 @@ func TestNativeScopeReplayAfterApproval(t *testing.T) {
 	replay, err := svc.RequestNativeScope(ctx, actor, p.ID, input)
 	if err != nil || replay.ID != first.ID || replay.Status != "APPROVED" || replay.AppliedScopeVersion != 2 || replay.ServiceItems[1].SourceServiceID != final.ServiceItems[1].SourceServiceID {
 		t.Fatalf("final replay=%+v err=%v", replay, err)
+	}
+}
+
+// assertNativeScopeNotification 校验范围审批只发一条通知给原申请人。
+// 参数：t、repo 为隔离库测试边界，p、recipient、title 为预期通知内容。
+// 返回值：无；重复通知、目标错误或收件人不符时失败。
+func assertNativeScopeNotification(t *testing.T, repo *Repository, p domain.Project, recipient, title string) {
+	t.Helper()
+	var rows []notificationOutboxRecord
+	if err := repo.db.Where("tenant_id=? AND aggregate_id=?", p.TenantID, p.ID).Find(&rows).Error; err != nil || len(rows) != 1 {
+		t.Fatalf("项目范围结果通知共 %d 条，错误=%v", len(rows), err)
+	}
+	var notice domain.NotificationMessage
+	if err := json.Unmarshal(rows[0].Payload, &notice); err != nil || notice.Title != title ||
+		len(notice.Recipients) != 1 || notice.Recipients[0] != recipient ||
+		notice.TargetURL != "/project_management/project_detail?project="+url.QueryEscape(p.ID) {
+		t.Fatalf("项目范围结果通知=%+v，错误=%v", notice, err)
 	}
 }

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/j-s-te/project-management/internal/application"
@@ -26,7 +27,7 @@ func metricTestDB(t *testing.T) (*Repository, *gorm.DB) {
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
-	if err = db.AutoMigrate(&deliveryEventRecord{}, &reportRevisionRecord{}, &serviceItemRecord{}, &projectRecord{}, &penetrationWorkPackageRecord{}, &metricReviewRecord{}, &metricResourceMutexRecord{}, &metricCapacityRecord{}, &metricUsageRecord{}, &metricOperationRecord{}, &auditOutboxRecord{}, &capabilityRecord{}); err != nil {
+	if err = db.AutoMigrate(&deliveryEventRecord{}, &reportRevisionRecord{}, &serviceItemRecord{}, &projectRecord{}, &penetrationWorkPackageRecord{}, &metricReviewRecord{}, &metricResourceMutexRecord{}, &metricCapacityRecord{}, &metricUsageRecord{}, &metricOperationRecord{}, &auditOutboxRecord{}, &capabilityRecord{}, &notificationOutboxRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	return NewRepository(db), db
@@ -111,6 +112,15 @@ func TestMetricReviewReturnResubmitAndFirstFailure(t *testing.T) {
 			}
 			if _, err = repo.MetricReportReview(ctx, filter, item.ID, "quality", in); err != nil {
 				t.Fatal(err)
+			}
+			var row notificationOutboxRecord
+			if err := db.Where("tenant_id=? AND event_type=?", filter.TenantID, "REPORT_REVIEW_RETURNED").Take(&row).Error; err != nil {
+				t.Fatal(err)
+			}
+			var notice domain.NotificationMessage
+			if err := json.Unmarshal(row.Payload, &notice); err != nil || notice.Title != "报告审核已退回" ||
+				len(notice.Recipients) != 1 || notice.Recipients[0] != "manager" {
+				t.Fatalf("退回结果通知=%+v，错误=%v", notice, err)
 			}
 			in.ExpectedVersion = 3
 			in.Decision = ""

@@ -99,6 +99,16 @@ func TestMetricFactsMySQLMigrationConcurrencyAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var reportNotice notificationOutboxRecord
+	if err := db.Where("tenant_id=? AND event_type=?", tenant, "REPORT_REVIEW_PASSED").Take(&reportNotice).Error; err != nil {
+		t.Fatal(err)
+	}
+	var notice domain.NotificationMessage
+	if err := json.Unmarshal(reportNotice.Payload, &notice); err != nil || notice.Title != "报告审核已通过" ||
+		len(notice.Recipients) != 1 || notice.Recipients[0] != "manager" ||
+		notice.TargetURL != "/project_management/reports?service_item_id="+item.ID {
+		t.Fatalf("报告审核结果通知=%+v，错误=%v", notice, err)
+	}
 	at := time.Date(2026, 11, 1, 1, 0, 0, 0, time.UTC)
 	cap, err := repo.PublishMetricCapacity(ctx, filter, "resource-admin", domain.ResourceCapacityInput{ResourceType: "PERSON", ResourceID: resource.ResourceID, BusinessDate: "2026-11-01", OrganizationID: "org", OrganizationWitnessID: "person", Intervals: []domain.MetricInterval{{Start: at, End: at.Add(4 * time.Hour)}}, Note: "隔离容量", IdempotencyKey: "capacity"})
 	if err != nil {

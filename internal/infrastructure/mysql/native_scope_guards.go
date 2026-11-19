@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -189,7 +190,7 @@ func guardNativeScopeMutation(tx *gorm.DB, item serviceItemRecord) error {
 	return ensureNoPendingNativeScope(tx, project)
 }
 
-// saveNativeScopeEvent 同事务保存明确本地业务事件和审计outbox。
+// saveNativeScopeEvent 同事务保存本地业务事件、审计和审批结果通知。
 // 参数：ctx/tx 为请求事务，project/change 为真实坐标，action/actor 为实际动作与身份。
 // 返回值：任一写入失败回滚全部范围状态。
 func saveNativeScopeEvent(ctx context.Context, tx *gorm.DB, project projectRecord, change nativeScopeChangeRecord, action, actor string) error {
@@ -203,7 +204,34 @@ func saveNativeScopeEvent(ctx context.Context, tx *gorm.DB, project projectRecor
 		return err
 	}
 	meta := auditctx.FromContext(ctx)
-	return tx.Create(&auditOutboxRecord{ID: ulid.Make().String(), TenantID: project.TenantID, EventID: eventID, ActorID: actorPointer(actor), ActorType: "USER", Action: "PROJECT_MANAGEMENT:" + action, ResourceType: "native_scope_change", ResourceID: change.ID, RequestID: auditRequestID(meta.RequestID), LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource), Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: now, CreatedAt: now}).Error
+	if err := tx.Create(&auditOutboxRecord{ID: ulid.Make().String(), TenantID: project.TenantID, EventID: eventID, ActorID: actorPointer(actor), ActorType: "USER", Action: "PROJECT_MANAGEMENT:" + action, ResourceType: "native_scope_change", ResourceID: change.ID, RequestID: auditRequestID(meta.RequestID), LoginIP: auditIPBytes(meta.LoginIP), ClientIP: auditIPBytes(meta.ClientIP), IPSource: auditIPSource(meta.IPSource), Result: "SUCCESS", DeliveryStatus: "pending", NextAttemptAt: now, CreatedAt: now}).Error; err != nil {
+		return err
+	}
+	return notifyNativeScopeOutcome(ctx, tx, project, change, action, eventID, now)
+}
+
+// notifyNativeScopeOutcome 将范围审批结果写入事务发件箱并指向原项目。
+// 参数：ctx、tx 为审批事务；project、change 为权威项目与提案；action、eventID、now 为终决事件。
+// 返回值：通知写入错误，非终决事件不送达申请人。
+func notifyNativeScopeOutcome(ctx context.Context, tx *gorm.DB, project projectRecord,
+	change nativeScopeChangeRecord, action, eventID string, now time.Time) error {
+	var title string
+	switch action {
+	case "NATIVE_SCOPE_CHANGE_APPROVED":
+		title = "项目范围变更申请已通过"
+	case "NATIVE_SCOPE_CHANGE_REJECTED":
+		title = "项目范围变更申请已驳回"
+	default:
+		return nil
+	}
+	_, err := NewRepository(tx).EnqueueNotification(ctx, project.TenantID, domain.NotificationMessage{
+		EventID: eventID, EventType: action, IdempotencyKey: eventID, OccurredAt: now,
+		Scope: platform.NotificationScopeCrossSystem, Priority: "NORMAL",
+		Recipients: []string{change.RequestedBy}, Title: title, Content: title + "，请查看项目范围变更记录。",
+		ReferenceType: "project", ReferenceID: project.ID,
+		TargetURL: "/project_management/project_detail?project=" + url.QueryEscape(project.ID),
+	})
+	return err
 }
 
 // ValidateNativeScopeIfApplicable 仅对真实原生项目执行权威范围校验。

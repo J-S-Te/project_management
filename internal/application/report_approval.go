@@ -32,7 +32,13 @@ func AttachApprovalNotification(event *domain.DeliveryEvent) bool {
 		message.RecipientRole, message.ExcludeUserID = "technical_director", event.ActorUserID
 	case EventRollbackApproved, EventRollbackRejected, EventRollbackWithdrawn:
 		requestID = payloadText(event.Payload, "request_id")
-		message.Title, message.Content = "回退申请已处理", "回退申请已处理，请查看审批结果和意见。"
+		subject := "现场回退申请"
+		if payloadText(event.Payload, "kind") == "REPORT_TO_FIELD" {
+			subject = "报告返工申请"
+		}
+		if event.Type != EventRollbackWithdrawn {
+			message.Title, message.Content = approvalOutcomeMessage(subject, event.Type)
+		}
 		message.Recipients = []string{payloadText(event.Payload, "rollback_requester_id")}
 		if event.Type == EventRollbackWithdrawn {
 			message.Title, message.Content = "回退申请已撤回", "申请人已撤回申请，无需继续审批。"
@@ -41,7 +47,7 @@ func AttachApprovalNotification(event *domain.DeliveryEvent) bool {
 		}
 	case EventReportCorrectionApproved, EventReportCorrectionRejected:
 		requestID = payloadText(event.Payload, "request_id")
-		message.Title, message.Content = "报告更正已处理", "报告更正申请已处理，请查看审批结果和意见。"
+		message.Title, message.Content = approvalOutcomeMessage("报告更正申请", event.Type)
 		message.Recipients = []string{payloadText(event.Payload, "report_correction_requester_id")}
 	default:
 		return false
@@ -53,6 +59,18 @@ func AttachApprovalNotification(event *domain.DeliveryEvent) bool {
 		event.Notification = &message
 	}
 	return true
+}
+
+// approvalOutcomeMessage 生成申请人能直接辨认审批结果的通知。
+// 参数：subject 为申请类型名称，eventType 为通过或驳回的事件类型。
+// 返回值：包含审批结果的通知标题和正文。
+func approvalOutcomeMessage(subject, eventType string) (string, string) {
+	outcome := "已通过"
+	if approvalDecisionStatus(eventType) == "REJECTED" {
+		outcome = "已驳回"
+	}
+	title := subject + outcome
+	return title, title + "，请查看审批意见。"
 }
 
 // approvalDecisionStatus 将终决事件转换为审批详情状态。

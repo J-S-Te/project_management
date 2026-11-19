@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"time"
 
 	"github.com/j-s-te/project-management/internal/application"
@@ -189,9 +190,36 @@ func (r *Repository) MetricReportReview(ctx context.Context, filter platform.Sco
 		if err = tx.Model(&reportRevisionRecord{}).Where("id=?", revision.ID).Updates(updates).Error; err != nil {
 			return err
 		}
+		if err := notifyReportReviewOutcome(ctx, scoped, out); err != nil {
+			return err
+		}
 		return saveMetricOperation(tx, filter.TenantID, in.IdempotencyKey, hash, actor, "REPORT_REVIEW", out.ID, out)
 	})
 	return out, err
+}
+
+// notifyReportReviewOutcome 仅在报告审核有终决结果时通知原提交人。
+// 参数：ctx 为请求上下文，repo 使用审核事务，review 为已持久化的报告审核记录。
+// 返回值：发件箱写入错误；尚待审核时返回 nil。
+func notifyReportReviewOutcome(ctx context.Context, repo *Repository, review domain.ReportReviewRound) error {
+	var title, eventType string
+	switch review.Decision {
+	case "PASSED":
+		title, eventType = "报告审核已通过", "REPORT_REVIEW_PASSED"
+	case "RETURNED":
+		title, eventType = "报告审核已退回", "REPORT_REVIEW_RETURNED"
+	default:
+		return nil
+	}
+	eventID := review.ID
+	_, err := repo.EnqueueNotification(ctx, review.TenantID, domain.NotificationMessage{
+		EventID: eventID, EventType: eventType, IdempotencyKey: eventID, OccurredAt: *review.DecidedAt,
+		Scope: platform.NotificationScopeCrossSystem, Priority: "NORMAL",
+		Recipients: []string{review.SubmittedBy}, Title: title, Content: title + "，请查看审核记录。",
+		ReferenceType: "service_item", ReferenceID: review.ServiceItemID,
+		TargetURL: "/project_management/reports?service_item_id=" + url.QueryEscape(review.ServiceItemID),
+	})
+	return err
 }
 
 // metricCurrentReport 解析主报告或专项的当前有效版本与业务版本。
