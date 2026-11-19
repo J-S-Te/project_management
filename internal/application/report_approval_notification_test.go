@@ -22,10 +22,10 @@ func TestAttachApprovalNotificationCoversRequestAndDecision(t *testing.T) {
 		{"现场回退待审批", EventRollbackRequested, map[string]any{"kind": "FIELD_TO_PREPARE", "rollback_requester_id": "u-req"}, "technical_director", "", "现场回退待审批", "evt-1"},
 		{"报告返工待审批", EventRollbackRequested, map[string]any{"kind": "REPORT_TO_FIELD", "rollback_requester_id": "u-req"}, "technical_director", "", "报告返工待审批", "evt-1"},
 		{"报告更正待审批", EventReportCorrectionRequested, map[string]any{"reason": "版本更正"}, "technical_director", "", "报告更正待审批", "evt-1"},
-		{"回退已批准", EventRollbackApproved, map[string]any{"request_id": "req-1", "rollback_requester_id": "u-req"}, "", "u-req", "回退申请已处理", "req-1"},
-		{"回退已驳回", EventRollbackRejected, map[string]any{"request_id": "req-2", "rollback_requester_id": "u-req"}, "", "u-req", "回退申请已处理", "req-2"},
-		{"更正已批准", EventReportCorrectionApproved, map[string]any{"request_id": "req-3", "report_correction_requester_id": "u-req2"}, "", "u-req2", "报告更正已处理", "req-3"},
-		{"更正已驳回", EventReportCorrectionRejected, map[string]any{"request_id": "req-4", "report_correction_requester_id": "u-req2"}, "", "u-req2", "报告更正已处理", "req-4"},
+		{"回退已批准", EventRollbackApproved, map[string]any{"request_id": "req-1", "rollback_requester_id": "u-req"}, "", "u-req", "现场回退申请已通过", "req-1"},
+		{"回退已驳回", EventRollbackRejected, map[string]any{"request_id": "req-2", "rollback_requester_id": "u-req"}, "", "u-req", "现场回退申请已驳回", "req-2"},
+		{"更正已批准", EventReportCorrectionApproved, map[string]any{"request_id": "req-3", "report_correction_requester_id": "u-req2"}, "", "u-req2", "报告更正申请已通过", "req-3"},
+		{"更正已驳回", EventReportCorrectionRejected, map[string]any{"request_id": "req-4", "report_correction_requester_id": "u-req2"}, "", "u-req2", "报告更正申请已驳回", "req-4"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

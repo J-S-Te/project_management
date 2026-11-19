@@ -1,8 +1,10 @@
 package mysql
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,4 +227,119 @@ func TestReportApprovalsPersistTasksAndNotifications(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApprovalOutcomeOnlyNotifiesApplicant 验证真实审批终决只投递结果通知。
+// 参数：t 为测试上下文，仅使用明确隔离的 MySQL 合成数据。
+// 返回值：无；待办未关闭、申请人产生待办或结果通知不正确时失败。
+func TestApprovalOutcomeOnlyNotifiesApplicant(t *testing.T) {
+	for _, decision := range []string{"APPROVED", "REJECTED"} {
+		for _, kind := range []string{"FIELD_TO_PREPARATION", "REPORT_TO_FIELD", "CORRECTION"} {
+			t.Run(kind+"/"+decision, func(t *testing.T) {
+				verifyApprovalOutcome(t, kind, decision)
+			})
+		}
+	}
+}
+
+// verifyApprovalOutcome 按审批类型和决定验证任务、可读历史与事务通知。
+// 参数：t 为测试上下文，kind 为申请类型，decision 为终审结果。
+// 返回值：无；任何业务断言不符时终止用例。
+func verifyApprovalOutcome(t *testing.T, kind, decision string) {
+	f := newCorrectionBindingFixture(t)
+	if kind != "CORRECTION" {
+		state := map[string]any{"report_status": "COMPILING"}
+		if kind == "FIELD_TO_PREPARATION" {
+			state["status"] = "实施中"
+		}
+		if err := f.db.Model(&serviceItemRecord{}).Where("id=?", f.itemID).Updates(state).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := application.Service{Repo: f.repo}
+	manager := approvalFixturePrincipal(f, "manager", "project.rollback.request", "project.report.correction.request")
+	director := approvalFixturePrincipal(f, "director", "project.rollback.approve", "project.report.correction.approve")
+	requestID, err := requestApprovalOutcomeFixture(t.Context(), service, manager, f.itemID, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.ApprovalQuery{Page: 1, PageSize: 20, View: "assigned"}
+	before, err := service.ListApprovalTasks(t.Context(), director, query)
+	if err != nil || before.Total != 1 || !before.Items[0].CanDecide {
+		t.Fatalf("审批人待办=%+v，错误=%v", before, err)
+	}
+	comment := "隔离验收审批意见"
+	if err := decideApprovalOutcomeFixture(t.Context(), service, director, f.itemID, requestID,
+		kind, decision, comment, before.Items[0].Version); err != nil {
+		t.Fatal(err)
+	}
+	for _, principal := range []platform.Principal{manager, director} {
+		page, err := service.ListApprovalTasks(t.Context(), principal, query)
+		if err != nil || page.Total != 0 {
+			t.Fatalf("%s待办=%+v，错误=%v", principal.UserID, page, err)
+		}
+	}
+	query.View, query.RequestID = "submitted", requestID
+	history, err := service.ListApprovalTasks(t.Context(), manager, query)
+	if err != nil || len(history.Items) != 1 || history.Items[0].Status != decision ||
+		history.Items[0].CanDecide || history.Items[0].DecisionComment != comment {
+		t.Fatalf("申请记录=%+v，错误=%v", history, err)
+	}
+	verifyApprovalOutcomeOutbox(t, f, requestID, kind, decision)
+}
+
+// requestApprovalOutcomeFixture 通过正式应用服务新建合成审批。
+// 参数：ctx 为测试请求，service 为真实服务，actor 为申请人，itemID 和 kind 指定对象与类型。
+// 返回值：审批申请编号和业务错误。
+func requestApprovalOutcomeFixture(ctx context.Context, service application.Service, actor platform.Principal,
+	itemID, kind string) (string, error) {
+	if kind == "CORRECTION" {
+		return service.RequestReportCorrection(ctx, actor, itemID,
+			domain.ReportCorrectionRequestInput{Reason: "隔离更正", ExpectedVersion: 1})
+	}
+	return service.RequestRollback(ctx, actor, itemID,
+		domain.RollbackRequestInput{Kind: kind, Reason: "隔离回退", ExpectedVersion: 1})
+}
+
+// decideApprovalOutcomeFixture 通过正式应用服务提交合成审批结果。
+// 参数：ctx 为测试请求，service 为真实服务，actor 为审批人，itemID 和 requestID 标识申请，
+// kind 为类型，decision 和 comment 为决定及意见，version 为待办的版本。
+// 返回值：实际审批错误，成功时为 nil。
+func decideApprovalOutcomeFixture(ctx context.Context, service application.Service, actor platform.Principal,
+	itemID, requestID, kind, decision, comment string, version uint64) error {
+	if kind == "CORRECTION" {
+		return service.DecideReportCorrection(ctx, actor, itemID, requestID,
+			domain.ReportCorrectionDecisionInput{Decision: decision, Comment: comment, ExpectedVersion: version})
+	}
+	return service.DecideRollback(ctx, actor, itemID, requestID,
+		domain.RollbackDecisionInput{Decision: decision, Comment: comment, ExpectedVersion: version})
+}
+
+// verifyApprovalOutcomeOutbox 核对同一申请只有一条投递给原申请人的终决通知。
+// 参数：t 为测试上下文，f 为隔离租户，requestID、kind、decision 为待核验的审批事实。
+// 返回值：无；接收人、审批结果、链接或条数不符时失败。
+func verifyApprovalOutcomeOutbox(t *testing.T, f rectifyingFixture, requestID, kind, decision string) {
+	var rows []notificationOutboxRecord
+	if err := f.db.Where("tenant_id=?", f.tenant).Find(&rows).Error; err != nil || len(rows) != 2 {
+		t.Fatalf("申请与终决通知共 %d 条，错误=%v", len(rows), err)
+	}
+	subject := map[string]string{"FIELD_TO_PREPARATION": "现场回退申请", "REPORT_TO_FIELD": "报告返工申请",
+		"CORRECTION": "报告更正申请"}[kind]
+	outcome := map[string]string{"APPROVED": "已通过", "REJECTED": "已驳回"}[decision]
+	for _, row := range rows {
+		var message domain.NotificationMessage
+		if err := json.Unmarshal(row.Payload, &message); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(message.EventType, "_"+decision) {
+			continue
+		}
+		if message.Title != subject+outcome || message.RecipientRole != "" ||
+			len(message.Recipients) != 1 || message.Recipients[0] != "manager" ||
+			message.TargetURL != "/project_management/approvals?request_id="+requestID {
+			t.Fatalf("终决通知=%+v", message)
+		}
+		return
+	}
+	t.Fatal("缺少预期终决通知")
 }

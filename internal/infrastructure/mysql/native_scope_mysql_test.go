@@ -117,13 +117,17 @@ func TestNativeScopeChangeMySQL(t *testing.T) {
 	if _, err = svc.DecideNativeScope(ctx, self, project.ID, changeID, decision); !errors.Is(err, application.ErrForbidden) {
 		t.Fatalf("self approval: %v", err)
 	}
+	var frozenCategory detectionCategoryRecord
+	if err := repo.db.First(&frozenCategory, "tenant_id=? AND category=?", tenant, category.Category).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err = repo.db.Model(&category).Update("required_codes", "CHANGED").Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err = svc.DecideNativeScope(ctx, director, project.ID, changeID, decision); !errors.Is(err, application.ErrConflict) {
 		t.Fatalf("catalog drift: %v", err)
 	}
-	if err = repo.db.Model(&category).Updates(map[string]any{"required_codes": "QA-QUAL", "updated_at": category.UpdatedAt}).Error; err != nil {
+	if err = repo.db.Model(&category).Updates(map[string]any{"required_codes": "QA-QUAL", "updated_at": frozenCategory.UpdatedAt}).Error; err != nil {
 		t.Fatal(err)
 	}
 	applied, err := svc.DecideNativeScope(ctx, director, project.ID, changeID, decision)
@@ -133,6 +137,7 @@ func TestNativeScopeChangeMySQL(t *testing.T) {
 	if _, err = svc.DecideNativeScope(ctx, director, project.ID, changeID, decision); err != nil {
 		t.Fatal(err)
 	}
+	assertNativeScopeNotification(t, repo, project, business.UserID, "项目范围变更申请已通过")
 	state, err = repo.ReadNativeScope(ctx, filter, project.ID)
 	if err != nil || state.ScopeVersion != 2 || state.ProjectVersion != 2 || len(state.ServiceItems) != 1 || state.ServiceItems[0].SourceServiceID != input.ServiceItems[0].SourceID || state.ServiceItems[0].Requirement != "新版范围" {
 		t.Fatalf("applied state=%+v err=%v", state, err)
