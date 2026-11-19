@@ -50,7 +50,7 @@ API 启动会检查迁移记录；待迁移时仍可能监听端口，`/readyz` 
 | `PM_HTTP_ADDR`、`MYSQL_DSN` | 默认监听 `:8082`；DSN 必填，应满足现有驱动时间解析约束。 |
 | `PLATFORM_BASE_URL`、应用/环境编码 | 平台授权、人员目录、审计等的基础边界；平台地址必须显式配置。Compose 内网覆盖与公开浏览器地址分开管理。 |
 | `OIDC_ISSUER`、Client、回调、租户、`OIDC_SESSION_ENCRYPTION_KEY_BASE64` | 必须配置独立浏览器 Client 和 32 字节 Base64 会话加密密钥；Secret 仅运行时注入。Cookie 默认 Secure，本地 HTTP 调试应按既有环境策略配置，不要在生产关闭安全属性。 |
-| `OIDC_AUTHORIZATION_REFRESH_INTERVAL` / `OIDC_AUTHORIZATION_MAX_STALE` | 默认 1m / 5m；写请求不能依靠只读陈旧授权继续执行。 |
+| `OIDC_AUTHORIZATION_REFRESH_INTERVAL` / `OIDC_AUTHORIZATION_MAX_STALE` | 默认 10s / 5m；写请求不能依靠只读陈旧授权继续执行。 |
 | `OIDC_SESSION_IDLE_TTL` / `OIDC_SESSION_ABSOLUTE_TTL` | 统一会话默认空闲 30m、绝对 8h（空闲 60s–24h，绝对必须大于空闲，非法时启动失败）。只有 `POST /api/v1/auth/activity` 推进空闲时间，普通请求仅更新 last_seen；旧 `OIDC_SESSION_TTL` 仅在新绝对键未设置时作为绝对期限兼容。 |
 | `PLATFORM_AUDIT_CLIENT_*`、授权目录同步配置 | 写审计使用机器客户端；授权目录同步须独立配置。当前内置授权目录版本为 8，平台生效角色/数据范围仍需核对。 |
 | `OWNER_DIRECTORY_ENABLED` 及目录机器客户端 | 启用并可达后才有平台人员/角色校验；缺失会阻断资质身份复核和相关选择、指派。 |
