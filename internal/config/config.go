@@ -32,6 +32,7 @@ type Config struct {
 	RunWorkerWithAPI               bool
 	Background                     BackgroundConfig
 	Snapshot                       ProjectSnapshotConfig
+	CRMProjectHistory              CRMProjectHistoryConfig
 	FieldCheckIn                   FieldCheckInConfig
 	// FieldIncompleteReasonGate 是现场完成"缺项说明"门禁的强度（BIZ-PROJECT-06）：
 	// ADVISORY 只记录不拒绝（存量升级过渡），ENFORCE 执行 422 拒绝（新装默认）。
@@ -336,6 +337,9 @@ func Load() (Config, error) {
 	}
 	c.ProductionEnvironment = IsProduction(os.Getenv("APP_ENV"), c.PlatformEnvironmentCode)
 	if err := c.loadFeatures(); err != nil {
+		return c, err
+	}
+	if err := c.loadCRMProjectHistory(); err != nil {
 		return c, err
 	}
 	return c, c.validate()

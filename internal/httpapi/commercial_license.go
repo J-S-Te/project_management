@@ -22,6 +22,7 @@ var commercialHistoryRoutes = map[string]bool{
 	"/internal/v1/contract-imports/capabilities":                            true,
 	"/internal/v1/contract-imports/project-bindings/:origin_import_item_id": true,
 	"/internal/v1/settlement/project-references/:projectID":                 true,
+	crmProjectHistoryPath:                                                   true,
 	"/internal/v1/dashboard/metrics/stream":                                 true,
 	"/internal/v1/dashboard/metrics":                                        true,
 	"/api/v1/service-items/:id/report-reviews/current":                      true,
