@@ -46,6 +46,18 @@ func setValidEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsAuthorizationRefreshToTenSeconds(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("OIDC_AUTHORIZATION_REFRESH_INTERVAL", "")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.OIDCAuthorizationRefresh != 10*time.Second {
+		t.Fatalf("OIDCAuthorizationRefresh = %v, want 10s", config.OIDCAuthorizationRefresh)
+	}
+}
+
 func TestLoadRequiresExplicitIssuer(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("OIDC_ISSUER", "")
