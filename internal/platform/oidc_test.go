@@ -171,6 +171,42 @@ func TestAuthorizationContextClientDecodesMetadata(t *testing.T) {
 	}
 }
 
+// TestAuthorizationContextClientAcceptsLegacyLoginIP 验证旧会话元数据兼容及响应的严格字段校验。
+// 参数：t 为测试上下文，平台授权响应由本地 HTTP 服务提供。
+// 返回值：无。
+func TestAuthorizationContextClientAcceptsLegacyLoginIP(t *testing.T) {
+	for _, field := range []string{"user_login_ip", "unknown_field"} {
+		t.Run(field, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				payload := struct {
+					AuthorizationContext
+					LoginIP string `json:"user_login_ip"`
+					Unknown string `json:"unknown_field,omitempty"`
+				}{
+					AuthorizationContext: validAuthorization(DataScope{RoleCode: "project_manager", ScopeType: "APPLICATION"}),
+					LoginIP:              "192.0.2.1",
+				}
+				if field == "unknown_field" {
+					payload.Unknown = "unexpected"
+				}
+				_ = json.NewEncoder(w).Encode(payload)
+			}))
+			defer server.Close()
+			value, err := NewHTTPAuthorizationContextClient(server.URL, server.Client()).
+				Resolve(context.Background(), "access-token")
+			if field == "unknown_field" {
+				if !errors.Is(err, ErrInvalidAuthorization) || !strings.Contains(err.Error(), field) {
+					t.Fatalf("unexpected field validation error=%v", err)
+				}
+				return
+			}
+			if err != nil || value.ApplicationCode != "project_management" || len(value.DataScopes) != 1 {
+				t.Fatalf("value=%+v error=%v", value, err)
+			}
+		})
+	}
+}
+
 type fakeOIDCStore struct {
 	legacyRowMu   sync.Mutex
 	legacyStateMu sync.Mutex

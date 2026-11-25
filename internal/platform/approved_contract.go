@@ -206,6 +206,11 @@ func (c *approvedContractClient) Get(ctx context.Context, contractID string) (Ap
 	return envelope.Data, nil
 }
 
+const maxApprovedContractServiceItemsResponseBytes = 16 << 20
+
+// GetServiceItems 读取已审批合同的完整服务范围，供项目按权威合同版本校验。
+// 参数：ctx 为请求上下文，contractID 为已审批合同的标识。
+// 返回值：合同版本与服务项清单；依赖拒绝、响应超限或无效时返回错误。
 func (c *approvedContractClient) GetServiceItems(ctx context.Context, contractID string) (ApprovedContractServiceCatalog, error) {
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
@@ -230,11 +235,20 @@ func (c *approvedContractClient) GetServiceItems(ctx context.Context, contractID
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
 		return ApprovedContractServiceCatalog{}, fmt.Errorf("contract approval service returned %d", response.StatusCode)
 	}
+	// 合同端按关联系统展开同一服务项，响应可能明显大于合同保存请求。
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxApprovedContractServiceItemsResponseBytes+1))
+	if err != nil {
+		return ApprovedContractServiceCatalog{}, fmt.Errorf("read approved contract service items: %w", err)
+	}
+	if len(body) > maxApprovedContractServiceItemsResponseBytes {
+		return ApprovedContractServiceCatalog{}, fmt.Errorf("approved contract service items response exceeds %d bytes",
+			maxApprovedContractServiceItemsResponseBytes)
+	}
 	var envelope struct {
 		Code string                         `json:"code"`
 		Data ApprovedContractServiceCatalog `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return ApprovedContractServiceCatalog{}, err
 	}
 	if envelope.Code != "OK" || strings.TrimSpace(envelope.Data.ContractID) == "" || envelope.Data.ServiceItems == nil {

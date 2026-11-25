@@ -27,6 +27,7 @@ type AuthorizationContext struct {
 	ClientID                   string      `json:"client_id"`
 	ApplicationCode            string      `json:"application_code"`
 	EnvironmentCode            string      `json:"environment_code"`
+	UserLoginIP                string      `json:"user_login_ip,omitempty"`
 	Roles                      []string    `json:"roles"`
 	Permissions                []string    `json:"permissions"`
 	DataScopes                 []DataScope `json:"data_scopes"`
