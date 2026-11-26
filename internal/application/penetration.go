@@ -13,6 +13,7 @@ import (
 )
 
 const penetrationCapabilityCode = "PENETRATION_TEST"
+const penetrationQualificationCode = "渗透测试工程师"
 
 type PenetrationWorkPackageRepository interface {
 	EnsurePenetrationWorkPackage(context.Context, string, domain.ServiceItem, string, string, time.Time) (domain.PenetrationWorkPackage, error)
@@ -111,6 +112,42 @@ func (s *Service) GetPenetrationWorkPackage(ctx context.Context, p platform.Prin
 		return domain.PenetrationWorkPackage{}, err
 	}
 	return repo.GetPenetrationWorkPackage(ctx, p.TenantID, itemID)
+}
+
+// FindPenetrationEngineerByUsername 按登录用户名精确查找当前专项可选人员。
+// 参数：ctx 为请求上下文，p 为当前会话，itemID 为等保服务项，username 为登录用户名。
+// 返回值：合格人员的平台用户 ID；无匹配时为空，目录或权限异常时返回错误。
+func (s *Service) FindPenetrationEngineerByUsername(ctx context.Context, p platform.Principal, itemID, username string) (string, error) {
+	item, err := s.penetrationParent(ctx, p, "project.implementation.plan", itemID)
+	if err != nil {
+		return "", err
+	}
+	if err := requireProjectManager(p, item); err != nil {
+		return "", err
+	}
+	username = strings.TrimSpace(username)
+	if username == "" || len(username) > 128 ||
+		strings.IndexFunc(username, func(r rune) bool { return r < 33 || r > 126 }) != -1 {
+		return "", ErrValidation
+	}
+	if s.Personnel == nil {
+		return "", ErrPersonnelUnavailable
+	}
+	page, err := s.Personnel.List(ctx, platform.OwnerDirectoryQuery{Username: username, Page: 1, PageSize: 2})
+	if err != nil || !page.UsernameMatch || page.Total > 1 || len(page.Items) > 1 {
+		return "", ErrPersonnelUnavailable
+	}
+	if len(page.Items) == 0 || page.Items[0].UserID == "" {
+		return "", nil
+	}
+	userID := page.Items[0].UserID
+	if err := s.validatePenetrationEngineers(ctx, p.TenantID, []string{userID}); err != nil {
+		if errors.Is(err, ErrPrecondition) {
+			return "", nil
+		}
+		return "", err
+	}
+	return userID, nil
 }
 
 func (s *Service) SavePenetrationDecision(ctx context.Context, p platform.Principal, itemID string, input domain.PenetrationDecisionInput) (domain.PenetrationWorkPackage, error) {
@@ -247,6 +284,9 @@ func scopeContained(testScope, authScope string) bool {
 	return true
 }
 
+// validatePenetrationEngineers 核对每位专项工程师的有效身份和渗透测试资质。
+// 参数：ctx 为请求上下文，tenantID 为认证租户，ids 为申请指派的人员标识。
+// 返回值：全部合格时为 nil，资质缺失时返回前置条件错误。
 func (s *Service) validatePenetrationEngineers(ctx context.Context, tenantID string, ids []string) error {
 	repo, err := s.deliveryRepo()
 	if err != nil {
@@ -264,14 +304,15 @@ func (s *Service) validatePenetrationEngineers(ctx context.Context, tenantID str
 				continue
 			}
 			for _, code := range capability.Codes {
-				if strings.EqualFold(strings.TrimSpace(code), penetrationCapabilityCode) {
+				normalized := normalizeCapabilityCode(code)
+				if normalized == penetrationCapabilityCode || normalized == penetrationQualificationCode {
 					qualified = true
 					break
 				}
 			}
 		}
 		if !qualified {
-			return PreconditionError(fmt.Sprintf("人员 %s 缺少有效的 PENETRATION_TEST 能力", candidate))
+			return PreconditionError(fmt.Sprintf("人员 %s 缺少有效的渗透测试资质", candidate))
 		}
 	}
 	return nil

@@ -35,10 +35,11 @@ type OwnerDirectoryUser struct {
 
 // OwnerDirectoryPage 是负责人目录的确定性分页结果。
 type OwnerDirectoryPage struct {
-	Items    []OwnerDirectoryUser `json:"items"`
-	Page     int                  `json:"page"`
-	PageSize int                  `json:"page_size"`
-	Total    int64                `json:"total"`
+	Items         []OwnerDirectoryUser `json:"items"`
+	Page          int                  `json:"page"`
+	PageSize      int                  `json:"page_size"`
+	Total         int64                `json:"total"`
+	UsernameMatch bool                 `json:"username_match,omitempty"`
 }
 
 // OwnerDirectoryQuery 过滤基础平台负责人目录。
@@ -50,6 +51,7 @@ type OwnerDirectoryPage struct {
 type OwnerDirectoryQuery struct {
 	Keyword     string
 	UserID      string
+	Username    string
 	RoleCodes   []string
 	RoleOrigins []string
 	Page        int
@@ -112,6 +114,9 @@ func (c *ownerDirectoryClient) List(ctx context.Context, query OwnerDirectoryQue
 	}
 	if userID := strings.TrimSpace(query.UserID); userID != "" {
 		values.Set("user_id", userID)
+	}
+	if username := strings.TrimSpace(query.Username); username != "" {
+		values.Set("username", username)
 	}
 	// 角色码与来源都以重复参数发送，与平台 /internal/owner-directory 的解析方式一致；空值和
 	// 重复值不进查询串，避免把"没有过滤"误写成"过滤空角色"。

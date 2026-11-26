@@ -49,6 +49,7 @@ var commercialHistoryRoutes = map[string]bool{
 	"/api/v1/projects/:id/supplement-contracts": true,
 	"/api/v1/projects/:id":                      true, "/api/v1/delivery-events": true, "/api/v1/delivery/sla-overdue": true,
 	"/api/v1/service-items": true, "/api/v1/service-items/:id/penetration-work-package": true,
+	"/api/v1" + penetrationEngineerUsernameRoute: true,
 	// PRJ-01：现场证据/缺项判定已下推服务端（BIZ-PROJECT-06），该接口只回读事件流推算
 	// 缺项，不写业务状态。漏分类会在许可到期只读期把它判成 MUTATE_BUSINESS，
 	// 前端 fail-closed 因而无法渲染"现场完成"前置条件。
