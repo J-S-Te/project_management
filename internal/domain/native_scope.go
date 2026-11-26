@@ -37,6 +37,9 @@ type NativeScopeChange struct {
 	ServiceItems           []ServiceItem `json:"service_items"`
 	CreatedAt              time.Time     `json:"created_at"`
 	DecidedAt              *time.Time    `json:"decided_at,omitempty"`
+
+	RequestedByDisplayName string `json:"requested_by_display_name,omitempty"`
+	RequestedByUserID      string `json:"-"`
 }
 
 type NativeScopeState struct {

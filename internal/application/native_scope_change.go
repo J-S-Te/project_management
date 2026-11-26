@@ -83,6 +83,10 @@ func (s *Service) ReadNativeScope(ctx context.Context, p platform.Principal, id 
 		return domain.NativeScopeState{}, err
 	}
 	state, err := repo.ReadNativeScope(ctx, filter, id)
+	if err != nil {
+		return domain.NativeScopeState{}, err
+	}
+	s.fillNativeScopeApplicantNames(ctx, p, state.Changes)
 	state.CanRequest = mayRequestNativeScope(p)
 	state.CanApprove = mayApproveNativeScope(p)
 	state.ActorID = p.IdentityID
