@@ -300,6 +300,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.GET("/service-items/:id/field-evidence", require("project.read"), h.getServiceItemFieldEvidence)
 	api.GET("/service-items", require("project.read"), h.listServiceItems)
 	api.GET("/service-items/:id/penetration-work-package", require("project.read"), h.getPenetrationWorkPackage)
+	api.GET(penetrationEngineerUsernameRoute, require("project.implementation.plan"), h.findPenetrationEngineerByUsername)
 	api.POST("/service-items/:id/penetration-work-package", require("project.implementation.plan"), h.ensurePenetrationWorkPackage)
 	api.PUT("/service-items/:id/penetration-work-package/decision", require("project.implementation.plan"), h.savePenetrationDecision)
 	api.PUT("/service-items/:id/penetration-work-package/plan", require("project.implementation.plan"), h.savePenetrationPlan)
@@ -1329,6 +1330,8 @@ func (h *Handler) listReportRevisions(c *gin.Context) {
 	writeData(c, http.StatusOK, items)
 }
 
+const penetrationEngineerUsernameRoute = "/service-items/:id/penetration-work-package/engineer-by-username"
+
 func idempotencyKey(c *gin.Context) string {
 	return strings.TrimSpace(c.GetHeader("Idempotency-Key"))
 }
@@ -1340,6 +1343,20 @@ func (h *Handler) getPenetrationWorkPackage(c *gin.Context) {
 		return
 	}
 	writeData(c, http.StatusOK, item)
+}
+
+// findPenetrationEngineerByUsername 返回当前专项可指派的账号对应人员。
+// 参数：c 为已认证请求，路由指定服务项，查询参数指定登录用户名。
+// 返回值：无；响应中的 user_id 为空表示没有匹配的合格人员。
+func (h *Handler) findPenetrationEngineerByUsername(c *gin.Context) {
+	userID, err := h.service.FindPenetrationEngineerByUsername(
+		c.Request.Context(), principal(c), c.Param("id"), c.Query("username"),
+	)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, gin.H{"user_id": userID})
 }
 
 func (h *Handler) ensurePenetrationWorkPackage(c *gin.Context) {

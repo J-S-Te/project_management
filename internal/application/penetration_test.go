@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 type penetrationRepositoryStub struct {
-	scopeRepository
+	capabilityRepository
 	item          domain.ServiceItem
 	workPackage   domain.PenetrationWorkPackage
 	executionCall domain.PenetrationExecutionInput
@@ -25,11 +26,27 @@ func (r *penetrationRepositoryStub) EnsurePenetrationWorkPackage(context.Context
 func (r *penetrationRepositoryStub) GetPenetrationWorkPackage(context.Context, string, string) (domain.PenetrationWorkPackage, error) {
 	return r.workPackage, nil
 }
+
+// FindCapabilities 返回测试人员档案，实际资格条件由服务层核对。
+// 参数：请求上下文和查询条件由测试用例固定。
+// 返回值：当前夹具的能力档案及错误。
+func (r *penetrationRepositoryStub) FindCapabilities(context.Context, string, string, []string) ([]domain.Capability, error) {
+	return r.capabilities, nil
+}
 func (r *penetrationRepositoryStub) SavePenetrationDecision(_ context.Context, _, _ string, input domain.PenetrationDecisionInput, _ string, _ time.Time) (domain.PenetrationWorkPackage, error) {
 	r.workPackage.DecisionStatus = input.DecisionStatus
 	return r.workPackage, nil
 }
-func (r *penetrationRepositoryStub) SavePenetrationPlan(context.Context, string, string, domain.PenetrationPlanInput, string, time.Time) (domain.PenetrationWorkPackage, error) {
+
+// SavePenetrationPlan 用于让执行校验读取本次保存的测试计划。
+// 参数：input 为测试计划，其他参数为夹具无需持久化的请求上下文。
+// 返回值：保存后的专项视图及错误。
+func (r *penetrationRepositoryStub) SavePenetrationPlan(_ context.Context, _, _ string, input domain.PenetrationPlanInput, _ string, _ time.Time) (domain.PenetrationWorkPackage, error) {
+	r.workPackage.EngineerIDs = input.EngineerIDs
+	r.workPackage.PlannedStart = input.PlannedStart
+	r.workPackage.PlannedEnd = input.PlannedEnd
+	r.workPackage.AuthStart = input.AuthStart
+	r.workPackage.AuthEnd = input.AuthEnd
 	return r.workPackage, nil
 }
 func (r *penetrationRepositoryStub) AdvancePenetrationExecution(_ context.Context, _, _ string, input domain.PenetrationExecutionInput, _ string, _ time.Time) (domain.PenetrationWorkPackage, error) {
@@ -119,5 +136,79 @@ func TestProjectManagerCanCancelWithPlanPermissionAndCommunicationRecord(t *test
 	}
 	if repo.executionCall.Action != "CANCEL" || result.DecisionStatus != "NOT_REQUIRED" || result.ExecutionStatus != "CANCELLED" {
 		t.Fatalf("call=%+v result=%+v", repo.executionCall, result)
+	}
+}
+
+// TestEmbeddedPenetrationPlanAcceptsPersonnelQualificationCodes 验证现场资质编码贯通保存和开始。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestEmbeddedPenetrationPlanAcceptsPersonnelQualificationCodes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	start, end := now.Add(-time.Hour).Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)
+	for _, code := range []string{"渗透测试工程师", " penetration_test "} {
+		t.Run(code, func(t *testing.T) {
+			repo := &penetrationRepositoryStub{
+				capabilityRepository: capabilityRepository{capabilities: []domain.Capability{{
+					ResourceType: "PERSON", ResourceID: "P-01", UserID: "eng-1",
+					Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive, Codes: []string{code},
+				}}},
+				item: domain.ServiceItem{ID: "SI-1", Category: "等保测评", ProjectManagerID: "pm-1"},
+			}
+			service := &Service{Repo: repo}
+			plan := domain.PenetrationPlanInput{
+				PlannedStart: start, PlannedEnd: end, AuthStart: start, AuthEnd: end,
+				AuthDocNo: "AUTH-1", AuthScope: "合成测试对象", TestScope: "合成测试对象",
+				TestWindow: "约定时段", EmergencyContact: "值班人员", RollbackPlan: "停止专项",
+				EngineerIDs: []string{"eng-1"}, IdempotencyKey: "plan-1",
+			}
+			if _, err := service.SavePenetrationPlan(ctx, penetrationPrincipal("pm-1", "project.implementation.plan"), "SI-1", plan); err != nil {
+				t.Fatalf("保存有效人员的专项计划: %v", err)
+			}
+			input := domain.PenetrationExecutionInput{Action: "START", IdempotencyKey: "start-1"}
+			if _, err := service.AdvancePenetrationExecution(ctx, penetrationPrincipal("eng-2", "project.field.execute"), "SI-1", input); !errors.Is(err, ErrForbidden) {
+				t.Fatalf("未指派人员不允许开始: %v", err)
+			}
+			if _, err := service.AdvancePenetrationExecution(ctx, penetrationPrincipal("eng-1", "project.field.execute"), "SI-1", input); err != nil {
+				t.Fatalf("已指派人员开始专项: %v", err)
+			}
+		})
+	}
+}
+
+// TestFindPenetrationEngineerByUsername 验证精确账号结果仍须通过经理权限和人员资质检查。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestFindPenetrationEngineerByUsername(t *testing.T) {
+	ctx := context.Background()
+	repo := &penetrationRepositoryStub{
+		capabilityRepository: capabilityRepository{capabilities: []domain.Capability{{
+			ResourceType: "PERSON", ResourceID: "P-01", UserID: "eng-1",
+			Status: "ACTIVE", IdentityStatus: domain.IdentityStatusActive,
+			Codes: []string{"渗透测试工程师"},
+		}}},
+		item: domain.ServiceItem{ID: "SI-1", Category: "等保测评", ProjectManagerID: "pm-1"},
+	}
+	directory := &personnelStub{page: platform.OwnerDirectoryPage{
+		UsernameMatch: true, Total: 1, Items: []platform.OwnerDirectoryUser{{UserID: "eng-1"}},
+	}}
+	service := &Service{Repo: repo, Personnel: directory}
+	manager := penetrationPrincipal("pm-1", "project.implementation.plan")
+	other := penetrationPrincipal("pm-2", "project.implementation.plan")
+	if _, err := service.FindPenetrationEngineerByUsername(ctx, other, "SI-1", "fixture_login"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("非当前项目经理: %v", err)
+	}
+	userID, err := service.FindPenetrationEngineerByUsername(ctx, manager, "SI-1", " fixture_login ")
+	if err != nil || userID != "eng-1" || directory.lastQuery.Username != "fixture_login" {
+		t.Fatalf("账号查询=%+v user=%q err=%v", directory.lastQuery, userID, err)
+	}
+	repo.capabilities[0].Status = "DISABLED"
+	userID, err = service.FindPenetrationEngineerByUsername(ctx, manager, "SI-1", "fixture_login")
+	if err != nil || userID != "" {
+		t.Fatalf("停用档案不应参与搜索: user=%q err=%v", userID, err)
+	}
+	directory.page.UsernameMatch = false
+	if _, err = service.FindPenetrationEngineerByUsername(ctx, manager, "SI-1", "fixture_login"); !errors.Is(err, ErrPersonnelUnavailable) {
+		t.Fatalf("旧目录的未过滤结果须拒绝: %v", err)
 	}
 }

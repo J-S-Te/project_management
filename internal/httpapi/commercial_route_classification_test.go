@@ -85,6 +85,7 @@ var registeredGETOperations = map[string]core.Operation{
 	"/api/v1/service-items":                                               core.READ_HISTORY,
 	"/api/v1/service-items/:id/field-evidence":                            core.READ_HISTORY,
 	"/api/v1/service-items/:id/penetration-work-package":                  core.READ_HISTORY,
+	"/api/v1" + penetrationEngineerUsernameRoute:                          core.READ_HISTORY,
 	"/api/v1/service-items/:id/penetration-work-package/report-revisions": core.READ_HISTORY,
 	"/api/v1/service-items/:id/report-revisions":                          core.READ_HISTORY,
 	"/api/v1/service-items/:id/equipment-reservations":                    core.READ_HISTORY,
