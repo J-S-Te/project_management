@@ -55,6 +55,7 @@ func (s *Service) ListApprovalTasks(ctx context.Context, p platform.Principal, q
 	if err := s.maskApprovalTaskSites(ctx, p, rows); err != nil {
 		return domain.ApprovalPage{}, err
 	}
+	s.fillApprovalApplicantNames(ctx, p, rows)
 	return domain.ApprovalPage{Items: rows, Total: total, Page: q.Page, PageSize: q.PageSize}, nil
 }
 

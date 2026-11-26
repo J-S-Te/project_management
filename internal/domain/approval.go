@@ -28,6 +28,9 @@ type ApprovalTask struct {
 	Severity          string    `json:"severity,omitempty"`
 	TargetURL         string    `json:"target_url,omitempty"`
 	DecisionType      string    `json:"-"`
+
+	RequesterDisplayName string `json:"requester_display_name,omitempty"`
+	RequesterDirectoryID string `json:"-" gorm:"-"`
 }
 
 type ApprovalQuery struct {

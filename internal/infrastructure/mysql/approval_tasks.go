@@ -59,6 +59,9 @@ func (r *Repository) ListApprovalTasks(ctx context.Context, filter platform.Scop
 	}
 	err := query.Order("created_at DESC, id DESC, type ASC").
 		Offset((q.Page - 1) * q.PageSize).Limit(q.PageSize).Scan(&rows).Error
+	if err == nil {
+		err = readApprovalNativeScopeApplicants(ctx, r.db, filter.TenantID, rows)
+	}
 	return rows, total, err
 }
 

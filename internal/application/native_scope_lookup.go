@@ -32,6 +32,7 @@ func (s *Service) ReadNativeScopeChange(
 	if err != nil {
 		return domain.NativeScopeState{}, err
 	}
+	s.fillNativeScopeApplicantNames(ctx, p, state.Changes)
 	state.CanRequest = mayRequestNativeScope(p)
 	state.CanApprove = mayApproveNativeScope(p)
 	state.ActorID = p.IdentityID

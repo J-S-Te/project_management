@@ -57,7 +57,7 @@ func (r *Repository) readNativeScope(
 			}
 			state.Changes = append(state.Changes, change)
 		}
-		return nil
+		return readNativeScopeApplicants(tx, filter.TenantID, state.Changes)
 	})
 	return state, err
 }
