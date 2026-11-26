@@ -206,6 +206,18 @@ func applyItemEvent(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryE
 			return err
 		}
 		updates["status"] = "待实施"
+	case application.EventFieldReturnedToPreparation:
+		if item.Status != domain.ProjectStatusInProgress {
+			return application.PreconditionError("仅可在实施中退回实施准备")
+		}
+		if expectedVersionValue(event.Payload) == 0 {
+			return application.ErrConflict
+		}
+		if err := closeOtherRollbacks(tx, item, event); err != nil {
+			return err
+		}
+		// 保留原现场证据和设备预约，后续仍可重新核验准备并开始实施。
+		updates["status"] = domain.ProjectStatusPreparing
 	case application.EventRollbackRequested:
 		return validateRollbackRequest(tx, item, event)
 	case application.EventRollbackRejected:

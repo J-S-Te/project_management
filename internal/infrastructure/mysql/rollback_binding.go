@@ -124,8 +124,8 @@ func validateRollbackDecision(tx *gorm.DB, item *serviceItemRecord, event domain
 	return deliveryEventRecord{}, application.ErrConflict
 }
 
-// closeOtherRollbacks 在批准回退时关闭历史遗留兄弟申请，保留自动失效的因果证据。
-// 参数：tx/item为原轮次事务，event为已核验的批准命令。
+// closeOtherRollbacks 在直接退回或批准回退时关闭同一服务项遗留的待审批申请。
+// 参数：tx/item 为原轮次事务，event 为已核验的直退或批准命令。
 // 返回值：任一事件或审计写入失败则整体回滚。
 func closeOtherRollbacks(tx *gorm.DB, item *serviceItemRecord, event domain.DeliveryEvent) error {
 	pending, err := pendingRollbacks(tx, item)

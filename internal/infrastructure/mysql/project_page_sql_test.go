@@ -149,7 +149,9 @@ func TestListServiceItemsPushesCountAndPaginationIntoSQL(t *testing.T) {
 	}
 }
 
-// 不分页（pageSize<=0）时保持全量口径：不下推 LIMIT，随后按本页 ID 集合补查计划/包。
+// TestListServiceItemsWithoutPaginationKeepsFullQueryAndLookups 检查全量列表没有外层分页。
+// 参数：t 为捕获查询的测试上下文。
+// 返回值：无；无结果页或意外外层分页时失败。
 func TestListServiceItemsWithoutPaginationKeepsFullQueryAndLookups(t *testing.T) {
 	db, capture := captureDB(t)
 	repository := NewRepository(db)
@@ -158,7 +160,9 @@ func TestListServiceItemsWithoutPaginationKeepsFullQueryAndLookups(t *testing.T)
 	if _, _, err := repository.ListServiceItems(context.Background(), filter, "", 0, 0); err != nil {
 		t.Fatalf("list service items unpaged: %v", err)
 	}
-	if strings.Contains(capture.queries[1], "LIMIT") || strings.Contains(capture.queries[1], "OFFSET") {
-		t.Fatalf("unpaged query must not carry LIMIT/OFFSET: %s", capture.queries[1])
+	// 事件子查询只需要最新标记；检查限制不得作用在外层服务项列表上。
+	_, tail, found := strings.Cut(capture.queries[1], "ORDER BY id")
+	if !found || strings.Contains(tail, "LIMIT") || strings.Contains(tail, "OFFSET") {
+		t.Fatalf("unpaged service item list must not carry outer LIMIT/OFFSET: %s", capture.queries[1])
 	}
 }

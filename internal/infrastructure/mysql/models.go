@@ -76,6 +76,8 @@ type serviceItemRecord struct {
 	ReportReviewedBy  string `gorm:"size:64;not null;default:''"`
 	ReportIssuedBy    string `gorm:"size:64;not null;default:''"`
 	Status            string `gorm:"size:32;not null"`
+	// PreparationConfirmed 是读模型别名，来源是交付事件而非服务项列。
+	PreparationConfirmed *bool `gorm:"->;-:migration"`
 	// StatusChangedAt 是服务项进入当前状态的时刻，SLA 的「状态停留时长」以此为准；
 	// 不能用 UpdatedAt——无关字段的更新会刷新它，导致计时被意外重置。
 	StatusChangedAt *time.Time
