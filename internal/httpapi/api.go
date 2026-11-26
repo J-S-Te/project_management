@@ -353,6 +353,7 @@ func NewRouter(service *application.Service, identity Identity, audit platform.A
 	api.POST("/service-items/:id/preparation", require("project.implementation.plan"), h.startPreparation)
 	api.POST("/service-items/:id/preparation/revoke", require("project.implementation.revoke"), h.revokePreparation)
 	api.POST("/service-items/:id/field-start", require("project.field.execute"), h.startFieldExecution)
+	api.POST("/service-items/:id/field-return", require("project.rollback.request"), h.returnFieldToPreparation)
 	api.POST("/service-items/:id/field-check-ins", require("project.field.execute"), h.checkInField)
 	api.POST("/service-items/:id/field-signatures", require("project.field.execute"), h.captureFieldSignature)
 	api.GET("/approval-tasks", require("project.read"), h.approvalTasks)
@@ -1833,6 +1834,22 @@ func (h *Handler) revokePreparation(c *gin.Context) {
 	}
 	writeData(c, http.StatusOK, map[string]string{"status": "待实施"})
 }
+
+// returnFieldToPreparation 处理现场实施直退并返回服务项最新阶段。
+// 参数：c 为已认证并通过写入门禁的直退请求。
+// 返回值：无；写入新的阶段或服务错误。
+func (h *Handler) returnFieldToPreparation(c *gin.Context) {
+	var input domain.PhaseRevokeInput
+	if !decode(c, &input) {
+		return
+	}
+	if err := h.service.ReturnFieldToPreparation(c.Request.Context(), principal(c), c.Param("id"), input); err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	writeData(c, http.StatusOK, map[string]string{"status": domain.ProjectStatusPreparing})
+}
+
 func (h *Handler) requestRollback(c *gin.Context) {
 	var input domain.RollbackRequestInput
 	if !decode(c, &input) {

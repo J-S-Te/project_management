@@ -196,7 +196,7 @@ type AssignmentRevokeInput struct {
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`
 }
 
-// PhaseRevokeInput 用于尚未进入现场的计划/准备补偿；原因与版本保证撤销可审计且不覆盖新状态。
+// PhaseRevokeInput 携带阶段撤销或现场直退的原因及服务项版本，供审计及并发校验。
 type PhaseRevokeInput struct {
 	Reason          string `json:"reason"`
 	ExpectedVersion uint64 `json:"expected_version,omitempty"`

@@ -7,6 +7,41 @@ import (
 	"strings"
 )
 
+// ReturnFieldToPreparation 将当前执行轮次的服务项直接退回实施准备。
+// 参数：ctx 为请求上下文，p 为已认证主体，itemID 为服务项编号，input 含退回原因及版本。
+// 返回值：成功时返回 nil；输入、授权、状态或并发冲突时返回相应业务错误。
+func (s *Service) ReturnFieldToPreparation(
+	ctx context.Context, p platform.Principal, itemID string, input domain.PhaseRevokeInput,
+) error {
+	reason := strings.TrimSpace(input.Reason)
+	if reason == "" {
+		return ValidationError("请填写退回实施准备的原因")
+	}
+	if err := validateProjectTextLength(reason, 1000, "退回原因"); err != nil {
+		return err
+	}
+	if input.ExpectedVersion == 0 {
+		return ValidationError("缺少服务项版本，请刷新后重试")
+	}
+	filter, err := authorizeProjectScope(p, "project.rollback.request")
+	if err != nil {
+		return err
+	}
+	item, err := s.Repo.GetServiceItem(ctx, filter, itemID)
+	if err != nil {
+		return err
+	}
+	if item.Version != input.ExpectedVersion {
+		return ErrConflict
+	}
+	if item.Status != domain.ProjectStatusInProgress {
+		return PreconditionError("仅可在实施中退回实施准备")
+	}
+	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventFieldReturnedToPreparation, map[string]any{
+		"reason": reason, "expected_version": input.ExpectedVersion,
+	}))
+}
+
 // rollbackKindAllowed 判断当前服务项是否允许申请或批准指定回退。
 // 参数：kind 为回退类型，item 为当前服务项状态快照。
 // 返回值：满足现场或报告回退白名单时返回 true，否则返回 false。

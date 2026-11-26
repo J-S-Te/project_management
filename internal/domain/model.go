@@ -89,6 +89,9 @@ type ServiceItem struct {
 	// Version 是服务项状态版本：每次状态变更自增。读取方据此识别自己拿到的是不是最新一版，
 	// 写入方可带上期望版本做条件更新（不匹配即 409 冲突），避免"后者静默覆盖前者"。
 	Version uint64 `json:"version"`
+
+	// PreparationConfirmed 仅在准备阶段有明确事件依据时区分待准备与待开始现场。
+	PreparationConfirmed *bool `json:"preparation_confirmed,omitempty"`
 }
 
 // ReportRevision 是不可变报告版本台账投影。更正后仍保留该行；

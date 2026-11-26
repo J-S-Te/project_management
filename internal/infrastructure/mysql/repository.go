@@ -330,7 +330,9 @@ func (r *Repository) createProjectRecord(tx *gorm.DB, item domain.Project) error
 // ListServiceItems 把租户/范围/项目过滤与分页下推到 SQL：COUNT 取 total、
 // LIMIT/OFFSET 只取本页记录（AUD-2026-028）。实施计划与渗透工作包两次 IN 补查
 // 原先是两次全表拉取，现只查本页 ID 集合；计划/包与状态派生都是服务项内部属性，
-// 仅按本页 ID 补齐与全量口径逐行一致。排序保持 id 升序不变。
+// 仅按本页 ID 补齐与全量口径逐行一致。准备节点与状态同一次读取。
+// 参数：ctx 为请求上下文，filter 为授权范围，projectID 和 page/pageSize 为筛选与分页。
+// 返回值：可见服务项、匹配总数和读取错误。
 func (r *Repository) ListServiceItems(ctx context.Context, filter platform.ScopeFilter, projectID string, page, pageSize int) ([]domain.ServiceItem, int, error) {
 	base := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
 	if projectID != "" {
@@ -340,7 +342,7 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	list := base.Session(&gorm.Session{}).Order("id")
+	list := withPreparationProjection(base.Session(&gorm.Session{})).Order("id")
 	if pageSize > 0 {
 		list = list.Offset(max(0, (page-1)*pageSize)).Limit(pageSize)
 	}
@@ -384,9 +386,14 @@ func (r *Repository) ListServiceItems(ctx context.Context, filter platform.Scope
 	}
 	return items, int(total), nil
 }
+
+// GetServiceItem 在同一快照读取授权范围内的服务项状态及准备节点。
+// 参数：ctx 为请求上下文，filter 为授权范围，id 为服务项编号。
+// 返回值：服务项，或不存在、范围不可见及读取失败的错误。
 func (r *Repository) GetServiceItem(ctx context.Context, filter platform.ScopeFilter, id string) (domain.ServiceItem, error) {
 	var record serviceItemRecord
-	err := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter).Where("pm_service_item.id = ?", id).First(&record).Error
+	query := applyServiceItemScope(r.db.WithContext(ctx).Model(&serviceItemRecord{}), r.db.WithContext(ctx), filter)
+	err := withPreparationProjection(query).Where("pm_service_item.id = ?", id).First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return domain.ServiceItem{}, application.ErrNotFound
 	}
@@ -988,8 +995,13 @@ func applyServiceItemScope(query, subqueryDB *gorm.DB, filter platform.ScopeFilt
 	projects := applyProjectScope(subqueryDB.Table("pm_project AS scope_project").Select("scope_project.id"), filter, "scope_project")
 	return query.Where("pm_service_item.tenant_id = ? AND pm_service_item.project_id IN (?)", filter.TenantID, projects)
 }
+
+// serviceFromRecord 将服务项持久字段与查询附带的准备节点映射为领域对象。
+// 参数：r 为服务项查询记录，按实际查询可含准备节点投影。
+// 返回值：对外服务项，缺失的准备节点保持未知。
 func serviceFromRecord(r serviceItemRecord) domain.ServiceItem {
 	item := domain.ServiceItem{TenantID: r.TenantID, ID: r.ID, ProjectID: r.ProjectID, SourceServiceID: r.SourceServiceID, Batch: r.Batch, Site: r.Site, SiteCode: r.SiteCode, Category: r.Category, Requirement: r.Requirement, System: r.System, SystemLevel: r.SystemLevel, SystemStandard: r.SystemStandard, Special: r.Special, TestMode: r.TestMode, TeamLeadID: r.TeamLeadID, ProjectManagerID: r.ProjectManagerID, ConflictStatus: r.ConflictStatus, TechReviewStatus: r.TechReviewStatus, TechReviewedBy: r.TechReviewedBy, TechReviewComment: r.TechReviewComment, ReportStatus: r.ReportStatus, ReportUpdatedBy: r.ReportUpdatedBy, ReportRevision: r.ReportRevision, ReportPreparedBy: r.ReportPreparedBy, ReportReviewedBy: r.ReportReviewedBy, ReportIssuedBy: r.ReportIssuedBy, Status: r.Status, Version: r.Version}
+	item.PreparationConfirmed = r.PreparationConfirmed
 	_ = json.Unmarshal(r.EngineerIDs, &item.EngineerIDs)
 	_ = json.Unmarshal(r.EquipmentIDs, &item.EquipmentIDs)
 	_ = json.Unmarshal(r.RequiredCodes, &item.RequiredCodes)

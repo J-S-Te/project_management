@@ -28,6 +28,7 @@ const (
 	EventPreparationStarted         = "PREPARATION_STARTED"
 	EventPreparationRevoked         = "PREPARATION_REVOKED"
 	EventFieldStarted               = "FIELD_STARTED"
+	EventFieldReturnedToPreparation = "FIELD_RETURNED_TO_PREPARATION"
 	EventFieldCheckedIn             = "FIELD_CHECKED_IN"
 	EventFieldRecordSubmitted       = "FIELD_RECORD_SUBMITTED"
 	EventFieldSignatureCaptured     = "FIELD_SIGNATURE_CAPTURED"
