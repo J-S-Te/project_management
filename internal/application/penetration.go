@@ -195,6 +195,9 @@ func (s *Service) SavePenetrationDecision(ctx context.Context, p platform.Princi
 	return repo.SavePenetrationDecision(ctx, p.TenantID, itemID, input, p.UserID, time.Now().UTC())
 }
 
+// 用途：保存附属专项的实施安排，允许后续补齐授权信息。
+// 参数：ctx 为请求上下文，p 为操作者，itemID 为父服务项，input 为计划表单。
+// 返回值：更新后的专项，或权限、计划校验、版本冲突错误。
 func (s *Service) SavePenetrationPlan(ctx context.Context, p platform.Principal, itemID string, input domain.PenetrationPlanInput) (domain.PenetrationWorkPackage, error) {
 	item, err := s.penetrationParent(ctx, p, "project.implementation.plan", itemID)
 	if err != nil {
@@ -206,7 +209,7 @@ func (s *Service) SavePenetrationPlan(ctx context.Context, p platform.Principal,
 	if err := validatePenetrationPlanTexts(input); err != nil {
 		return domain.PenetrationWorkPackage{}, err
 	}
-	start, end, authStart, authEnd, err := validateEmbeddedPenetrationPlan(input)
+	start, end, _, _, err := validateEmbeddedPenetrationPlan(input)
 	if err != nil {
 		return domain.PenetrationWorkPackage{}, err
 	}
@@ -228,9 +231,6 @@ func (s *Service) SavePenetrationPlan(ctx context.Context, p platform.Principal,
 	if len(conflicts) > 0 {
 		return domain.PenetrationWorkPackage{}, ConflictError("渗透测试工程师在计划时间内存在任务冲突：" + strings.Join(conflicts, "；"))
 	}
-	if start.Before(authStart) || end.After(authEnd) {
-		return domain.PenetrationWorkPackage{}, ValidationError("计划开展时间必须完整落在客户授权有效期内")
-	}
 	key, err := requireIdempotencyKey(input.IdempotencyKey)
 	if err != nil {
 		return domain.PenetrationWorkPackage{}, err
@@ -239,10 +239,41 @@ func (s *Service) SavePenetrationPlan(ctx context.Context, p platform.Principal,
 	return repo.SavePenetrationPlan(ctx, p.TenantID, itemID, input, p.UserID, time.Now().UTC())
 }
 
+// 用途：校验计划日期及当前已填写的授权范围和日期。
+// 参数：input 为计划表单，授权信息可留空。
+// 返回值：计划起止、授权起止及校验错误，未填的授权日期为零值。
 func validateEmbeddedPenetrationPlan(input domain.PenetrationPlanInput) (time.Time, time.Time, time.Time, time.Time, error) {
+	start, startErr := time.Parse(time.RFC3339, input.PlannedStart)
+	end, endErr := time.Parse(time.RFC3339, input.PlannedEnd)
+	if startErr != nil || endErr != nil || !end.After(start) {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("计划时间必须完整且结束时间晚于开始时间")
+	}
+	authStartText := strings.TrimSpace(input.AuthStart)
+	authEndText := strings.TrimSpace(input.AuthEnd)
+	authStart, authStartErr := time.Parse(time.RFC3339, authStartText)
+	authEnd, authEndErr := time.Parse(time.RFC3339, authEndText)
+	if (authStartText != "" && authStartErr != nil) || (authEndText != "" && authEndErr != nil) ||
+		(!authStart.IsZero() && !authEnd.IsZero() && !authEnd.After(authStart)) {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("授权日期必须有效，授权截止必须晚于授权生效")
+	}
+	if (!authStart.IsZero() && start.Before(authStart)) || (!authEnd.IsZero() && end.After(authEnd)) {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("计划开展时间必须完整落在客户授权有效期内")
+	}
+	if strings.TrimSpace(input.AuthScope) != "" && strings.TrimSpace(input.TestScope) != "" &&
+		!scopeContained(input.TestScope, input.AuthScope) {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("计划测试范围不得超出客户授权范围")
+	}
+	return start, end, authStart, authEnd, nil
+}
+
+// ValidatePenetrationExecutionPlan 用途：校验开始测试所需的完整计划及当前授权有效期。
+// 参数：plan 为已经保存的专项计划，now 为实际开始测试的时刻。
+// 返回值：用于冲突检查的计划起止时间，或禁止开始测试的原因。
+func ValidatePenetrationExecutionPlan(plan domain.PenetrationWorkPackage, now time.Time) (time.Time, time.Time, error) {
 	required := map[string]string{
-		"授权书编号": input.AuthDocNo, "授权范围": input.AuthScope, "计划测试范围": input.TestScope,
-		"测试时间窗": input.TestWindow, "应急联系人": input.EmergencyContact, "回滚方案": input.RollbackPlan,
+		"授权书编号": plan.AuthDocNo, "授权范围": plan.AuthScope, "计划测试范围": plan.TestScope,
+		"测试时间窗": plan.TestWindow, "应急联系人": plan.EmergencyContact, "回滚方案": plan.RollbackPlan,
+		"授权生效": plan.AuthStart, "授权截止": plan.AuthEnd,
 	}
 	missing := make([]string, 0)
 	for label, value := range required {
@@ -252,19 +283,19 @@ func validateEmbeddedPenetrationPlan(input domain.PenetrationPlanInput) (time.Ti
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("请补充渗透测试专项要素：" + strings.Join(missing, "、"))
+		return time.Time{}, time.Time{}, PreconditionError("开始测试前请补齐专项要素：" + strings.Join(missing, "、"))
 	}
-	start, e1 := time.Parse(time.RFC3339, input.PlannedStart)
-	end, e2 := time.Parse(time.RFC3339, input.PlannedEnd)
-	authStart, e3 := time.Parse(time.RFC3339, input.AuthStart)
-	authEnd, e4 := time.Parse(time.RFC3339, input.AuthEnd)
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !end.After(start) || !authEnd.After(authStart) {
-		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("计划时间和授权时间必须完整且结束时间晚于开始时间")
+	start, end, authStart, authEnd, err := validateEmbeddedPenetrationPlan(domain.PenetrationPlanInput{
+		PlannedStart: plan.PlannedStart, PlannedEnd: plan.PlannedEnd,
+		AuthStart: plan.AuthStart, AuthEnd: plan.AuthEnd, AuthScope: plan.AuthScope, TestScope: plan.TestScope,
+	})
+	if err != nil {
+		return time.Time{}, time.Time{}, err
 	}
-	if !scopeContained(input.TestScope, input.AuthScope) {
-		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, ValidationError("计划测试范围不得超出客户授权范围")
+	if now.Before(authStart) || now.After(authEnd) {
+		return time.Time{}, time.Time{}, PreconditionError("当前时间不在客户授权有效期内，不能开始渗透测试")
 	}
-	return start, end, authStart, authEnd, nil
+	return start, end, nil
 }
 
 func scopeContained(testScope, authScope string) bool {
@@ -318,6 +349,9 @@ func (s *Service) validatePenetrationEngineers(ctx context.Context, tenantID str
 	return nil
 }
 
+// 用途：由具备资格的人员开始、完成或取消附属专项。
+// 参数：ctx 为请求上下文，p 为操作者，itemID 为父服务项，input 为当前版本及执行动作。
+// 返回值：更新后的专项，或权限、授权、状态及版本错误。
 func (s *Service) AdvancePenetrationExecution(ctx context.Context, p platform.Principal, itemID string, input domain.PenetrationExecutionInput) (domain.PenetrationWorkPackage, error) {
 	input.Action = strings.ToUpper(strings.TrimSpace(input.Action))
 	if input.Action != "START" && input.Action != "COMPLETE" && input.Action != "CANCEL" {
@@ -362,19 +396,12 @@ func (s *Service) AdvancePenetrationExecution(ctx context.Context, p platform.Pr
 		return domain.PenetrationWorkPackage{}, ErrForbidden
 	}
 	if input.Action == "START" {
-		now := time.Now().UTC()
-		authStart, e1 := time.Parse(time.RFC3339, current.AuthStart)
-		authEnd, e2 := time.Parse(time.RFC3339, current.AuthEnd)
-		if e1 != nil || e2 != nil || now.Before(authStart) || now.After(authEnd) {
-			return domain.PenetrationWorkPackage{}, PreconditionError("当前时间不在客户授权有效期内，不能开始渗透测试")
+		plannedStart, plannedEnd, planErr := ValidatePenetrationExecutionPlan(current, time.Now().UTC())
+		if planErr != nil {
+			return domain.PenetrationWorkPackage{}, planErr
 		}
 		if err = s.validatePenetrationEngineers(ctx, p.TenantID, current.EngineerIDs); err != nil {
 			return domain.PenetrationWorkPackage{}, err
-		}
-		plannedStart, e3 := time.Parse(time.RFC3339, current.PlannedStart)
-		plannedEnd, e4 := time.Parse(time.RFC3339, current.PlannedEnd)
-		if e3 != nil || e4 != nil {
-			return domain.PenetrationWorkPackage{}, PreconditionError("专项计划时间不完整，不能开始渗透测试")
 		}
 		conflicts, conflictErr := repo.ListPenetrationPersonnelConflicts(ctx, p.TenantID, itemID, current.EngineerIDs, plannedStart, plannedEnd)
 		if conflictErr != nil {

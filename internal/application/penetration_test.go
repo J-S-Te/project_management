@@ -3,12 +3,52 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/j-s-te/project-management/internal/domain"
 	"github.com/j-s-te/project-management/internal/platform"
 )
+
+// 用途：验证授权信息可以留空保存，且错误的已填日期仍会被拒绝。
+// 参数：t 为测试上下文。
+// 返回值：无；校验不符时使测试失败。
+func TestEmbeddedPenetrationPlanAllowsBlankAuthorizationOnSave(t *testing.T) {
+	input := domain.PenetrationPlanInput{
+		PlannedStart: "2026-11-27T01:00:00Z", PlannedEnd: "2026-11-27T02:00:00Z",
+	}
+	if _, _, _, _, err := validateEmbeddedPenetrationPlan(input); err != nil {
+		t.Fatalf("未填写授权信息的专项计划应允许保存：%v", err)
+	}
+	input.AuthStart = "invalid"
+	if _, _, _, _, err := validateEmbeddedPenetrationPlan(input); err == nil {
+		t.Fatal("已填写的授权日期仍须通过校验")
+	}
+}
+
+// 用途：验证授权时间已填但其他信息未填时，无法开始测试。
+// 参数：t 为测试上下文。
+// 返回值：无；开始动作被转发或错误提示不符时使测试失败。
+func TestEmbeddedPenetrationStartRequiresAllAuthorizationDetails(t *testing.T) {
+	now := time.Now().UTC()
+	start, end := now.Add(-time.Hour).Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)
+	repo := &penetrationRepositoryStub{
+		item: domain.ServiceItem{ID: "SI-1", Category: "等保测评", TestMode: "STANDARD"},
+		workPackage: domain.PenetrationWorkPackage{
+			EngineerIDs: []string{"engineer"}, AuthStart: start, AuthEnd: end,
+			PlannedStart: start, PlannedEnd: end, DecisionStatus: "REQUIRED",
+			ExecutionStatus: "NOT_STARTED", Version: 1,
+		},
+	}
+	service := &Service{Repo: repo}
+	_, err := service.AdvancePenetrationExecution(context.Background(),
+		penetrationPrincipal("engineer", "project.field.execute"), "SI-1",
+		domain.PenetrationExecutionInput{Action: "START", ExpectedVersion: 1, IdempotencyKey: "start-1"})
+	if err == nil || !strings.Contains(err.Error(), "授权书编号") || repo.executionCall.Action != "" {
+		t.Fatalf("授权信息未完善应阻止开始并提示缺项，实际错误：%v", err)
+	}
+}
 
 type penetrationRepositoryStub struct {
 	capabilityRepository
@@ -47,6 +87,12 @@ func (r *penetrationRepositoryStub) SavePenetrationPlan(_ context.Context, _, _ 
 	r.workPackage.PlannedEnd = input.PlannedEnd
 	r.workPackage.AuthStart = input.AuthStart
 	r.workPackage.AuthEnd = input.AuthEnd
+	r.workPackage.AuthDocNo = input.AuthDocNo
+	r.workPackage.AuthScope = input.AuthScope
+	r.workPackage.TestScope = input.TestScope
+	r.workPackage.TestWindow = input.TestWindow
+	r.workPackage.EmergencyContact = input.EmergencyContact
+	r.workPackage.RollbackPlan = input.RollbackPlan
 	return r.workPackage, nil
 }
 func (r *penetrationRepositoryStub) AdvancePenetrationExecution(_ context.Context, _, _ string, input domain.PenetrationExecutionInput, _ string, _ time.Time) (domain.PenetrationWorkPackage, error) {

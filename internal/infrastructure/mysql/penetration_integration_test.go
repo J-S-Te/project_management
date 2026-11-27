@@ -22,6 +22,21 @@ const penetrationIntegrationTenant = "PM-PENETRATION-TEST-TENANT"
 // 参数：t 为测试上下文；需要明确隔离的 PM_TEST_DSN。
 // 返回值：无；角色、状态或业务门禁不符时测试失败。
 func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
+	runEmbeddedPenetrationLifecycle(t, true)
+}
+
+// TestEmbeddedPenetrationOptionalAuthorizationAgainstRealDatabase 验证专项授权可分阶段填写。
+// 参数：t 为测试上下文；需要明确隔离的 PM_TEST_DSN。
+// 返回值：无；空授权未保存、未拦截开始或补齐后无法实施时测试失败。
+func TestEmbeddedPenetrationOptionalAuthorizationAgainstRealDatabase(t *testing.T) {
+	runEmbeddedPenetrationLifecycle(t, false)
+}
+
+// 用途：复用专项计划和实施的真实数据库场景。
+// 参数：t 为测试上下文，verifyReport 表示是否继续验证报告流程。
+// 返回值：无；任一业务步骤未符合预期时测试失败。
+func runEmbeddedPenetrationLifecycle(t *testing.T, verifyReport bool) {
+	t.Helper()
 	dsn := os.Getenv("PM_TEST_DSN")
 	if dsn == "" {
 		t.Skip("set PM_TEST_DSN to run the embedded penetration lifecycle integration check")
@@ -91,6 +106,20 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record decision: %v", err)
 	}
+	if !verifyReport {
+		workPackage, err = repository.SavePenetrationPlan(ctx, penetrationIntegrationTenant, item.ID, domain.PenetrationPlanInput{
+			PlannedStart: now.Add(-time.Hour).Format(time.RFC3339), PlannedEnd: now.Add(time.Hour).Format(time.RFC3339),
+			EngineerIDs: []string{"engineer-1"}, ExpectedVersion: workPackage.Version, IdempotencyKey: "plan-incomplete",
+		}, "pm-1", now)
+		if err != nil || workPackage.AuthStart != "" || workPackage.AuthEnd != "" {
+			t.Fatalf("未填写授权日期的计划应保留空日期：%+v，错误：%v", workPackage, err)
+		}
+		if _, err = repository.AdvancePenetrationExecution(ctx, penetrationIntegrationTenant, item.ID, domain.PenetrationExecutionInput{
+			Action: "START", ExpectedVersion: workPackage.Version, IdempotencyKey: "start-incomplete",
+		}, "engineer-1", now); !errors.Is(err, application.ErrPrecondition) {
+			t.Fatalf("未补齐授权的计划不能推进执行状态，错误：%v", err)
+		}
+	}
 	workPackage, err = repository.SavePenetrationPlan(ctx, penetrationIntegrationTenant, item.ID, domain.PenetrationPlanInput{
 		PlannedStart: now.Add(-time.Hour).Format(time.RFC3339), PlannedEnd: now.Add(time.Hour).Format(time.RFC3339), EngineerIDs: []string{"engineer-1"},
 		AuthDocNo: "AUTH-1", AuthStart: now.Add(-2 * time.Hour).Format(time.RFC3339), AuthEnd: now.Add(2 * time.Hour).Format(time.RFC3339),
@@ -114,6 +143,9 @@ func TestEmbeddedPenetrationLifecycleAgainstRealDatabase(t *testing.T) {
 	}
 	if err = apply("pm-1", application.EventFieldCompleted, fieldCompletion); err != nil {
 		t.Fatalf("completed package should allow parent field completion: %v", err)
+	}
+	if !verifyReport {
+		return
 	}
 
 	workPackage, err = repository.AdvancePenetrationReport(ctx, penetrationIntegrationTenant, item.ID, domain.PenetrationReportStatusInput{
