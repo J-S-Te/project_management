@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// PlanImplementation 用途：校验并发布单个服务项的实施计划。
+// 参数：ctx 为请求上下文，p 为操作主体，itemID 为服务项编号，input 为计划和人员清单。
+// 返回值：前置条件、人员范围校验或发布失败时返回错误。
 func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, itemID string, input domain.ImplementationPlanInput) error {
 	filter, err := authorizeProjectScope(p, "project.implementation.plan")
 	if err != nil {
@@ -51,12 +54,16 @@ func (s *Service) PlanImplementation(ctx context.Context, p platform.Principal, 
 			return err
 		}
 	}
-	personnel, err := s.resolvePlanPersonnel(ctx, repo, p.TenantID, input.Personnel, start, end)
+	personnel, err := s.resolvePlanPersonnel(ctx, repo, p.TenantID, item, input.Personnel, start, end)
 	if err != nil {
 		return err
 	}
+	expectedVersion := input.ExpectedVersion
+	if expectedVersion == 0 {
+		expectedVersion = item.Version
+	}
 	return s.applyEvent(ctx, deliveryEvent(p, "", itemID, EventImplementationPlanned, map[string]any{
-		"expected_version":      input.ExpectedVersion,
+		"expected_version":      expectedVersion,
 		"planned_start":         input.PlannedStart,
 		"planned_end":           input.PlannedEnd,
 		"site_plan":             input.SitePlan,

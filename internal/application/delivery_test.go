@@ -292,7 +292,8 @@ func TestResolvePlanPersonnelValidatesCrewAndSnapshotsQualifications(t *testing.
 	start := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
 
-	resources, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", []domain.PlanResourceInput{
+	item := domain.ServiceItem{EngineerIDs: []string{"P-001", "P-002"}}
+	resources, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", item, []domain.PlanResourceInput{
 		{ResourceType: "person", ResourceID: "P-001"},
 		{ResourceType: "PERSON", ResourceID: "P-002", WindowStart: "2026-08-10", WindowEnd: "2026-08-15", Note: "备份"},
 	}, start, end)
@@ -325,6 +326,7 @@ func TestResolvePlanPersonnelRejectsInvalidCrew(t *testing.T) {
 	start := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
 	person := domain.PlanResourceInput{ResourceType: "PERSON", ResourceID: "P-001"}
+	item := domain.ServiceItem{EngineerIDs: []string{"P-001", "P-002", "P-003"}}
 
 	cases := []struct {
 		name     string
@@ -342,15 +344,60 @@ func TestResolvePlanPersonnelRejectsInvalidCrew(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", tc.rows, start, end)
+			_, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", item, tc.rows, start, end)
 			if err == nil || !strings.Contains(err.Error(), tc.expected) {
 				t.Fatalf("error=%v, want contains %q", err, tc.expected)
 			}
 		})
 	}
-	resources, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-003", WindowStart: "2026-08-10", WindowEnd: "2026-08-20"}}, start, end)
+	resources, err := service.resolvePlanPersonnel(context.Background(), repo, "tenant-1", item, []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "P-003", WindowStart: "2026-08-10", WindowEnd: "2026-08-20"}}, start, end)
 	if err != nil || len(resources) != 1 {
 		t.Fatalf("expired personnel qualification must remain assignable: resources=%+v err=%v", resources, err)
+	}
+}
+
+// TestPlanImplementationAcceptsOnlyCurrentItemAssignees 验证同项目的其他服务项人员不能混入计划。
+// 参数：t 为 Go 测试上下文。
+// 返回值：无。
+func TestPlanImplementationAcceptsOnlyCurrentItemAssignees(t *testing.T) {
+	repo := &assignmentRevokeRepository{
+		capabilityRepository: capabilityRepository{capabilities: []domain.Capability{
+			{ResourceType: "PERSON", ResourceID: "profile-a", UserID: "engineer-a", Status: "ACTIVE"},
+			{ResourceType: "PERSON", ResourceID: "profile-b", UserID: "engineer-b", Status: "ACTIVE"},
+		}},
+		item: domain.ServiceItem{ID: "item-a", ProjectID: "shared-project", Version: 7,
+			Status: "待分配", ConflictStatus: "PASSED", TeamLeadID: "lead", ProjectManagerID: "manager", EngineerIDs: []string{"engineer-a"}},
+	}
+	service := &Service{Repo: repo}
+	principal := reportCorrectionPrincipal("manager", "project.implementation.plan")
+	input := domain.ImplementationPlanInput{ExpectedVersion: 7,
+		PlannedStart: "2026-11-27T09:00:00+08:00", PlannedEnd: "2026-11-27T18:00:00+08:00",
+		Personnel: []domain.PlanResourceInput{{ResourceType: "PERSON", ResourceID: "profile-b"}},
+	}
+	if err := service.PlanImplementation(context.Background(), principal, "item-a", input); !errors.Is(err, ErrValidation) || len(repo.events) != 0 {
+		t.Fatalf("跨服务项人员应被拒绝且不写事件，err=%v events=%d", err, len(repo.events))
+	}
+	input.Personnel[0].ResourceID = "engineer-a"
+	input.Personnel = append(input.Personnel, domain.PlanResourceInput{ResourceType: "PERSON", ResourceID: "profile-a"})
+	if err := service.PlanImplementation(context.Background(), principal, "item-a", input); !errors.Is(err, ErrValidation) || len(repo.events) != 0 {
+		t.Fatalf("同一人员使用两个编号应被拒绝且不写事件，err=%v events=%d", err, len(repo.events))
+	}
+	input.Personnel = input.Personnel[:1]
+	if err := service.PlanImplementation(context.Background(), principal, "item-a", input); err != nil {
+		t.Fatalf("按平台用户 ID 提交本项工程师失败: %v", err)
+	}
+	repo.item.ID, repo.item.EngineerIDs = "item-b", []string{"engineer-b"}
+	input.ExpectedVersion = 0
+	input.Personnel[0].ResourceID = "profile-b"
+	if err := service.PlanImplementation(context.Background(), principal, "item-b", input); err != nil {
+		t.Fatalf("按资质档案 ID 提交本项工程师失败: %v", err)
+	}
+	for i, want := range []struct{ item, profile string }{{"item-a", "profile-a"}, {"item-b", "profile-b"}} {
+		event := repo.events[i]
+		rows := event.Payload["personnel"].([]domain.PlanResource)
+		if event.ServiceItemID != want.item || event.Payload["expected_version"] != uint64(7) || len(rows) != 1 || rows[0].ResourceID != want.profile {
+			t.Fatalf("服务项 %s 的计划事件包含错误名单: %+v", want.item, event)
+		}
 	}
 }
 

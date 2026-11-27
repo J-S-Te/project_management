@@ -9,34 +9,55 @@ import (
 	"time"
 )
 
-// resolvePlanPersonnel 把实施计划提交的人员行解析成带快照的清单行。
-// 规则：至少一名人员；每一行都必须命中本租户有效的能力档案且类型为人员；
-// 同一资源不得重复；使用时段必须落在计划起止内。人员资质不受日期有效期限制。
-func (s *Service) resolvePlanPersonnel(ctx context.Context, repo DeliveryRepository, tenantID string, inputs []domain.PlanResourceInput, planStart, planEnd time.Time) ([]domain.PlanResource, error) {
+// 用途：把当前服务项已分配人员解析成实施计划清单快照。
+// 参数：ctx 为请求上下文，repo 为交付仓储，tenantID 为租户，item 为当前服务项，
+//
+//	inputs 为选择的人员，planStart 和 planEnd 为计划窗口。
+//
+// 返回值：快照清单；空选、跨服务项、重复、无效档案或超出计划窗口时返回错误。
+func (s *Service) resolvePlanPersonnel(ctx context.Context, repo DeliveryRepository, tenantID string, item domain.ServiceItem, inputs []domain.PlanResourceInput, planStart, planEnd time.Time) ([]domain.PlanResource, error) {
 	if len(inputs) == 0 {
 		return nil, ValidationError("请至少添加一名实施人员")
 	}
-	known, err := repo.ListCapabilities(ctx, tenantID, "")
+	known, err := repo.ListCapabilities(ctx, tenantID, "PERSON")
 	if err != nil {
 		return nil, err
 	}
 	byResourceID := make(map[string]domain.Capability, len(known))
+	byUserID := make(map[string]domain.Capability)
 	for _, capability := range known {
+		if capability.ResourceType != "PERSON" {
+			continue
+		}
 		byResourceID[capability.ResourceID] = capability
-		if capability.ResourceType == "PERSON" && strings.TrimSpace(capability.UserID) != "" {
-			byResourceID[strings.TrimSpace(capability.UserID)] = capability
+		if userID := strings.TrimSpace(capability.UserID); userID != "" {
+			byUserID[userID] = capability
 		}
 	}
 	resources := make([]domain.PlanResource, 0, len(inputs))
 	seen := make(map[string]struct{}, len(inputs))
+	assigned := append([]string{item.TeamLeadID, item.ProjectManagerID}, item.EngineerIDs...)
 	for index, input := range inputs {
 		line := fmt.Sprintf("第 %d 行", index+1)
 		if strings.EqualFold(strings.TrimSpace(input.ResourceType), "EQUIPMENT") {
 			return nil, ValidationError(line + "：设备清单在「实施准备」中维护，实施计划只提交人员")
 		}
+		resourceID := strings.TrimSpace(input.ResourceID)
+		capability, found := byResourceID[resourceID]
+		if !found {
+			capability = byUserID[resourceID]
+		}
+		if capability.ResourceType == "PERSON" {
+			// 以档案编号去重，兼容旧计划的档案编号和任务分配的平台用户编号。
+			input.ResourceID = capability.ResourceID
+		}
 		row, err := s.buildPlanResource(byResourceID, input, "PERSON", planStart, planEnd, seen)
 		if err != nil {
 			return nil, ValidationError(line + "：" + err.Error())
+		}
+		userID := strings.TrimSpace(capability.UserID)
+		if !containsString(assigned, row.ResourceID) && (userID == "" || !containsString(assigned, userID)) {
+			return nil, ValidationError(line + "：实施人员必须来自当前服务项已分配人员")
 		}
 		resources = append(resources, row)
 	}
