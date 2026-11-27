@@ -1771,13 +1771,14 @@ func (stub ownerDirectoryStub) List(_ context.Context, query platform.OwnerDirec
 	return platform.OwnerDirectoryPage{Items: []platform.OwnerDirectoryUser{{UserID: query.UserID, DisplayName: display}}}, nil
 }
 
-// 现场实施计划必须携带人员与设备清单：清单随事件载荷下发给仓储层，
-// 快照字段由服务端从能力档案解析，浏览器只提交资源标识与使用时段。
+// TestImplementationPlanCarriesResolvedPersonnel 用途：验证发布时保存当前服务项人员的资质快照。
+// 参数：t 为 Go 测试上下文。
+// 返回值：无。
 func TestImplementationPlanCarriesResolvedPersonnel(t *testing.T) {
 	repository := &repo{
-		items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配", ProjectManagerID: "pm-1", ConflictStatus: "PASSED"}},
+		items: []domain.ServiceItem{{ID: "SI-1", Status: "待分配", ProjectManagerID: "pm-1", ConflictStatus: "PASSED", EngineerIDs: []string{"engineer-1"}}},
 		capabilities: []domain.Capability{
-			{ResourceType: "PERSON", ResourceID: "P-001", ResourceName: "王明", Codes: []string{"CISP-PTE"}, Status: "ACTIVE", ValidUntil: time.Date(2027, 6, 30, 0, 0, 0, 0, time.UTC)},
+			{ResourceType: "PERSON", ResourceID: "P-001", UserID: "engineer-1", ResourceName: "王明", Codes: []string{"CISP-PTE"}, Status: "ACTIVE", ValidUntil: time.Date(2027, 6, 30, 0, 0, 0, 0, time.UTC)},
 			{ResourceType: "EQUIPMENT", ResourceID: "EQ-001", ResourceName: "无线测试套件", Codes: []string{"802.11 a/b/g/n/ac"}, Status: "ACTIVE"},
 		},
 	}
