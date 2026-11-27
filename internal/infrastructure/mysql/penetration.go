@@ -162,6 +162,9 @@ func (r *Repository) SavePenetrationDecision(ctx context.Context, tenantID, item
 	return r.GetPenetrationWorkPackage(ctx, tenantID, itemID)
 }
 
+// SavePenetrationPlan 用途：持久化专项计划，未填写的授权日期写为 NULL。
+// 参数：ctx 为事务上下文，tenantID/itemID 为专项范围，input 为计划表单，actor/now 为操作人及时刻。
+// 返回值：更新后的专项，或状态、版本及存储错误。
 func (r *Repository) SavePenetrationPlan(ctx context.Context, tenantID, itemID string, input domain.PenetrationPlanInput, actor string, now time.Time) (domain.PenetrationWorkPackage, error) {
 	err := r.mutatePenetrationPackage(ctx, tenantID, itemID, input.ExpectedVersion, input.IdempotencyKey, "PLAN_SAVED", actor, input, now, func(_ *gorm.DB, row *penetrationWorkPackageRecord) (map[string]any, error) {
 		if row.DecisionStatus != "REQUIRED" || (row.ExecutionStatus != "NOT_STARTED" && row.ExecutionStatus != "CANCELLED") {
@@ -169,11 +172,11 @@ func (r *Repository) SavePenetrationPlan(ctx context.Context, tenantID, itemID s
 		}
 		plannedStart, _ := time.Parse(time.RFC3339, input.PlannedStart)
 		plannedEnd, _ := time.Parse(time.RFC3339, input.PlannedEnd)
-		authStart, _ := time.Parse(time.RFC3339, input.AuthStart)
-		authEnd, _ := time.Parse(time.RFC3339, input.AuthEnd)
+		authStart, _ := time.Parse(time.RFC3339, strings.TrimSpace(input.AuthStart))
+		authEnd, _ := time.Parse(time.RFC3339, strings.TrimSpace(input.AuthEnd))
 		return map[string]any{
 			"planned_start": plannedStart, "planned_end": plannedEnd, "engineer_ids": jsonValue(input.EngineerIDs),
-			"auth_doc_no": strings.TrimSpace(input.AuthDocNo), "auth_start": authStart, "auth_end": authEnd,
+			"auth_doc_no": strings.TrimSpace(input.AuthDocNo), "auth_start": timePtr(authStart), "auth_end": timePtr(authEnd),
 			"auth_scope": strings.TrimSpace(input.AuthScope), "test_scope": strings.TrimSpace(input.TestScope),
 			"test_window": strings.TrimSpace(input.TestWindow), "emergency_contact": strings.TrimSpace(input.EmergencyContact),
 			"rollback_plan": strings.TrimSpace(input.RollbackPlan), "execution_status": "NOT_STARTED",
@@ -185,13 +188,19 @@ func (r *Repository) SavePenetrationPlan(ctx context.Context, tenantID, itemID s
 	return r.GetPenetrationWorkPackage(ctx, tenantID, itemID)
 }
 
+// AdvancePenetrationExecution 用途：在版本锁内推进专项执行状态并复核开始条件。
+// 参数：ctx 为事务上下文，tenantID/itemID 为专项范围，input 为执行命令，actor/now 为操作人及时刻。
+// 返回值：更新后的专项，或状态、授权、版本及存储错误。
 func (r *Repository) AdvancePenetrationExecution(ctx context.Context, tenantID, itemID string, input domain.PenetrationExecutionInput, actor string, now time.Time) (domain.PenetrationWorkPackage, error) {
 	eventType := "EXECUTION_" + input.Action
 	err := r.mutatePenetrationPackage(ctx, tenantID, itemID, input.ExpectedVersion, input.IdempotencyKey, eventType, actor, input, now, func(_ *gorm.DB, row *penetrationWorkPackageRecord) (map[string]any, error) {
 		switch input.Action {
 		case "START":
-			if row.DecisionStatus != "REQUIRED" || row.ExecutionStatus != "NOT_STARTED" || row.PlannedStart == nil || row.AuthStart == nil {
+			if row.DecisionStatus != "REQUIRED" || row.ExecutionStatus != "NOT_STARTED" {
 				return nil, application.PreconditionError("专项尚未完成开展确认、授权和计划，不能开始")
+			}
+			if _, _, err := application.ValidatePenetrationExecutionPlan(penetrationWorkPackageFromRecord(*row), now); err != nil {
+				return nil, err
 			}
 			return map[string]any{"execution_status": "IN_PROGRESS"}, nil
 		case "COMPLETE":
